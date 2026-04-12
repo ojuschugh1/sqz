@@ -26,16 +26,17 @@
 
     // Remove ChatGPT's auto-generated file attachments from pasted text
     // DOM: div[role="group"] with class containing "file-tile"
+    // Close button: aria-label starts with "Remove file"
     try {
-      // Target the file tile containers
       var fileTiles = document.querySelectorAll(
         'div[role="group"][class*="file-tile"], ' +
         '[class*="group/file"], [class*="file-tile"], [class*="file_tile"]'
       );
       fileTiles.forEach(function(tile) {
-        // The close button is inside a nested div with data-default-action="true"
-        // Its aria-label contains the file name, not "Remove"
+        // Primary: aria-label starts with "Remove file" (ChatGPT's exact pattern)
         var closeBtn = tile.querySelector(
+          'button[aria-label^="Remove file"], ' +
+          'button[class*="interactive-bg-primary"][aria-label*="Remove"], ' +
           'button[class*="interactive-bg-secondary"], ' +
           'button[aria-label*="Remove"], button[aria-label*="remove"], ' +
           'button[aria-label*="Delete"], button[aria-label*="Close"]'
@@ -43,13 +44,7 @@
         if (closeBtn) {
           closeBtn.click();
         } else {
-          // Try clicking any button inside the tile as fallback
-          var anyBtn = tile.querySelector('button');
-          if (anyBtn) {
-            anyBtn.click();
-          } else {
-            tile.remove();
-          }
+          tile.remove();
         }
       });
     } catch (e) {
