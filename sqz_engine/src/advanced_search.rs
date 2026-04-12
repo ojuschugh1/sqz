@@ -122,9 +122,17 @@ fn extract_snippet(content: &str, query_terms: &[&str], window: usize) -> String
     let start = pos.saturating_sub(window);
     let end = (pos + window).min(content.len());
 
-    // Snap to char boundaries.
-    let start = content.floor_char_boundary(start);
-    let end = content.ceil_char_boundary(end);
+    // Snap to char boundaries (stable alternative to floor/ceil_char_boundary).
+    let start = {
+        let mut i = start;
+        while i > 0 && !content.is_char_boundary(i) { i -= 1; }
+        i
+    };
+    let end = {
+        let mut i = end;
+        while i < content.len() && !content.is_char_boundary(i) { i += 1; }
+        i
+    };
 
     let mut snippet = String::new();
     if start > 0 {
