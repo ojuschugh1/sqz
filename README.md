@@ -11,11 +11,11 @@
 </p>
 
 <p align="center">
-  <strong>Reduce AI coding costs by 89-99%</strong> — Shell Hook + MCP Server + Browser Extension + IDE Extensions
+  <strong>Compress LLM context to save tokens and reduce costs</strong> — Shell Hook + MCP Server + Browser Extension + IDE Extensions
 </p>
 
 <p align="center">
-  Single Rust binary · 26 platforms · Zero telemetry · 260+ tests
+  Single Rust binary · Zero telemetry · 549 tests · 57 property-based correctness proofs
 </p>
 
 <p align="center">
@@ -45,17 +45,20 @@ LLM ──"read auth.ts"──▶ Editor ──▶ File   LLM ──"read auth.t
   └────────────────────────────────┘         └──── (compressed) ────┴───────┘
 ```
 
-## Token Savings — Real Numbers
+## Token Savings
 
-| Operation | Freq | Without | With sqz | Saved |
-|---|---|---|---|---|
-| File reads (cached) | 15× | 30,000 | 195 | 99% |
-| File reads (map mode) | 10× | 20,000 | 2,000 | 90% |
-| git status/log/diff | 10× | 8,000 | 2,400 | 70% |
-| cargo/npm build | 5× | 5,000 | 1,000 | 80% |
-| Test runners | 4× | 10,000 | 1,000 | 90% |
-| JSON API responses | 3× | 1,500 | 165 | 89% |
-| **Session total** | | **~89,800** | **~10,620** | **88%** |
+Compression ratios depend on content type. These are measured results from the sqz engine:
+
+| Content Type | Typical Reduction | Method |
+|---|---|---|
+| JSON (large arrays) | 60-80% | Schema sampling + minification |
+| Log output | 40-50% | Repeated line folding |
+| Code (with comments) | 25-35% | Comment removal + whitespace |
+| Prose / documentation | 15-30% | Sentence pruning + filler removal |
+| Base64 blobs | 90%+ | Placeholder substitution |
+| Cached file re-reads | ~99% | SHA-256 content-addressed cache |
+
+Actual savings vary by input. The browser extension's 16-pass squeeze engine achieves 15-30% on typical prose. The Rust engine's TOON encoding achieves 4-30% on JSON depending on structure.
 
 ## Install
 
@@ -116,9 +119,9 @@ Native VS Code and JetBrains extensions that intercept file reads at the editor 
 
 ### Compression Engine
 - **8-stage pipeline** — keep_fields, strip_fields, condense, strip_nulls, flatten, truncate_strings, collapse_arrays, custom_transforms
-- **TOON encoding** — lossless JSON compression producing 30-60% fewer tokens with ASCII-safe output
-- **Tree-sitter AST** — structural code extraction for 18 languages (Rust, Python, JS, TS, Go, Java, C, C++, Ruby, Bash, JSON, HTML, CSS, C#, Kotlin, Swift, TOML, YAML)
-- **Image compression** — screenshots → semantic DOM descriptions, 95%+ token reduction
+- **TOON encoding** — lossless JSON compression producing compact ASCII-safe output (reduction varies by structure, 4-30% typical)
+- **Tree-sitter AST** — structural code extraction for 4 languages natively (Rust, Python, JavaScript, Bash) + 14 via regex fallback (TypeScript, Go, Java, C, C++, Ruby, JSON, HTML, CSS, C#, Kotlin, Swift, TOML, YAML)
+- **Image compression** — screenshots → semantic DOM descriptions
 - **ANSI auto-strip** — removes color codes before compression
 
 ### Caching & Memory
@@ -142,7 +145,7 @@ Native VS Code and JetBrains extensions that intercept file reads at the editor 
 ### Extensibility
 - **TOML presets** — hot-reload within 2 seconds, community-driven ecosystem
 - **Plugin API** — Rust trait + WASM interface for custom compression strategies
-- **100+ CLI patterns** — git, cargo, npm, docker, kubectl, aws, and more
+- **150 CLI patterns** — git, cargo, npm, docker, kubectl, aws, and more
 
 ### Privacy
 - **Zero telemetry** — no data transmitted, no crash reports, no analytics
@@ -151,7 +154,7 @@ Native VS Code and JetBrains extensions that intercept file reads at the editor 
 
 ## Platforms
 
-sqz integrates with 26 platforms across 3 levels:
+sqz integrates with AI coding tools across 3 levels:
 
 ### Level 1 — MCP Config Only
 Continue · Zed · Amazon Q Developer
@@ -225,7 +228,7 @@ complexity_threshold = 0.4
        │                                      │
        │  Compression Pipeline (8 stages)     │
        │  TOON Encoder (lossless JSON)        │
-       │  AST Parser (tree-sitter, 18 langs)  │
+       │  AST Parser (tree-sitter + regex, 18 langs)  │
        │  Cache Manager (SHA-256 dedup)       │
        │  Session Store (SQLite FTS5)         │
        │  Budget Tracker (multi-agent)        │
@@ -255,7 +258,7 @@ complexity_threshold = 0.4
 ```sh
 git clone https://github.com/ojuschugh1/sqz.git
 cd sqz
-cargo test --workspace    # 260+ tests
+cargo test --workspace    # 549 tests
 cargo build --release     # optimized binary
 ```
 
@@ -274,7 +277,7 @@ docs/           Integration guides and documentation
 
 ### Testing
 
-The test suite includes 260+ tests with 34 property-based correctness properties validated via proptest:
+The test suite includes 549 tests with 57 property-based correctness properties validated via proptest:
 
 - TOON round-trip fidelity
 - Compression preserves semantically significant content
