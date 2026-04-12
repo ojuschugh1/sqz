@@ -644,6 +644,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_execute_shell_echo() {
         let executor = SandboxExecutor::new();
         if !executor.is_available("shell") {
@@ -656,6 +657,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_execute_shell_captures_only_stdout() {
         let executor = SandboxExecutor::new();
         if !executor.is_available("shell") {
@@ -683,6 +685,7 @@ echo "also visible""#;
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_execute_nonzero_exit() {
         let executor = SandboxExecutor::new();
         if !executor.is_available("shell") {
@@ -693,6 +696,7 @@ echo "also visible""#;
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_execute_timeout() {
         let executor = SandboxExecutor::with_config(Duration::from_secs(1), 1024);
         if !executor.is_available("shell") {
@@ -738,6 +742,7 @@ echo "also visible""#;
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_credential_env_includes_path() {
         let env = build_credential_env();
         assert!(env.contains_key("PATH"), "PATH should be inherited");
@@ -841,6 +846,7 @@ echo "also visible""#;
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_execute_with_intent_small_output_no_filter() {
         let executor = SandboxExecutor::new();
         if !executor.is_available("shell") {
@@ -871,6 +877,7 @@ echo "also visible""#;
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn test_execute_with_intent_large_output_filters() {
         let executor = SandboxExecutor::new();
         if !executor.is_available("shell") {
@@ -896,8 +903,9 @@ for i in $(seq 1 50); do echo "success: test suite $i passed with 100% coverage"
         assert!(filtered.total_chunks > 0);
     }
 
-    // ── Property-based tests ──────────────────────────────────────────────
+    // ── Property-based tests (Unix only — depend on bash/shell) ──────────
 
+    #[cfg(not(windows))]
     mod proptests {
         use super::*;
         use proptest::prelude::*;
