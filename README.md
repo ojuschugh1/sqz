@@ -310,9 +310,25 @@ cargo test --workspace    # 549 tests
 cargo build --release     # optimized binary
 ```
 
-### Rust API names
+### Rust API names (`sqz_engine`)
 
-Downstream crates should prefer **`Session`** and **`PresetHeader`**. **`SessionState`** and **`PresetMeta`** remain as `type` aliases. Sandbox output uses **`SandboxResult`** fields `status_code`, `was_truncated`, and `was_indexed`.
+Prefer the primary type names below; the second name in each row is a `type` alias kept for compatibility.
+
+| Primary | Alias |
+| --- | --- |
+| `Session` | `SessionState` |
+| `Turn` | `ConversationTurn` |
+| `PinnedSegment` | `PinEntry` |
+| `KvFact` | `Learning` |
+| `WindowUsage` | `BudgetState` |
+| `ToolCall` | `ToolUsageRecord` |
+| `EditRecord` | `CorrectionEntry` |
+| `EditHistory` | `CorrectionLog` |
+| `PresetHeader` | `PresetMeta` |
+
+**File cache:** `CacheManager` returns `CacheResult::Dedup` (compact inline reference) or `CacheResult::Fresh` (newly compressed payload).
+
+**Sandbox:** `SandboxResult` uses `status_code`, `was_truncated`, and `was_indexed` (stdout-only data enters the context window).
 
 ### Project Structure
 
