@@ -304,4 +304,44 @@ mod tests {
         let result = Verifier::verify(original, compressed);
         assert!(result.fallback_triggered, "should trigger fallback on low confidence");
     }
+
+    // ── Real-world coding session patterns ────────────────────────────────
+
+    #[test]
+    fn verify_cargo_test_output_preserved() {
+        let original = "running 47 tests\ntest engine::tests::test_compress ... ok\ntest pipeline::tests::compress_json ... ok\ntest result: ok. 47 passed; 0 failed; 0 ignored; finished in 2.34s\n";
+        let compressed = "47 tests\ntest result: ok. 47 passed; 0 failed; finished in 2.34s\n";
+        let result = Verifier::verify(original, compressed);
+        // Should pass — key info retained, no error lines, no JSON
+        assert!(result.confidence >= 0.7, "cargo test output should verify well: {:.2}", result.confidence);
+    }
+
+    #[test]
+    fn verify_rust_compile_error_preserved() {
+        let original = "error[E0308]: mismatched types\n --> src/main.rs:42:5\n  |\n42 |     let x: i32 = \"hello\";\n  |                  ^^^^^^^ expected `i32`, found `&str`\n\nerror: aborting due to previous error\n";
+        let compressed = "error[E0308]: mismatched types\n --> src/main.rs:42:5\nerror: aborting due to previous error\n";
+        let result = Verifier::verify(original, compressed);
+        // Error lines must be retained
+        assert!(result.checks_passed.contains(&"error_lines".to_string()),
+            "error lines should be preserved");
+    }
+
+    #[test]
+    fn verify_git_log_output() {
+        let original = "commit a1b2c3d4\nAuthor: Ojus Chugh <ojuschugh@gmail.com>\nDate:   Sun Apr 12 10:00:00 2026\n\n    feat: Add compression engine\n\ncommit b2c3d4e5\nAuthor: Ojus Chugh <ojuschugh@gmail.com>\nDate:   Sat Apr 11 15:30:00 2026\n\n    fix: Handle edge case\n";
+        let compressed = "commit a1b2c3d4\n    feat: Add compression engine\ncommit b2c3d4e5\n    fix: Handle edge case\n";
+        let result = Verifier::verify(original, compressed);
+        assert!(result.confidence >= 0.7, "git log should verify well: {:.2}", result.confidence);
+    }
+
+    #[test]
+    fn verify_json_api_with_stripped_nulls() {
+        // Simulates what the pipeline does: strip null fields, TOON encode
+        let original = r#"{"id":1,"name":"Alice","debug_info":null,"trace_id":null,"status":"active"}"#;
+        let compressed = r#"TOON:{id:1,name:"Alice",status:"active"}"#;
+        let result = Verifier::verify(original, compressed);
+        // 3 of 5 keys retained (60%) — should pass the 50% threshold
+        assert!(result.checks_passed.contains(&"json_keys".to_string()),
+            "60% key retention should pass: {:?}", result.checks_failed);
+    }
 }

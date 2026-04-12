@@ -101,6 +101,9 @@ enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
+
+    /// Remove sqz shell hooks from the RC file.
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -146,6 +149,7 @@ fn main() {
         Some(Command::Tee { action }) => cmd_tee(action),
         Some(Command::Dashboard { port }) => cmd_dashboard(port),
         Some(Command::Proxy { port }) => cmd_proxy(port),
+        Some(Command::Uninstall) => cmd_uninstall(),
     }
 }
 
@@ -401,6 +405,21 @@ fn cmd_proxy(port: u16) {
          (requested port: {port})"
     );
     std::process::exit(1);
+}
+
+/// `sqz uninstall` — remove sqz shell hooks from the RC file.
+fn cmd_uninstall() {
+    let hook = ShellHook::detect();
+    println!("[sqz] detected shell: {:?}", hook);
+
+    match hook.uninstall() {
+        Ok(true) => println!("[sqz] hook removed from {}", hook.rc_path().display()),
+        Ok(false) => println!("[sqz] hook not found in {} — nothing to remove", hook.rc_path().display()),
+        Err(e) => {
+            eprintln!("[sqz] warning: {e}");
+            eprintln!("[sqz] could not remove hook; you may need to edit {} manually", hook.rc_path().display());
+        }
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

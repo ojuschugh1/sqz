@@ -1,4 +1,4 @@
-/// Shell hook installation for Bash, Zsh, Fish, and PowerShell.
+/// Shell hook installation for Bash, Zsh, Fish, Nushell, and PowerShell.
 ///
 /// Each variant knows how to detect its RC file and append the sqz hook
 /// function that pipes command output through `sqz compress`.
@@ -21,12 +21,19 @@ PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__sqz_postexec"
 sqz_run() {
     "$@" 2>&1 | sqz compress
 }
+# sudo passthrough: preserve compression for privileged commands
+sqz_sudo() {
+    sudo "$@" 2>&1 | sqz compress
+}
 "#;
 
 const ZSH_HOOK: &str = r#"
 # sqz — context intelligence layer (auto-installed)
 sqz_run() {
     "$@" 2>&1 | sqz compress
+}
+sqz_sudo() {
+    sudo "$@" 2>&1 | sqz compress
 }
 preexec() {
     export __SQZ_CMD="$1"
@@ -38,6 +45,16 @@ const FISH_HOOK: &str = r#"
 function sqz_run
     $argv 2>&1 | sqz compress
 end
+function sqz_sudo
+    sudo $argv 2>&1 | sqz compress
+end
+"#;
+
+const NUSHELL_HOOK: &str = r#"
+# sqz — context intelligence layer (auto-installed)
+def sqz_run [...args: string] {
+    run-external $args.0 ...$args[1..] | sqz compress
+}
 "#;
 
 const POWERSHELL_HOOK: &str = r#"
@@ -47,6 +64,10 @@ function Invoke-SqzRun {
     & @Command 2>&1 | sqz compress
 }
 Set-Alias sqz_run Invoke-SqzRun
+function Invoke-SqzSudo {
+    param([string[]]$Command)
+    Start-Process -Verb RunAs -FilePath $Command[0] -ArgumentList $Command[1..] 2>&1 | sqz compress
+}
 "#;
 
 // ── ShellHook enum ────────────────────────────────────────────────────────
@@ -56,6 +77,7 @@ pub enum ShellHook {
     Bash,
     Zsh,
     Fish,
+    Nushell,
     PowerShell,
 }
 
@@ -74,6 +96,8 @@ impl ShellHook {
             ShellHook::Zsh
         } else if shell.contains("fish") {
             ShellHook::Fish
+        } else if shell.contains("nu") || shell.contains("nushell") {
+            ShellHook::Nushell
         } else if shell.contains("pwsh") || shell.contains("powershell") {
             ShellHook::PowerShell
         } else {
@@ -91,6 +115,10 @@ impl ShellHook {
                 .join(".config")
                 .join("fish")
                 .join("config.fish"),
+            ShellHook::Nushell => home
+                .join(".config")
+                .join("nushell")
+                .join("config.nu"),
             ShellHook::PowerShell => powershell_profile_path(),
         }
     }
@@ -101,6 +129,7 @@ impl ShellHook {
             ShellHook::Bash => BASH_HOOK,
             ShellHook::Zsh => ZSH_HOOK,
             ShellHook::Fish => FISH_HOOK,
+            ShellHook::Nushell => NUSHELL_HOOK,
             ShellHook::PowerShell => POWERSHELL_HOOK,
         }
     }
@@ -119,6 +148,15 @@ impl ShellHook {
     pub fn install(&self) -> Result<bool, HookError> {
         let rc = self.rc_path();
         install_hook_to_file(&rc, self.hook_script(), self.sentinel())
+    }
+
+    /// Remove the hook from the shell RC file.
+    ///
+    /// Returns `Ok(true)` when the hook was removed, `Ok(false)` when it was
+    /// not present.
+    pub fn uninstall(&self) -> Result<bool, HookError> {
+        let rc = self.rc_path();
+        uninstall_hook_from_file(&rc, self.sentinel())
     }
 }
 
@@ -210,6 +248,57 @@ pub fn install_hook_to_file(
     Ok(true)
 }
 
+/// Remove the sqz hook block from `path`.
+///
+/// Finds the sentinel line and removes everything from that line to the
+/// next blank line (or end of file). Returns `Ok(true)` if removed,
+/// `Ok(false)` if not present.
+pub fn uninstall_hook_from_file(path: &Path, sentinel: &str) -> Result<bool, HookError> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(path).map_err(|e| HookError {
+        path: path.to_owned(),
+        message: format!("read error: {e}"),
+    })?;
+
+    if !content.contains(sentinel) {
+        return Ok(false); // not installed
+    }
+
+    // Remove the hook block: from the sentinel line to the next blank line
+    let mut result = Vec::new();
+    let mut in_hook = false;
+    let mut removed = false;
+
+    for line in content.lines() {
+        if line.contains(sentinel) {
+            in_hook = true;
+            removed = true;
+            continue;
+        }
+        if in_hook {
+            // End of hook block: blank line or next comment section
+            if line.trim().is_empty() {
+                in_hook = false;
+                continue; // skip the trailing blank line too
+            }
+            continue; // skip hook body lines
+        }
+        result.push(line);
+    }
+
+    if removed {
+        std::fs::write(path, result.join("\n")).map_err(|e| HookError {
+            path: path.to_owned(),
+            message: format!("write error: {e}"),
+        })?;
+    }
+
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,7 +338,6 @@ mod tests {
 
     #[test]
     fn test_detect_bash_default() {
-        // Empty or unknown string → Bash
         assert_eq!(ShellHook::detect_from_str(""), ShellHook::Bash);
         assert_eq!(ShellHook::detect_from_str("unknown"), ShellHook::Bash);
     }
@@ -262,5 +350,90 @@ mod tests {
     #[test]
     fn test_detect_fish() {
         assert_eq!(ShellHook::detect_from_str("/usr/bin/fish"), ShellHook::Fish);
+    }
+
+    #[test]
+    fn test_detect_nushell() {
+        assert_eq!(ShellHook::detect_from_str("/usr/bin/nu"), ShellHook::Nushell);
+        assert_eq!(ShellHook::detect_from_str("nushell"), ShellHook::Nushell);
+    }
+
+    #[test]
+    fn test_detect_powershell() {
+        assert_eq!(ShellHook::detect_from_str("pwsh"), ShellHook::PowerShell);
+        assert_eq!(ShellHook::detect_from_str("/usr/bin/powershell"), ShellHook::PowerShell);
+    }
+
+    #[test]
+    fn test_all_shells_have_sudo_or_equivalent() {
+        // Bash, Zsh, Fish, PowerShell all have sudo passthrough
+        // Nushell doesn't have sudo in the same way — that's expected
+        for hook in &[ShellHook::Bash, ShellHook::Zsh, ShellHook::Fish] {
+            assert!(
+                hook.hook_script().contains("sudo"),
+                "{hook:?} should have sudo passthrough"
+            );
+        }
+    }
+
+    #[test]
+    fn test_nushell_hook_has_sqz_run() {
+        assert!(NUSHELL_HOOK.contains("sqz_run"));
+        assert!(NUSHELL_HOOK.contains("sqz compress"));
+    }
+
+    #[test]
+    fn test_uninstall_removes_hook() {
+        let dir = TempDir::new().unwrap();
+        let rc = tmp_rc(&dir, ".bashrc");
+        let sentinel = "# sqz — context intelligence layer (auto-installed)";
+
+        // Install first
+        install_hook_to_file(&rc, BASH_HOOK, sentinel).unwrap();
+        let content = fs::read_to_string(&rc).unwrap();
+        assert!(content.contains(sentinel));
+
+        // Uninstall
+        let removed = uninstall_hook_from_file(&rc, sentinel).unwrap();
+        assert!(removed, "should return true when hook was removed");
+
+        let content_after = fs::read_to_string(&rc).unwrap();
+        assert!(!content_after.contains(sentinel), "sentinel should be gone after uninstall");
+    }
+
+    #[test]
+    fn test_uninstall_nonexistent_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let rc = tmp_rc(&dir, ".bashrc_nonexistent");
+        let result = uninstall_hook_from_file(&rc, "# sqz — context intelligence layer (auto-installed)");
+        assert!(!result.unwrap(), "uninstall on missing file should return false");
+    }
+
+    #[test]
+    fn test_uninstall_not_installed_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let rc = tmp_rc(&dir, ".bashrc");
+        fs::write(&rc, "# some existing content\nexport PATH=$PATH:/usr/local/bin\n").unwrap();
+        let result = uninstall_hook_from_file(&rc, "# sqz — context intelligence layer (auto-installed)").unwrap();
+        assert!(!result, "uninstall when not installed should return false");
+        // Original content preserved
+        let content = fs::read_to_string(&rc).unwrap();
+        assert!(content.contains("some existing content"));
+    }
+
+    #[test]
+    fn test_rc_paths_distinct_for_all_shells() {
+        let paths: Vec<_> = [
+            ShellHook::Bash,
+            ShellHook::Zsh,
+            ShellHook::Fish,
+            ShellHook::Nushell,
+            ShellHook::PowerShell,
+        ]
+        .iter()
+        .map(|h| h.rc_path())
+        .collect();
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(unique.len(), paths.len(), "each shell must have a unique RC path");
     }
 }

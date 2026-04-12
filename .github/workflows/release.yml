@@ -111,6 +111,8 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -119,9 +121,58 @@ jobs:
           merge-multiple: true
 
       - name: Create GitHub Release
+        id: create_release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # ── Update Homebrew formula with real checksums ───────────────────────────
+  update-homebrew:
+    name: Update Homebrew checksums
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compute SHA256 checksums and update formula
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          FORMULA="homebrew/sqz.rb"
+
+          for target in \
+            "aarch64-apple-darwin" \
+            "x86_64-apple-darwin" \
+            "aarch64-unknown-linux-musl" \
+            "x86_64-unknown-linux-musl"; do
+            ARCHIVE="artifacts/sqz-${VERSION}-${target}.tar.gz"
+            if [ -f "$ARCHIVE" ]; then
+              SHA=$(sha256sum "$ARCHIVE" | cut -d' ' -f1)
+              PLACEHOLDER="PLACEHOLDER_SHA256_$(echo $target | tr '[:lower:]-' '[:upper:]_')"
+              sed -i "s|${PLACEHOLDER}|${SHA}|g" "$FORMULA"
+              echo "Updated $target: $SHA"
+            fi
+          done
+
+          # Also update version in formula
+          sed -i "s|version \".*\"|version \"${VERSION#v}\"|g" "$FORMULA"
+
+      - name: Commit updated formula
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add homebrew/sqz.rb
+          git diff --staged --quiet || git commit -m "chore: Update homebrew checksums for ${GITHUB_REF_NAME}"
+          git push
