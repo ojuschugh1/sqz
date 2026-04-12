@@ -487,19 +487,19 @@ fn install_completions(hook: &ShellHook) {
     let (dest, content): (std::path::PathBuf, &str) = match hook {
         ShellHook::Fish => (
             home.join(".config").join("fish").join("completions").join("sqz.fish"),
-            include_str!("../../completions/sqz.fish"),
+            include_str!("../completions/sqz.fish"),
         ),
         ShellHook::Zsh => (
             home.join(".zsh").join("completions").join("_sqz"),
-            include_str!("../../completions/sqz.zsh"),
+            include_str!("../completions/sqz.zsh"),
         ),
         ShellHook::Bash => (
             home.join(".local").join("share").join("bash-completion").join("completions").join("sqz"),
-            include_str!("../../completions/sqz.bash"),
+            include_str!("../completions/sqz.bash"),
         ),
         ShellHook::Nushell => (
             home.join(".config").join("nushell").join("completions").join("sqz.nu"),
-            include_str!("../../completions/sqz.nu"),
+            include_str!("../completions/sqz.nu"),
         ),
         ShellHook::PowerShell => {
             // Append to PowerShell profile
@@ -510,7 +510,7 @@ fn install_completions(hook: &ShellHook) {
                         .join("PowerShell")
                         .join("Microsoft.PowerShell_profile.ps1")
                 });
-            (profile, include_str!("../../completions/sqz.ps1"))
+            (profile, include_str!("../completions/sqz.ps1"))
         }
     };
 

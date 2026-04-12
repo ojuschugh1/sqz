@@ -9,6 +9,7 @@ homepage = "https://github.com/ojuschugh1/sqz"
 keywords = ["llm", "compression", "context", "cli", "ai"]
 categories = ["command-line-utilities", "text-processing"]
 readme = "../README.md"
+include = ["src/**/*", "completions/*", "../LICENSE", "../README.md"]
 
 [[bin]]
 name = "sqz"
