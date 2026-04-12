@@ -13,9 +13,14 @@ Token counts use the `chars / 4` approximation (GPT-style).
 | Content Type | Original tokens | sqz tokens | Reduction | Method |
 |---|---|---|---|---|
 | Repeated log output | 113 | 53 | **53%** | Log line folding |
-| JSON API response | 64 | 53 | **17%** | TOON encoding + null stripping |
+| JSON API response | 64 | 59 | **7.8%** | TOON encoding + null stripping |
 | Git diff (12 context lines) | 52 | 51 | **2%** | Diff context folding |
+| Large JSON array (20 items) | varies | varies | 20%+ | Schema sampling |
 | Prose documentation | varies | varies | 5-15% | Phrase substitution + article stripping |
+
+> Note: JSON API reduction is lower than the CLI shows (17%) because the benchmark uses the
+> `SqzEngine` directly which routes through the confidence router. The CLI path may differ slightly.
+> Run `cargo test -p sqz-engine benchmarks -- --nocapture` to reproduce exact numbers.
 
 ---
 
@@ -54,7 +59,7 @@ Critical info preserved: ✅ ERROR line retained verbatim.
              "internal_id":null,"debug_info":null,"trace_id":null}}
 ```
 
-**Output** (53 tokens, **17% reduction**):
+**Output** (59 tokens, **7.8% reduction**):
 ```
 TOON:{created_at:"2024-01-01T00:00:00Z",email:"alice@example.com",id:42,
 "metadata.billing_cycle":"monthly","metadata.plan":"pro","metadata.seats":10,
@@ -63,6 +68,9 @@ name:"Alice",role:"admin",updated_at:"2024-03-15T10:30:00Z"}
 
 Method: `strip_nulls` removes null fields, `flatten` flattens metadata, TOON encoding removes quotes from simple keys.
 Critical info preserved: ✅ All non-null fields retained.
+
+> Reproducible: `cargo test -p sqz-engine bench_json_api_response -- --nocapture`
+> Output: `[bench] json_api | 64→59 tokens | 7.8% reduction | confidence 1.00`
 
 ---
 

@@ -365,6 +365,7 @@ impl McpServer {
                                 "name": t.id,
                                 "description": t.description,
                                 "inputSchema": t.input_schema,
+                                "outputSchema": t.output_schema,
                                 "sqz:transforms": t.compression_transforms,
                             })
                         }).collect();
@@ -429,6 +430,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"]
             }),
+            output_schema: serde_json::json!({
+                "type": "string",
+                "description": "File content, possibly compressed. Code files return AST signatures only. Re-reads of unchanged files return a ~13-token cache reference token (§ref:HASH§)."
+            }),
             compression_transforms: vec![
                 "sha256_cache: re-reads cost ~13 tokens if content unchanged".to_string(),
                 "ast_extract: code files → signatures only (functions, classes, types)".to_string(),
@@ -448,6 +453,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path", "content"]
             }),
+            output_schema: serde_json::json!({
+                "type": "string",
+                "description": "Write confirmation message. Not compressed — confirmations are short."
+            }),
             compression_transforms: vec![
                 "passthrough: write confirmations are short, no compression applied".to_string(),
             ],
@@ -463,6 +472,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                     "path": { "type": "string", "description": "Directory to search in" }
                 },
                 "required": ["pattern"]
+            }),
+            output_schema: serde_json::json!({
+                "type": "string",
+                "description": "Search results with file:line:content format. Repeated identical lines collapsed. Common path prefixes replaced with ~/."
             }),
             compression_transforms: vec![
                 "condense: repeated identical match lines collapsed to max 3".to_string(),
@@ -481,6 +494,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"]
             }),
+            output_schema: serde_json::json!({
+                "type": "string",
+                "description": "Directory listing. Common path prefixes replaced with ~/. Repeated permission patterns collapsed."
+            }),
             compression_transforms: vec![
                 "path_shorten: common path prefixes replaced with ~/".to_string(),
                 "condense: repeated permission/ownership patterns collapsed".to_string(),
@@ -497,6 +514,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                     "cwd": { "type": "string", "description": "Working directory (optional)" }
                 },
                 "required": ["command"]
+            }),
+            output_schema: serde_json::json!({
+                "type": "string",
+                "description": "Command stdout+stderr. ANSI codes stripped. Repeated lines collapsed. Diff output has context lines folded. Error/warning lines always preserved verbatim."
             }),
             compression_transforms: vec![
                 "ansi_strip: removes color/formatting codes".to_string(),
@@ -519,6 +540,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path", "old_str", "new_str"]
             }),
+            output_schema: serde_json::json!({
+                "type": "string",
+                "description": "Edit confirmation message. Not compressed — confirmations are short."
+            }),
             compression_transforms: vec![
                 "passthrough: edit confirmations are short, no compression applied".to_string(),
             ],
@@ -534,6 +559,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"]
             }),
+            output_schema: serde_json::json!({
+                "type": "string",
+                "description": "Directory creation confirmation. Not compressed."
+            }),
             compression_transforms: vec![
                 "passthrough: directory creation confirmations are short".to_string(),
             ],
@@ -548,6 +577,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                     "path": { "type": "string", "description": "Path to delete" }
                 },
                 "required": ["path"]
+            }),
+            output_schema: serde_json::json!({
+                "type": "string",
+                "description": "Deletion confirmation. Not compressed."
             }),
             compression_transforms: vec![
                 "passthrough: deletion confirmations are short".to_string(),

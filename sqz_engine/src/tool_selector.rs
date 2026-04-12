@@ -15,6 +15,9 @@ pub struct ToolDefinition {
     /// JSON Schema for the tool's input parameters.
     #[serde(default)]
     pub input_schema: serde_json::Value,
+    /// JSON Schema describing the structure of the compressed output.
+    #[serde(default)]
+    pub output_schema: serde_json::Value,
     /// Description of what sqz does to this tool's output.
     #[serde(default)]
     pub compression_transforms: Vec<String>,
