@@ -72,8 +72,8 @@ pub use token_counter::TokenCounter;
 pub use types::*;
 pub use preset::{
     BudgetConfig, CollapseArraysConfig, CompressionConfig, CondenseConfig, CustomTransformsConfig,
-    FlattenConfig, KeepFieldsConfig, ModelConfig, ModelPricingConfig, Preset, PresetMeta,
-    PresetParser, StripFieldsConfig, StripNullsConfig, TerseLevel, TerseModeConfig,
+    FlattenConfig, GitDiffFoldConfig, KeepFieldsConfig, ModelConfig, ModelPricingConfig, Preset,
+    PresetMeta, PresetParser, StripFieldsConfig, StripNullsConfig, TerseLevel, TerseModeConfig,
     ToolSelectionConfig, TruncateStringsConfig,
 };
 pub use progressive_throttle::{ProgressiveThrottler, ThrottleConfig, ThrottleLevel};

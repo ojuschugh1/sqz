@@ -176,10 +176,22 @@ fn stage_config_from_preset(name: &str, preset: &Preset) -> StageConfig {
                 StageConfig::default()
             }
         }
-        "git_diff_fold" => StageConfig {
-            enabled: true,
-            options: serde_json::json!({ "max_context_lines": 2 }),
-        },
+        "git_diff_fold" => {
+            if let Some(cfg) = &c.git_diff_fold {
+                StageConfig {
+                    enabled: cfg.enabled,
+                    options: serde_json::json!({
+                        "max_context_lines": cfg.max_context_lines
+                    }),
+                }
+            } else {
+                // Default: enabled with 2 context lines
+                StageConfig {
+                    enabled: true,
+                    options: serde_json::json!({ "max_context_lines": 2 }),
+                }
+            }
+        }
         "strip_nulls" => {
             if let Some(cfg) = &c.strip_nulls {
                 StageConfig {
@@ -246,7 +258,7 @@ mod tests {
     use super::*;
     use crate::preset::{
         BudgetConfig, CollapseArraysConfig, CompressionConfig, CondenseConfig,
-        CustomTransformsConfig, ModelConfig, PresetMeta,
+        CustomTransformsConfig, GitDiffFoldConfig, ModelConfig, PresetMeta,
         StripNullsConfig, ToolSelectionConfig, TruncateStringsConfig,
         TerseModeConfig,
     };
@@ -266,6 +278,7 @@ mod tests {
                     enabled: true,
                     max_repeated_lines: 3,
                 }),
+                git_diff_fold: None,
                 strip_nulls: Some(StripNullsConfig { enabled: true }),
                 flatten: None,
                 truncate_strings: Some(TruncateStringsConfig {

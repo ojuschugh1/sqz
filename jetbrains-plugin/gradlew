@@ -1,38 +1,34 @@
 #!/bin/sh
 # Gradle wrapper script for sqz JetBrains plugin
-# Generated for Gradle 8.5
+# Downloads gradle-wrapper.jar on first run if not present.
 
-APP_NAME="Gradle"
-APP_BASE_NAME=$(basename "$0")
-DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+set -e
 
-# Resolve links: $0 may be a link
-PRG="$0"
-while [ -h "$PRG" ] ; do
-    ls=$(ls -ld "$PRG")
-    link=$(expr "$ls" : '.*-> \(.*\)$')
-    if expr "$link" : '/.*' > /dev/null; then
-        PRG="$link"
+APP_HOME="$(cd "$(dirname "$0")" && pwd)"
+WRAPPER_JAR="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+WRAPPER_PROPS="$APP_HOME/gradle/wrapper/gradle-wrapper.properties"
+
+# Download the wrapper jar if missing (first-time setup)
+if [ ! -f "$WRAPPER_JAR" ]; then
+    echo "[sqz] Downloading gradle-wrapper.jar..."
+    GRADLE_VERSION="8.5"
+    JAR_URL="https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}.0/gradle/wrapper/gradle-wrapper.jar"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$JAR_URL" -o "$WRAPPER_JAR"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$JAR_URL" -O "$WRAPPER_JAR"
     else
-        PRG=$(dirname "$PRG")"/$link"
+        echo "Error: curl or wget required to download gradle-wrapper.jar" >&2
+        echo "Alternatively, run: gradle wrapper --gradle-version 8.5" >&2
+        exit 1
     fi
-done
-SAVED="$(pwd)"
-cd "$(dirname "$PRG")/" >/dev/null
-APP_HOME="$(pwd -P)"
-cd "$SAVED" >/dev/null
-
-CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
-
-# Determine the Java command to use to start the JVM.
-if [ -n "$JAVA_HOME" ] ; then
-    JAVACMD="$JAVA_HOME/bin/java"
-else
-    JAVACMD="java"
 fi
 
-exec "$JAVACMD" $DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS \
-    "-Dorg.gradle.appname=$APP_BASE_NAME" \
-    -classpath "$CLASSPATH" \
+DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
+JAVA_EXE="${JAVA_HOME:+$JAVA_HOME/bin/}java"
+
+exec "$JAVA_EXE" $DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS \
+    "-Dorg.gradle.appname=gradlew" \
+    -classpath "$WRAPPER_JAR" \
     org.gradle.wrapper.GradleWrapperMain \
     "$@"

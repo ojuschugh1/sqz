@@ -107,11 +107,23 @@ pub struct CompressionConfig {
     pub keep_fields: Option<KeepFieldsConfig>,
     pub strip_fields: Option<StripFieldsConfig>,
     pub condense: Option<CondenseConfig>,
+    pub git_diff_fold: Option<GitDiffFoldConfig>,
     pub strip_nulls: Option<StripNullsConfig>,
     pub flatten: Option<FlattenConfig>,
     pub truncate_strings: Option<TruncateStringsConfig>,
     pub collapse_arrays: Option<CollapseArraysConfig>,
     pub custom_transforms: Option<CustomTransformsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitDiffFoldConfig {
+    pub enabled: bool,
+    #[serde(default = "default_max_context_lines")]
+    pub max_context_lines: u32,
+}
+
+fn default_max_context_lines() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +331,10 @@ impl Default for Preset {
                     enabled: true,
                     max_repeated_lines: 3,
                 }),
+                git_diff_fold: Some(GitDiffFoldConfig {
+                    enabled: true,
+                    max_context_lines: 2,
+                }),
                 strip_nulls: Some(StripNullsConfig { enabled: true }),
                 flatten: Some(FlattenConfig {
                     enabled: true,
@@ -464,6 +480,7 @@ mod tests {
                     keep_fields: None,
                     strip_fields: None,
                     condense: None,
+                    git_diff_fold: None,
                     strip_nulls: None,
                     flatten: None,
                     truncate_strings: None,

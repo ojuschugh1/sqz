@@ -153,6 +153,7 @@ mod tests {
                     enabled: true,
                     max_repeated_lines: 3,
                 }),
+                git_diff_fold: None,
                 strip_nulls: Some(StripNullsConfig { enabled: true }),
                 flatten: None,
                 truncate_strings: Some(TruncateStringsConfig {
