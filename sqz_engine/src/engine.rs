@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use crate::ast_parser::AstParser;
 use crate::budget_tracker::{BudgetTracker, UsageReport};
 use crate::cache_manager::CacheManager;
+use crate::confidence_router::ConfidenceRouter;
 use crate::cost_calculator::{CostCalculator, SessionCostSummary};
 use crate::ctx_format::CtxFormat;
 use crate::error::{Result, SqzError};
@@ -14,7 +15,8 @@ use crate::plugin_api::PluginLoader;
 use crate::preset::{Preset, PresetParser};
 use crate::session_store::{SessionStore, SessionSummary};
 use crate::terse_mode::TerseMode;
-use crate::types::{CompressedContent, PinEntry, SessionId};
+use crate::types::{CompressedContent, PinEntry, Provenance, SessionId};
+use crate::verifier::Verifier;
 
 /// Top-level facade that wires all sqz_engine modules together.
 ///
@@ -41,6 +43,7 @@ pub struct SqzEngine {
     ast_parser: AstParser,
     terse_mode: TerseMode,
     pin_manager: PinManager,
+    confidence_router: ConfidenceRouter,
     _plugin_loader: PluginLoader,
 }
 
@@ -101,11 +104,18 @@ impl SqzEngine {
             ast_parser: AstParser::new(),
             terse_mode: TerseMode,
             pin_manager: PinManager::new(pin_store),
+            confidence_router: ConfidenceRouter::new(),
             _plugin_loader: PluginLoader::new(Path::new("plugins")),
         })
     }
 
     /// Compress input text using the current preset.
+    ///
+    /// Two-pass pipeline:
+    /// 1. Route to compression mode based on content entropy and risk patterns.
+    /// 2. Compress using the pipeline.
+    /// 3. Verify invariants (error lines, JSON keys, diff hunks, etc.).
+    /// 4. If verification confidence is low, fall back to safe mode and re-compress.
     pub fn compress(&self, input: &str) -> Result<CompressedContent> {
         let preset = self.preset.lock()
             .map_err(|_| SqzError::Other("preset lock poisoned".into()))?;
@@ -114,7 +124,95 @@ impl SqzEngine {
         let ctx = crate::pipeline::SessionContext {
             session_id: "engine".to_string(),
         };
-        pipeline.compress(input, &ctx, &preset)
+
+        // Pass 1: compress
+        let mut result = pipeline.compress(input, &ctx, &preset)?;
+
+        // Pass 2: verify invariants
+        let verify = Verifier::verify(input, &result.data);
+        let fallback = verify.fallback_triggered;
+        result.verify = Some(verify);
+
+        // If verifier signals low confidence, re-compress with safe settings
+        if fallback && result.data != input {
+            // Safe mode: only strip ANSI and condense repeated lines
+            let safe_result = self.compress_safe(input, &pipeline, &ctx)?;
+            return Ok(safe_result);
+        }
+
+        Ok(result)
+    }
+
+    /// Safe-mode compression: minimal transforms only (ANSI strip + condense).
+    fn compress_safe(
+        &self,
+        input: &str,
+        pipeline: &crate::pipeline::CompressionPipeline,
+        ctx: &crate::pipeline::SessionContext,
+    ) -> Result<CompressedContent> {
+        use crate::preset::{
+            CompressionConfig, CondenseConfig, CustomTransformsConfig, BudgetConfig,
+            ModelConfig, PresetMeta, TerseModeConfig, TerseLevel, ToolSelectionConfig,
+        };
+
+        let safe_preset = Preset {
+            preset: PresetMeta {
+                name: "safe".to_string(),
+                version: "1.0".to_string(),
+                description: "Safe fallback — minimal compression".to_string(),
+            },
+            compression: CompressionConfig {
+                stages: vec!["condense".to_string()],
+                keep_fields: None,
+                strip_fields: None,
+                condense: Some(CondenseConfig { enabled: true, max_repeated_lines: 3 }),
+                git_diff_fold: None,
+                strip_nulls: None,
+                flatten: None,
+                truncate_strings: None,
+                collapse_arrays: None,
+                custom_transforms: Some(CustomTransformsConfig { enabled: false }),
+            },
+            tool_selection: ToolSelectionConfig {
+                max_tools: 5,
+                similarity_threshold: 0.7,
+                default_tools: vec![],
+            },
+            budget: BudgetConfig {
+                warning_threshold: 0.70,
+                ceiling_threshold: 0.85,
+                default_window_size: 200_000,
+                agents: Default::default(),
+            },
+            terse_mode: TerseModeConfig { enabled: false, level: TerseLevel::Moderate },
+            model: ModelConfig {
+                family: "anthropic".to_string(),
+                primary: String::new(),
+                local: String::new(),
+                complexity_threshold: 0.4,
+                pricing: None,
+            },
+        };
+
+        let mut result = pipeline.compress(input, ctx, &safe_preset)?;
+        let verify = Verifier::verify(input, &result.data);
+        result.verify = Some(verify);
+        result.provenance = Provenance {
+            label: Some("safe-fallback".to_string()),
+            ..Default::default()
+        };
+        Ok(result)
+    }
+
+    /// Compress with explicit provenance metadata attached to the result.
+    pub fn compress_with_provenance(
+        &self,
+        input: &str,
+        provenance: Provenance,
+    ) -> Result<CompressedContent> {
+        let mut result = self.compress(input)?;
+        result.provenance = provenance;
+        Ok(result)
     }
 
     /// Export a session to CTX format.
@@ -227,6 +325,26 @@ impl SqzEngine {
     /// Access the `TerseMode` helper.
     pub fn terse_mode(&self) -> &TerseMode {
         &self.terse_mode
+    }
+
+    /// Reorder context sections using the LITM positioner to mitigate
+    /// the "Lost In The Middle" attention bias in long-context models.
+    ///
+    /// Places highest-priority sections at the beginning and end of the
+    /// context window, lowest-priority in the middle.
+    pub fn reorder_context(
+        &self,
+        sections: &mut Vec<crate::litm_positioner::ContextSection>,
+        strategy: crate::litm_positioner::LitmStrategy,
+    ) {
+        let positioner = crate::litm_positioner::LitmPositioner::new(strategy);
+        positioner.reorder(sections);
+    }
+
+    /// Route content to the appropriate compression mode based on entropy
+    /// and risk pattern analysis.
+    pub fn route_compression_mode(&self, content: &str) -> crate::confidence_router::CompressionMode {
+        self.confidence_router.route(content)
     }
 }
 

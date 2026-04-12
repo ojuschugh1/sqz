@@ -460,6 +460,8 @@ mod tests {
             tokens_original: 50,
             stages_applied: vec!["strip_nulls".to_string()],
             compression_ratio: 0.2,
+            provenance: crate::types::Provenance::default(),
+            verify: None,
         };
 
         store.save_cache_entry("abc123", &entry).unwrap();

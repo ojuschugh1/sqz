@@ -104,6 +104,8 @@ impl CompressionPipeline {
             tokens_original,
             stages_applied,
             compression_ratio,
+            provenance: crate::types::Provenance::default(),
+            verify: None,
         })
     }
 

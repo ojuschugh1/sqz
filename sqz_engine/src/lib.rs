@@ -1,6 +1,8 @@
 pub mod advanced_search;
 pub mod ansi_strip;
 pub mod ast_parser;
+pub mod benchmarks;
+pub mod confidence_router;
 pub mod crp_engine;
 pub mod dashboard;
 pub mod dependency_mapper;
@@ -34,10 +36,12 @@ pub mod token_counter;
 pub mod toon;
 pub mod types;
 pub mod url_indexer;
+pub mod verifier;
 
 pub use advanced_search::{AdvancedSearch, SearchResult};
 pub use ansi_strip::AnsiStripper;
 pub use ast_parser::{AstParser, ClassDefinition, CodeSummary, FunctionSignature, ImportDecl, TypeDeclaration};
+pub use confidence_router::{ConfidenceRouter, CompressionMode};
 pub use dependency_mapper::DependencyMapper;
 pub use entropy_analyzer::{EntropyAnalyzer, InfoLevel, AnalyzedBlock};
 pub use file_reader::{FileReadMode, FileReader, ReadResult, BlockEntropy, compute_entropy, analyze_block_entropies};
@@ -87,3 +91,4 @@ pub use hook_manager::{
 };
 pub use sandbox_executor::{SandboxExecutor, SandboxResult, RuntimeInfo, FilteredOutput};
 pub use url_indexer::{ContentFetcher, IndexedChunk, IndexResult, UrlIndexer};
+pub use verifier::Verifier;

@@ -256,6 +256,8 @@ impl<'a> SessionContinuityManager<'a> {
             tokens_original: 0,
             stages_applied: vec!["snapshot".to_string()],
             compression_ratio: 1.0,
+            provenance: crate::types::Provenance::default(),
+            verify: None,
         };
         let hash = format!("snapshot:{session_id}");
         self.store.save_cache_entry(&hash, &compressed)?;

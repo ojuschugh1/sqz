@@ -76,6 +76,21 @@ pub struct Content {
     pub tokens_original: u32,
 }
 
+/// Source provenance for a compressed segment — enables reversibility and trust.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Provenance {
+    /// File path the content originated from, if known.
+    pub file: Option<PathBuf>,
+    /// Line range within the file (start inclusive, end exclusive).
+    pub line_range: Option<std::ops::Range<usize>>,
+    /// SHA-256 hex digest of the original content.
+    pub content_hash: Option<String>,
+    /// Tool call ID that produced this content, if applicable.
+    pub tool_call_id: Option<String>,
+    /// Human-readable source label (e.g. "git diff", "cargo test output").
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompressedContent {
     pub data: String,
@@ -83,6 +98,12 @@ pub struct CompressedContent {
     pub tokens_original: u32,
     pub stages_applied: Vec<String>,
     pub compression_ratio: f64,
+    /// Source provenance — where this content came from.
+    #[serde(default)]
+    pub provenance: Provenance,
+    /// Verifier result — None if verify pass was not run.
+    #[serde(default)]
+    pub verify: Option<VerifyResult>,
 }
 
 // --- Session types ---
@@ -162,4 +183,19 @@ pub struct StageConfig {
     pub enabled: bool,
     #[serde(default)]
     pub options: serde_json::Value,
+}
+
+/// Result of the two-pass compression verifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyResult {
+    /// Overall pass/fail.
+    pub passed: bool,
+    /// Confidence score 0.0–1.0 (1.0 = fully verified).
+    pub confidence: f64,
+    /// Which checks passed.
+    pub checks_passed: Vec<String>,
+    /// Which checks failed with reason.
+    pub checks_failed: Vec<(String, String)>,
+    /// Whether the pipeline fell back to a safer preset.
+    pub fallback_triggered: bool,
 }
