@@ -3,6 +3,12 @@ name: Publish to npm and PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v0.1.2)'
+        required: true
+        default: 'v0.1.2'
 
 jobs:
   publish-npm:
@@ -19,7 +25,7 @@ jobs:
 
       - name: Update version in package.json
         run: |
-          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${{ github.event.release.tag_name || github.event.inputs.tag_name }}"
           VERSION="${VERSION#v}"
           cd npm
           npm version "$VERSION" --no-git-tag-version
@@ -45,7 +51,7 @@ jobs:
 
       - name: Update version in pyproject.toml
         run: |
-          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${{ github.event.release.tag_name || github.event.inputs.tag_name }}"
           VERSION="${VERSION#v}"
           sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
 
