@@ -5,8 +5,10 @@ The sqz JetBrains plugin is published to the [JetBrains Marketplace](https://plu
 ## Prerequisites
 
 - JDK 17+
-- Gradle (wrapper included in `jetbrains-plugin/`)
+- Gradle 8.x+ (install via `brew install gradle` or [sdkman](https://sdkman.io/))
 - A JetBrains Marketplace account and plugin token
+
+> Note: The plugin does not include the Gradle wrapper. You'll need to have Gradle installed separately.
 
 ## Required `plugin.xml` fields
 
@@ -36,14 +38,14 @@ Key rules:
 
 ```sh
 cd jetbrains-plugin
-./gradlew buildPlugin
+gradle buildPlugin
 # produces build/distributions/sqz-0.1.0.zip
 ```
 
 Run the plugin in a sandboxed IDE to verify before publishing:
 
 ```sh
-./gradlew runIde
+gradle runIde
 ```
 
 ## Publish
@@ -52,13 +54,13 @@ Set your Marketplace token as an environment variable:
 
 ```sh
 export JETBRAINS_TOKEN=<your-token>
-./gradlew publishPlugin
+gradle publishPlugin
 ```
 
 Or pass it directly:
 
 ```sh
-./gradlew publishPlugin -Pplugin.verifier.home.dir=/tmp/verifier \
+gradle publishPlugin -Pplugin.verifier.home.dir=/tmp/verifier \
   -Dorg.gradle.project.intellijPublishToken=$JETBRAINS_TOKEN
 ```
 
@@ -75,7 +77,7 @@ publishPlugin {
 
 ```yaml
 - name: Publish to JetBrains Marketplace
-  run: ./gradlew publishPlugin
+  run: gradle publishPlugin
   working-directory: jetbrains-plugin
   env:
     JETBRAINS_TOKEN: ${{ secrets.JETBRAINS_TOKEN }}

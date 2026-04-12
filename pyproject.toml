@@ -7,14 +7,15 @@ name = "sqz"
 version = "0.1.0"
 description = "Universal context intelligence layer — compresses LLM context across CLI, MCP, browser, and IDE"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Elastic License 2.0 (ELv2)" }
 requires-python = ">=3.8"
 keywords = ["llm", "context", "compression", "mcp", "ai", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
+    "License :: OSI Approved :: Elastic License 2.0 (ELv2)",
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Libraries",
     "Topic :: Utilities",

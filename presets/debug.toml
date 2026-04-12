@@ -1,0 +1,50 @@
+# sqz preset: debug
+# Optimized for debugging sessions — preserves stack traces, error messages,
+# and log context. Aggressive condensing of repeated log lines.
+
+[preset]
+name = "debug"
+version = "1.0"
+description = "Optimized for debugging: stack trace preservation, log folding, error field retention"
+
+[compression]
+stages = ["condense", "strip_fields", "strip_nulls", "truncate_strings", "collapse_arrays"]
+
+[compression.condense]
+enabled = true
+max_repeated_lines = 1
+
+[compression.strip_fields]
+enabled = true
+fields = ["debug_info", "trace_id", "span_id", "request_id", "correlation_id"]
+
+[compression.strip_nulls]
+enabled = true
+
+[compression.truncate_strings]
+enabled = true
+max_length = 800
+
+[compression.collapse_arrays]
+enabled = true
+max_items = 10
+summary_template = "... {remaining} more entries"
+
+[tool_selection]
+max_tools = 5
+similarity_threshold = 0.6
+default_tools = ["read_file", "search", "run_command"]
+
+[budget]
+warning_threshold = 0.75
+ceiling_threshold = 0.90
+default_window_size = 200000
+
+[terse_mode]
+enabled = false
+level = "verbose"
+
+[model]
+family = "anthropic"
+primary = "claude-sonnet-4-20250514"
+complexity_threshold = 0.3

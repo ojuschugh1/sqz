@@ -3,8 +3,8 @@ use crate::error::{Result, SqzError};
 use crate::preset::Preset;
 use crate::prompt_cache::PromptCacheDetector;
 use crate::stages::{
-    CollapseArraysStage, CondenseStage, CustomTransformsStage, FlattenStage, KeepFieldsStage,
-    StripFieldsStage, StripNullsStage, TruncateStringsStage,
+    CollapseArraysStage, CondenseStage, CustomTransformsStage, FlattenStage, GitDiffFoldStage,
+    KeepFieldsStage, StripFieldsStage, StripNullsStage, TruncateStringsStage,
 };
 use crate::toon::ToonEncoder;
 use crate::types::{CompressedContent, Content, ContentType, StageConfig};
@@ -31,6 +31,7 @@ impl CompressionPipeline {
             Box::new(KeepFieldsStage),
             Box::new(StripFieldsStage),
             Box::new(CondenseStage),
+            Box::new(GitDiffFoldStage),
             Box::new(StripNullsStage),
             Box::new(FlattenStage),
             Box::new(TruncateStringsStage),
@@ -121,6 +122,7 @@ impl CompressionPipeline {
             Box::new(KeepFieldsStage),
             Box::new(StripFieldsStage),
             Box::new(CondenseStage),
+            Box::new(GitDiffFoldStage),
             Box::new(StripNullsStage),
             Box::new(FlattenStage),
             Box::new(TruncateStringsStage),
@@ -174,6 +176,10 @@ fn stage_config_from_preset(name: &str, preset: &Preset) -> StageConfig {
                 StageConfig::default()
             }
         }
+        "git_diff_fold" => StageConfig {
+            enabled: true,
+            options: serde_json::json!({ "max_context_lines": 2 }),
+        },
         "strip_nulls" => {
             if let Some(cfg) = &c.strip_nulls {
                 StageConfig {

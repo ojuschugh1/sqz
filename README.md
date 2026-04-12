@@ -74,6 +74,8 @@ npm install -g sqz
 pip install sqz
 ```
 
+> All install channels point to [github.com/ojuschugh1/sqz](https://github.com/ojuschugh1/sqz).
+
 Then:
 
 ```sh
@@ -166,7 +168,7 @@ Continue · Zed · Amazon Q Developer
 Claude Code · Cursor · Copilot · Windsurf · Kiro · Cline · Gemini CLI · Codex · OpenCode · Goose · Aider · Amp
 
 ### Level 3 — Native / Deep
-VS Code · JetBrains · Chrome (ChatGPT, Claude.ai, Gemini, Grok, Perplexity) · API Proxy (OpenAI, Anthropic, Google AI)
+VS Code · JetBrains · Chrome (ChatGPT, Claude.ai, Gemini, Grok, Perplexity)
 
 See [docs/integrations/](docs/integrations/) for platform-specific setup guides.
 

@@ -56,12 +56,16 @@ fn main() {
     });
 
     // Start preset hot-reload watcher (keep handle alive for the process lifetime).
-    let _watcher = server.watch_presets().unwrap_or_else(|e| {
-        eprintln!("[sqz-mcp] warning: preset watcher failed to start: {e}");
-        // Return a no-op watcher by panicking — we handle this gracefully.
-        // In practice the server still works without hot-reload.
-        panic!("watcher failed: {e}");
-    });
+    // If the watcher fails (e.g. invalid/unwatchable preset dir), degrade gracefully —
+    // the server still works, just without hot-reload.
+    let _watcher = match server.watch_presets() {
+        Ok(w) => Some(w),
+        Err(e) => {
+            eprintln!("[sqz-mcp] warning: preset watcher failed to start: {e}");
+            eprintln!("[sqz-mcp] continuing without hot-reload support");
+            None
+        }
+    };
 
     if let Err(e) = server.start(transport) {
         eprintln!("[sqz-mcp] server error: {e}");

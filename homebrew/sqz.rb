@@ -1,5 +1,9 @@
 # Homebrew formula for sqz — universal context intelligence layer
 # Requirement 16.2: brew install sqz
+#
+# NOTE: SHA256 checksums are placeholders and must be populated from release artifacts before publishing.
+# Run: shasum -a 256 <archive>.tar.gz
+# Then replace the PLACEHOLDER values below.
 class Sqz < Formula
   desc "Universal context intelligence layer — compresses LLM context across CLI, MCP, browser, and IDE"
   homepage "https://github.com/ojuschugh1/sqz"

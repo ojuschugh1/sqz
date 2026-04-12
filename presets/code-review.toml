@@ -1,0 +1,50 @@
+# sqz preset: code-review
+# Optimized for code review sessions — preserves diffs, strips noise,
+# keeps error/warning context, collapses large arrays in test output.
+
+[preset]
+name = "code-review"
+version = "1.0"
+description = "Optimized for code review: git diff folding, error preservation, test output condensing"
+
+[compression]
+stages = ["condense", "git_diff_fold", "strip_nulls", "truncate_strings", "collapse_arrays"]
+
+[compression.condense]
+enabled = true
+max_repeated_lines = 2
+
+[compression.git_diff_fold]
+enabled = true
+max_context_lines = 3
+
+[compression.strip_nulls]
+enabled = true
+
+[compression.truncate_strings]
+enabled = true
+max_length = 300
+
+[compression.collapse_arrays]
+enabled = true
+max_items = 3
+summary_template = "... and {remaining} more items"
+
+[tool_selection]
+max_tools = 5
+similarity_threshold = 0.7
+default_tools = ["read_file", "search", "git_diff"]
+
+[budget]
+warning_threshold = 0.70
+ceiling_threshold = 0.85
+default_window_size = 200000
+
+[terse_mode]
+enabled = true
+level = "moderate"
+
+[model]
+family = "anthropic"
+primary = "claude-sonnet-4-20250514"
+complexity_threshold = 0.4

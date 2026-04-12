@@ -93,6 +93,14 @@ enum Command {
         #[arg(long, default_value_t = 3001)]
         port: u16,
     },
+
+    /// [Coming soon] Transparent HTTP proxy that compresses requests to OpenAI/Anthropic/Google AI.
+    /// Sits between your app and the API — no code changes required.
+    Proxy {
+        /// Port to listen on.
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -137,6 +145,7 @@ fn main() {
         Some(Command::Analyze { file, high, low }) => cmd_analyze(file, high, low),
         Some(Command::Tee { action }) => cmd_tee(action),
         Some(Command::Dashboard { port }) => cmd_dashboard(port),
+        Some(Command::Proxy { port }) => cmd_proxy(port),
     }
 }
 
@@ -376,6 +385,22 @@ fn cmd_dashboard(port: u16) {
         eprintln!("[sqz] dashboard error: {e}");
         std::process::exit(1);
     }
+}
+
+/// `sqz proxy [--port N]` — transparent HTTP proxy (coming in a future release).
+fn cmd_proxy(port: u16) {
+    eprintln!(
+        "[sqz] proxy mode is not yet available in this release.\n\
+         \n\
+         The API proxy will sit between your application and OpenAI/Anthropic/Google AI,\n\
+         compressing every request transparently — no code changes required.\n\
+         \n\
+         Planned for v0.2.0. Track progress at:\n\
+         https://github.com/ojuschugh1/sqz/issues\n\
+         \n\
+         (requested port: {port})"
+    );
+    std::process::exit(1);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

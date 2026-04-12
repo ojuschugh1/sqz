@@ -1,0 +1,54 @@
+# sqz preset: docs
+# Optimized for documentation writing — aggressive prose compression,
+# strips internal fields, keeps structure. Best for README/API doc sessions.
+
+[preset]
+name = "docs"
+version = "1.0"
+description = "Optimized for documentation: aggressive prose compression, structure preservation"
+
+[compression]
+stages = ["condense", "strip_fields", "strip_nulls", "flatten", "truncate_strings", "collapse_arrays"]
+
+[compression.condense]
+enabled = true
+max_repeated_lines = 1
+
+[compression.strip_fields]
+enabled = true
+fields = ["metadata.internal_id", "debug_info", "trace_id", "created_at", "updated_at", "id"]
+
+[compression.strip_nulls]
+enabled = true
+
+[compression.flatten]
+enabled = true
+max_depth = 2
+
+[compression.truncate_strings]
+enabled = true
+max_length = 200
+
+[compression.collapse_arrays]
+enabled = true
+max_items = 3
+summary_template = "... {remaining} more"
+
+[tool_selection]
+max_tools = 4
+similarity_threshold = 0.8
+default_tools = ["read_file", "write_file", "search"]
+
+[budget]
+warning_threshold = 0.65
+ceiling_threshold = 0.80
+default_window_size = 150000
+
+[terse_mode]
+enabled = true
+level = "moderate"
+
+[model]
+family = "anthropic"
+primary = "claude-sonnet-4-20250514"
+complexity_threshold = 0.5

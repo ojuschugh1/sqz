@@ -435,6 +435,111 @@ impl CompressionStage for CollapseArraysStage {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 7b: git_diff_fold
+// ---------------------------------------------------------------------------
+
+/// For git diff output, fold consecutive unchanged context lines (lines
+/// starting with a space) into a compact `[N unchanged lines]` marker.
+/// This preserves all changed lines (+/-) and hunk headers (@@) while
+/// dramatically reducing noise from context lines.
+///
+/// Config options:
+///   - `max_context_lines` (u32, default 2) — keep this many context lines
+///     before/after each changed block before folding the rest.
+pub struct GitDiffFoldStage;
+
+impl CompressionStage for GitDiffFoldStage {
+    fn name(&self) -> &str {
+        "git_diff_fold"
+    }
+
+    fn priority(&self) -> u32 {
+        35
+    }
+
+    fn process(&self, content: &mut Content, config: &StageConfig) -> Result<()> {
+        if !config.enabled {
+            return Ok(());
+        }
+        // Only apply to plain text / CLI output that looks like a diff
+        match &content.content_type {
+            ContentType::PlainText | ContentType::CliOutput { .. } => {}
+            _ => return Ok(()),
+        }
+        // Quick check: must contain diff markers
+        if !content.raw.contains("\n+") && !content.raw.contains("\n-") {
+            return Ok(());
+        }
+
+        let max_ctx: usize = config
+            .options
+            .get("max_context_lines")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(2);
+
+        let lines: Vec<&str> = content.raw.lines().collect();
+        let n = lines.len();
+
+        // Mark which lines are "changed" (added, removed, or hunk headers)
+        let is_changed: Vec<bool> = lines
+            .iter()
+            .map(|l| {
+                l.starts_with('+')
+                    || l.starts_with('-')
+                    || l.starts_with("@@")
+                    || l.starts_with("diff ")
+                    || l.starts_with("index ")
+                    || l.starts_with("--- ")
+                    || l.starts_with("+++ ")
+            })
+            .collect();
+
+        // For each context line, determine if it's within max_ctx of a changed line
+        let mut keep = vec![false; n];
+        for i in 0..n {
+            if is_changed[i] {
+                keep[i] = true;
+                // Keep max_ctx lines before
+                for j in i.saturating_sub(max_ctx)..i {
+                    keep[j] = true;
+                }
+                // Keep max_ctx lines after
+                for j in (i + 1)..n.min(i + 1 + max_ctx) {
+                    keep[j] = true;
+                }
+            }
+        }
+
+        // Build output, folding consecutive non-kept lines
+        let mut result = Vec::new();
+        let mut fold_count = 0usize;
+
+        for i in 0..n {
+            if keep[i] {
+                if fold_count > 0 {
+                    result.push(format!("[{fold_count} unchanged lines]"));
+                    fold_count = 0;
+                }
+                result.push(lines[i].to_owned());
+            } else {
+                fold_count += 1;
+            }
+        }
+        if fold_count > 0 {
+            result.push(format!("[{fold_count} unchanged lines]"));
+        }
+
+        let trailing_newline = content.raw.ends_with('\n');
+        content.raw = result.join("\n");
+        if trailing_newline {
+            content.raw.push('\n');
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stage 8: custom_transforms
 // ---------------------------------------------------------------------------
 
@@ -735,6 +840,71 @@ mod tests {
         let mut c = json_content(raw);
         CollapseArraysStage.process(&mut c, &disabled_config()).unwrap();
         assert_eq!(c.raw, raw);
+    }
+
+    // --- git_diff_fold ---
+
+    #[test]
+    fn git_diff_fold_folds_unchanged_lines() {
+        // Use a realistic diff with many unchanged context lines
+        let diff = concat!(
+            "diff --git a/src/main.rs b/src/main.rs\n",
+            "--- a/src/main.rs\n",
+            "+++ b/src/main.rs\n",
+            "@@ -1,12 +1,12 @@\n",
+            " line1\n",
+            " line2\n",
+            " line3\n",
+            " line4\n",
+            " line5\n",
+            " line6\n",
+            "-old line\n",
+            "+new line\n",
+            " line7\n",
+            " line8\n",
+            " line9\n",
+            " line10\n",
+            " line11\n",
+            " line12\n",
+        );
+        let mut c = text_content(diff);
+        let cfg = enabled_config(serde_json::json!({"max_context_lines": 2}));
+        GitDiffFoldStage.process(&mut c, &cfg).unwrap();
+        // Changed lines must be preserved
+        assert!(c.raw.contains("-old line"), "output: {}", c.raw);
+        assert!(c.raw.contains("+new line"), "output: {}", c.raw);
+        // Hunk header must be preserved
+        assert!(c.raw.contains("@@ -1,12"), "output: {}", c.raw);
+        // Output should be shorter (folded lines 1-4 and 9-12)
+        assert!(c.raw.len() < diff.len(), "output should be shorter, got:\n{}", c.raw);
+        // Should contain fold markers
+        assert!(c.raw.contains("unchanged lines"), "expected fold markers in:\n{}", c.raw);
+    }
+
+    #[test]
+    fn git_diff_fold_preserves_hunk_headers() {
+        let diff = "@@ -1,5 +1,5 @@\n unchanged\n-old\n+new\n unchanged\n";
+        let mut c = text_content(diff);
+        let cfg = enabled_config(serde_json::json!({"max_context_lines": 1}));
+        GitDiffFoldStage.process(&mut c, &cfg).unwrap();
+        assert!(c.raw.contains("@@ -1,5 +1,5 @@"), "output: {}", c.raw);
+    }
+
+    #[test]
+    fn git_diff_fold_skips_non_diff_text() {
+        let raw = "just some plain text\nno diff markers here\n";
+        let mut c = text_content(raw);
+        let cfg = enabled_config(serde_json::json!({"max_context_lines": 2}));
+        GitDiffFoldStage.process(&mut c, &cfg).unwrap();
+        assert_eq!(c.raw, raw);
+    }
+
+    #[test]
+    fn git_diff_fold_disabled_passthrough() {
+        let diff = "diff --git a/f b/f\n-old\n+new\n unchanged\n unchanged\n unchanged\n";
+        let mut c = text_content(diff);
+        GitDiffFoldStage.process(&mut c, &disabled_config()).unwrap();
+        assert_eq!(c.raw, diff);
     }
 
     // --- custom_transforms ---
