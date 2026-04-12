@@ -59,10 +59,26 @@
       }
       el.dispatchEvent(new Event('input', { bubbles: true }));
     } else {
-      // contenteditable — use execCommand for undo-stack compatibility
+      // contenteditable (ProseMirror) — use Selection API scoped to the element
+      // to avoid document.execCommand('selectAll') navigating away on Chrome
       el.focus();
-      document.execCommand('selectAll', false, null);
-      document.execCommand('insertText', false, text);
+      try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.execCommand('insertText', false, text);
+        // If execCommand didn't work (some Chrome versions), fall back to direct DOM
+        if (el.innerText !== text && el.textContent !== text) {
+          el.innerText = text;
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+        }
+      } catch (e) {
+        // Last resort: direct assignment
+        el.innerText = text;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      }
     }
   }
 
