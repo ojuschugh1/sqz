@@ -511,6 +511,8 @@ function sqzAttachInterceptor(opts) {
   let pendingCompressed = null;
   let pendingOriginal = null;
   let lastCompressedText = null; // track what we last wrote to prevent re-trigger
+  let lastStableTokens = 0; // track token count to detect stable state
+  let stableCount = 0; // how many times we've seen the same token count
 
   // Handle text grabbed directly from clipboard (before site converts to attachment)
   async function handlePastedText(el, clipText) {
@@ -547,7 +549,6 @@ function sqzAttachInterceptor(opts) {
 
     // Skip if this is the text we just wrote via compression
     if (lastCompressedText && text === lastCompressedText) return;
-    // Also skip if text is a substring match (editor may add/strip trailing whitespace)
     if (lastCompressedText && text.trim() === lastCompressedText.trim()) return;
     // Clear the marker if user has typed new content
     lastCompressedText = null;
@@ -556,8 +557,23 @@ function sqzAttachInterceptor(opts) {
     if (tokens <= TOKEN_THRESHOLD) {
       pendingCompressed = null;
       pendingOriginal = null;
+      lastStableTokens = 0;
+      stableCount = 0;
       sqzRemovePreview();
       return;
+    }
+
+    // Detect stable state: if token count hasn't changed for 3+ checks, stop
+    if (tokens === lastStableTokens) {
+      stableCount++;
+      if (stableCount >= 3) {
+        // Text is stable — no further compression possible, remove banner
+        sqzRemovePreview();
+        return;
+      }
+    } else {
+      lastStableTokens = tokens;
+      stableCount = 1;
     }
 
     console.log('[sqz][' + siteName + '] Input exceeds threshold: ' + tokens + ' tokens (' + text.length + ' chars)');
