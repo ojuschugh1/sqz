@@ -216,30 +216,20 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool) {
     let engine = require_engine();
 
     // Apply mode override if specified
-    let effective_mode = match mode {
+    let result = match mode {
         "safe" => {
             eprintln!("[sqz] mode: safe (preserving all content)");
-            Some(sqz_engine::CompressionMode::Safe)
+            engine.compress_with_mode(&input, sqz_engine::CompressionMode::Safe)
         }
         "aggressive" => {
             eprintln!("[sqz] mode: aggressive (maximum reduction)");
-            Some(sqz_engine::CompressionMode::Aggressive)
+            engine.compress_with_mode(&input, sqz_engine::CompressionMode::Aggressive)
         }
-        "default" => Some(sqz_engine::CompressionMode::Default),
-        _ => None, // auto: let confidence router decide
-    };
-
-    // If mode is forced to safe, use compress_with_provenance to bypass router
-    let result = if effective_mode == Some(sqz_engine::CompressionMode::Safe) {
-        engine.compress_with_provenance(
-            &input,
-            sqz_engine::Provenance { label: Some("safe-mode-forced".to_string()), ..Default::default() },
-        )
-    } else {
-        engine.compress(&input)
-    };
-
-    match result {
+        "default" => {
+            engine.compress_with_mode(&input, sqz_engine::CompressionMode::Default)
+        }
+        _ => engine.compress(&input), // auto: confidence router decides
+    };    match result {
         Ok(c) => {
             print!("{}", c.data);
             let reduction = (1.0 - c.compression_ratio) * 100.0;

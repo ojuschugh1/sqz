@@ -153,6 +153,30 @@ impl SqzEngine {
         Ok(result)
     }
 
+    /// Compress with explicit mode override, bypassing the confidence router.
+    ///
+    /// - `CompressionMode::Safe` → safe pipeline only (ANSI strip + condense)
+    /// - `CompressionMode::Default` → standard pipeline
+    /// - `CompressionMode::Aggressive` → standard pipeline (aggressive preset TBD)
+    pub fn compress_with_mode(&self, input: &str, mode: crate::confidence_router::CompressionMode) -> Result<CompressedContent> {
+        let pipeline = self.pipeline.lock()
+            .map_err(|_| SqzError::Other("pipeline lock poisoned".into()))?;
+        let ctx = crate::pipeline::SessionContext {
+            session_id: "engine".to_string(),
+        };
+
+        match mode {
+            crate::confidence_router::CompressionMode::Safe => {
+                self.compress_safe(input, &pipeline, &ctx)
+            }
+            _ => {
+                // Default and Aggressive: run normal pipeline + verify
+                drop(pipeline); // release lock before calling compress()
+                self.compress(input)
+            }
+        }
+    }
+
     /// Safe-mode compression: minimal transforms only (ANSI strip + condense).
     fn compress_safe(
         &self,
