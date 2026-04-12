@@ -26,7 +26,11 @@ mod tests {
     }
 
     fn run_bench(content_type: &'static str, input: &str, critical_marker: &str) -> BenchResult {
-        let engine = SqzEngine::new().expect("engine init");
+        // Use a temp DB per test to avoid SQLite locking in parallel CI
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("bench.db");
+        let preset = crate::preset::Preset::default();
+        let engine = SqzEngine::with_preset_and_store(preset, &store_path).expect("engine init");
         let result = engine.compress(input).expect("compress");
 
         let original_tokens = estimate_tokens(input);
