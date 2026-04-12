@@ -6,7 +6,6 @@ members = [
     "sqz-wasm",
 ]
 resolver = "2"
-rust-version = "1.85"
 
 # ── Release profile: strip symbols and enable LTO for minimal binary size ──
 # Requirement 16.1: single statically-linked binary per platform.
