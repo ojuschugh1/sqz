@@ -170,6 +170,9 @@ fn cmd_init() {
         }
     }
 
+    // Install shell completions
+    install_completions(&hook);
+
     // Create default preset directory and file.
     let preset_dir = default_preset_dir();
     if let Err(e) = std::fs::create_dir_all(&preset_dir) {
@@ -437,6 +440,41 @@ fn default_preset_dir() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     home.join(".sqz").join("presets")
+}
+
+/// Install shell completions for the detected shell.
+fn install_completions(hook: &ShellHook) {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    let (dest, content) = match hook {
+        ShellHook::Fish => (
+            home.join(".config").join("fish").join("completions").join("sqz.fish"),
+            include_str!("../../completions/sqz.fish"),
+        ),
+        ShellHook::Zsh => (
+            home.join(".zsh").join("completions").join("_sqz"),
+            include_str!("../../completions/sqz.zsh"),
+        ),
+        ShellHook::Bash => (
+            home.join(".local").join("share").join("bash-completion").join("completions").join("sqz"),
+            include_str!("../../completions/sqz.bash"),
+        ),
+        _ => return, // Nushell/PowerShell: completions handled differently
+    };
+
+    if let Some(parent) = dest.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return; // silently skip if we can't create the dir
+        }
+    }
+
+    match std::fs::write(&dest, content) {
+        Ok(()) => println!("[sqz] completions installed to {}", dest.display()),
+        Err(_) => {} // silently skip — completions are optional
+    }
 }
 
 const DEFAULT_PRESET_TOML: &str = r#"[meta]
