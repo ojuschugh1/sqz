@@ -31,7 +31,7 @@ jobs:
           npm version "$VERSION" --no-git-tag-version
 
       - name: Publish to npm
-        run: cd npm && npm publish
+        run: cd npm && npm publish --access=public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -59,7 +59,7 @@ jobs:
         run: python -m build
 
       - name: Publish to PyPI
-        run: twine upload dist/*
+        run: twine upload --verbose dist/*
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
