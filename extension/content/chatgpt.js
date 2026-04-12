@@ -25,22 +25,31 @@
     if (!el) return;
 
     // Remove ChatGPT's auto-generated file attachments from pasted text
-    // DOM: div.relative.flex.group\/file with button containing × icon
+    // DOM: div[role="group"] with class containing "file-tile"
     try {
+      // Target the file tile containers
       var fileTiles = document.querySelectorAll(
+        'div[role="group"][class*="file-tile"], ' +
         '[class*="group/file"], [class*="file-tile"], [class*="file_tile"]'
       );
       fileTiles.forEach(function(tile) {
-        // Look for a close/remove button inside
+        // The close button is inside a nested div with data-default-action="true"
+        // Its aria-label contains the file name, not "Remove"
         var closeBtn = tile.querySelector(
+          'button[class*="interactive-bg-secondary"], ' +
           'button[aria-label*="Remove"], button[aria-label*="remove"], ' +
-          'button[aria-label*="Delete"], button[aria-label*="Close"], ' +
-          'button[class*="interactive-bg-secondary"]'
+          'button[aria-label*="Delete"], button[aria-label*="Close"]'
         );
         if (closeBtn) {
           closeBtn.click();
         } else {
-          tile.remove();
+          // Try clicking any button inside the tile as fallback
+          var anyBtn = tile.querySelector('button');
+          if (anyBtn) {
+            anyBtn.click();
+          } else {
+            tile.remove();
+          }
         }
       });
     } catch (e) {
