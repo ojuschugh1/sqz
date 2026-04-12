@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Phase 1 — Core Engine + CLI Proxy
 - Rust workspace with 4 crates: `sqz_engine`, `sqz`, `sqz-mcp`, `sqz-wasm`
-- Core data model types and enums (Content, SessionState, Preset, etc.)
+- Core data model types and enums (`Content`, `Session`, `Preset` with `PresetHeader`, `CacheResult`, etc.; `SessionState` / `PresetMeta` kept as compatibility aliases)
 - TOON encoder/decoder — lossless JSON compression with ASCII-safe output
 - 8-stage compression pipeline (keep_fields, strip_fields, condense, strip_nulls, flatten, truncate_strings, collapse_arrays, custom_transforms)
 - TOML preset parser with validation and hot-reload

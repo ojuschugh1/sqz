@@ -82,7 +82,7 @@ impl PresetParser {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preset {
-    pub preset: PresetMeta,
+    pub preset: PresetHeader,
     pub compression: CompressionConfig,
     pub tool_selection: ToolSelectionConfig,
     pub budget: BudgetConfig,
@@ -90,13 +90,20 @@ pub struct Preset {
     pub model: ModelConfig,
 }
 
+/// Identity block at the top of every `.toml` preset file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PresetMeta {
+pub struct PresetHeader {
+    /// Short human-readable name, e.g. `"code-review"`.
     pub name: String,
+    /// Semver string, e.g. `"1.0"`.
     pub version: String,
+    /// Optional one-line description shown in `sqz preset list`.
     #[serde(default)]
     pub description: String,
 }
+
+// Keep PresetMeta as an alias so existing code compiles
+pub type PresetMeta = PresetHeader;
 
 // --- Compression ---
 

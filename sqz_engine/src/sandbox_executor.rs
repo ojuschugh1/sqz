@@ -44,17 +44,17 @@ pub struct RuntimeInfo {
     pub language: &'static str,
 }
 
-/// Result of a sandbox execution.
+/// Output captured from a single sandbox subprocess run.
 #[derive(Debug, Clone)]
 pub struct SandboxResult {
-    /// Captured stdout (the only thing that enters the context window).
+    /// Text written to stdout — the only data that enters the context window.
     pub stdout: String,
-    /// Process exit code.
-    pub exit_code: i32,
-    /// Whether output was truncated due to max_output_bytes.
-    pub truncated: bool,
-    /// True if output was indexed into FTS5 due to size + intent filtering.
-    pub indexed: bool,
+    /// Process exit status code.
+    pub status_code: i32,
+    /// Set when stdout was cut short due to the `max_output_bytes` limit.
+    pub was_truncated: bool,
+    /// Set when stdout was routed through FTS5 intent filtering.
+    pub was_indexed: bool,
 }
 
 /// Threshold in bytes above which intent-driven filtering kicks in.
@@ -314,7 +314,7 @@ impl SandboxExecutor {
         if should_filter {
             let intent_str = intent.unwrap(); // safe: checked above
             let filtered = OutputFilter::filter(&result.stdout, intent_str)?;
-            result.indexed = true;
+            result.was_indexed = true;
             // Replace stdout with only the matched sections so the LLM
             // context window receives the filtered view.
             result.stdout = filtered.matched_sections.join("\n\n");
@@ -444,9 +444,9 @@ impl SandboxExecutor {
             Ok(status) => {
                 return Ok(SandboxResult {
                     stdout: String::new(),
-                    exit_code: status.code().unwrap_or(1),
-                    truncated: false,
-                    indexed: false,
+                    status_code: status.code().unwrap_or(1),
+                    was_truncated: false,
+                    was_indexed: false,
                 });
             }
             Err(e) => return Err(SqzError::Io(e)),
@@ -501,9 +501,9 @@ impl SandboxExecutor {
 
         Ok(SandboxResult {
             stdout,
-            exit_code: status.code().unwrap_or(-1),
-            truncated,
-            indexed: false,
+            status_code: status.code().unwrap_or(-1),
+            was_truncated: truncated,
+            was_indexed: false,
         })
     }
 }
@@ -651,9 +651,9 @@ mod tests {
             return; // skip if no shell
         }
         let result = executor.execute("echo hello sandbox", "shell").unwrap();
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.status_code, 0);
         assert_eq!(result.stdout.trim(), "hello sandbox");
-        assert!(!result.truncated);
+        assert!(!result.was_truncated);
     }
 
     #[test]
@@ -680,7 +680,7 @@ echo "also visible""#;
             return;
         }
         let result = executor.execute("print('hello from python')", "python").unwrap();
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.status_code, 0);
         assert_eq!(result.stdout.trim(), "hello from python");
     }
 
@@ -692,7 +692,7 @@ echo "also visible""#;
             return;
         }
         let result = executor.execute("exit 42", "shell").unwrap();
-        assert_eq!(result.exit_code, 42);
+        assert_eq!(result.status_code, 42);
     }
 
     #[test]
@@ -718,7 +718,7 @@ echo "also visible""#;
         let result = executor
             .execute("for i in $(seq 1 100); do echo \"line $i\"; done", "shell")
             .unwrap();
-        assert!(result.truncated);
+        assert!(result.was_truncated);
         assert!(result.stdout.len() <= 32);
     }
 
@@ -856,8 +856,8 @@ echo "also visible""#;
         let (result, filtered) = executor
             .execute_with_intent("echo hello", "shell", Some("hello"))
             .unwrap();
-        assert_eq!(result.exit_code, 0);
-        assert!(!result.indexed);
+        assert_eq!(result.status_code, 0);
+        assert!(!result.was_indexed);
         assert!(filtered.is_none());
     }
 
@@ -872,7 +872,7 @@ echo "also visible""#;
         let (result, filtered) = executor
             .execute_with_intent(code, "shell", None)
             .unwrap();
-        assert!(!result.indexed);
+        assert!(!result.was_indexed);
         assert!(filtered.is_none());
     }
 
@@ -896,7 +896,7 @@ for i in $(seq 1 50); do echo "success: test suite $i passed with 100% coverage"
         let (result, filtered) = executor
             .execute_with_intent(code, "shell", Some("error compilation"))
             .unwrap();
-        assert!(result.indexed, "large output with intent should be indexed");
+        assert!(result.was_indexed, "large output with intent should be indexed");
         let filtered = filtered.expect("should have filtered output");
         assert!(!filtered.matched_sections.is_empty(), "should have matched sections");
         assert!(!filtered.vocabulary.is_empty(), "should have vocabulary");

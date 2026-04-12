@@ -8,15 +8,17 @@ use crate::preset::Preset;
 use crate::session_store::SessionStore;
 use crate::types::CompressedContent;
 
-/// Result returned by [`CacheManager::get_or_compress`].
+/// Outcome of a cache lookup in [`CacheManager`].
 pub enum CacheResult {
-    /// Cache hit — return a compact reference token (~13 tokens).
-    Hit {
-        reference_token: String,
-        tokens: u32,
+    /// Previously seen content — returns a short inline reference (~13 tokens).
+    Dedup {
+        /// Inline token of the form `§ref:<hash_prefix>§`.
+        inline_ref: String,
+        /// Approximate token cost of the reference (always 13).
+        token_cost: u32,
     },
-    /// Cache miss — full compressed content.
-    Miss { compressed: CompressedContent },
+    /// Content not seen before — full compression result.
+    Fresh { output: CompressedContent },
 }
 
 /// SHA-256 content-hash deduplication cache backed by [`SessionStore`].
@@ -42,9 +44,9 @@ impl CacheManager {
 
     /// Look up `content` in the cache.
     ///
-    /// - On hit: return `CacheResult::Hit` with a compact reference token.
-    /// - On miss: compress via `pipeline`, persist to store, return
-    ///   `CacheResult::Miss`.
+    /// - On dedup: return `CacheResult::Dedup` with a compact reference token.
+    /// - On fresh: compress via `pipeline`, persist to store, return
+    ///   `CacheResult::Fresh`.
     pub fn get_or_compress(
         &self,
         _path: &Path,
@@ -54,17 +56,14 @@ impl CacheManager {
         let hash = Self::sha256_hex(content);
 
         if self.store.get_cache_entry(&hash)?.is_some() {
-            // Cache hit — build a compact reference token using the first 16
-            // hex chars of the hash (8 bytes, unambiguous enough for a session).
             let hash_prefix = &hash[..16];
-            let reference_token = format!("§ref:{hash_prefix}§");
-            return Ok(CacheResult::Hit {
-                reference_token,
-                tokens: 13,
+            let inline_ref = format!("§ref:{hash_prefix}§");
+            return Ok(CacheResult::Dedup {
+                inline_ref,
+                token_cost: 13,
             });
         }
 
-        // Cache miss — compress and persist.
         let text = String::from_utf8_lossy(content).into_owned();
         let ctx = SessionContext {
             session_id: "cache".to_string(),
@@ -73,7 +72,7 @@ impl CacheManager {
         let compressed = pipeline.compress(&text, &ctx, &preset)?;
         self.store.save_cache_entry(&hash, &compressed)?;
 
-        Ok(CacheResult::Miss { compressed })
+        Ok(CacheResult::Fresh { output: compressed })
     }
 
     /// Invalidate the cache entry for `path` if its current content is known.
@@ -205,7 +204,7 @@ mod tests {
         let result = cm
             .get_or_compress(Path::new("file.txt"), content, &pipeline)
             .unwrap();
-        assert!(matches!(result, CacheResult::Miss { .. }));
+        assert!(matches!(result, CacheResult::Fresh { .. }));
     }
 
     #[test]
@@ -222,15 +221,15 @@ mod tests {
         // Second read — hit
         let result = cm.get_or_compress(path, content, &pipeline).unwrap();
         match result {
-            CacheResult::Hit {
-                reference_token,
-                tokens,
+            CacheResult::Dedup {
+                inline_ref,
+                token_cost,
             } => {
-                assert!(reference_token.starts_with("§ref:"));
-                assert!(reference_token.ends_with('§'));
-                assert_eq!(tokens, 13);
+                assert!(inline_ref.starts_with("§ref:"));
+                assert!(inline_ref.ends_with('§'));
+                assert_eq!(token_cost, 13);
             }
-            CacheResult::Miss { .. } => panic!("expected cache hit"),
+            CacheResult::Fresh { .. } => panic!("expected cache hit"),
         }
     }
 
@@ -245,7 +244,7 @@ mod tests {
         let result = cm
             .get_or_compress(path, b"content v2", &pipeline)
             .unwrap();
-        assert!(matches!(result, CacheResult::Miss { .. }));
+        assert!(matches!(result, CacheResult::Fresh { .. }));
     }
 
     #[test]
@@ -297,16 +296,14 @@ mod tests {
         let hit = cm
             .get_or_compress(&file_path, &content, &pipeline)
             .unwrap();
-        assert!(matches!(hit, CacheResult::Hit { .. }));
+        assert!(matches!(hit, CacheResult::Dedup { .. }));
 
-        // Invalidate.
         cm.invalidate(&file_path).unwrap();
 
-        // Now it should be a miss again.
         let miss = cm
             .get_or_compress(&file_path, &content, &pipeline)
             .unwrap();
-        assert!(matches!(miss, CacheResult::Miss { .. }));
+        assert!(matches!(miss, CacheResult::Fresh { .. }));
     }
 
     #[test]
@@ -346,28 +343,27 @@ mod tests {
             // First read — must be a miss.
             let first = cm.get_or_compress(path, &content, &pipeline).unwrap();
             prop_assert!(
-                matches!(first, CacheResult::Miss { .. }),
+                matches!(first, CacheResult::Fresh { .. }),
                 "first read should be a cache miss"
             );
 
-            // Second read — must be a hit with tokens == 13.
             let second = cm.get_or_compress(path, &content, &pipeline).unwrap();
             match second {
-                CacheResult::Hit { reference_token, tokens } => {
+                CacheResult::Dedup { inline_ref, token_cost } => {
                     prop_assert_eq!(
-                        tokens, 13,
+                        token_cost, 13,
                         "cache hit should report ~13 reference tokens"
                     );
                     prop_assert!(
-                        reference_token.starts_with("§ref:"),
+                        inline_ref.starts_with("§ref:"),
                         "reference token should start with §ref:"
                     );
                     prop_assert!(
-                        reference_token.ends_with('§'),
+                        inline_ref.ends_with('§'),
                         "reference token should end with §"
                     );
                 }
-                CacheResult::Miss { .. } => {
+                CacheResult::Fresh { .. } => {
                     prop_assert!(false, "second read should be a cache hit, not a miss");
                 }
             }
@@ -402,21 +398,19 @@ mod tests {
             // Cache content_a.
             let r1 = cm.get_or_compress(path, &content_a, &pipeline).unwrap();
             prop_assert!(
-                matches!(r1, CacheResult::Miss { .. }),
+                matches!(r1, CacheResult::Fresh { .. }),
                 "first read of content_a should be a miss"
             );
 
-            // Verify content_a is now a hit.
             let r2 = cm.get_or_compress(path, &content_a, &pipeline).unwrap();
             prop_assert!(
-                matches!(r2, CacheResult::Hit { .. }),
+                matches!(r2, CacheResult::Dedup { .. }),
                 "second read of content_a should be a hit"
             );
 
-            // Read with changed content (content_b) — must be a miss.
             let r3 = cm.get_or_compress(path, &content_b, &pipeline).unwrap();
             prop_assert!(
-                matches!(r3, CacheResult::Miss { .. }),
+                matches!(r3, CacheResult::Fresh { .. }),
                 "read with changed content should be a cache miss"
             );
         }
@@ -509,7 +503,7 @@ mod tests {
 
                 let r = cm.get_or_compress(path, &content, &pipeline).unwrap();
                 prop_assert!(
-                    matches!(r, CacheResult::Miss { .. }),
+                    matches!(r, CacheResult::Fresh { .. }),
                     "first read should be a miss"
                 );
             }
@@ -524,13 +518,13 @@ mod tests {
                 // Same content should now be a hit.
                 let r = cm.get_or_compress(path, &content, &pipeline).unwrap();
                 match r {
-                    CacheResult::Hit { tokens, .. } => {
+                    CacheResult::Dedup { token_cost, .. } => {
                         prop_assert_eq!(
-                            tokens, 13,
+                            token_cost, 13,
                             "persisted cache hit should report 13 tokens"
                         );
                     }
-                    CacheResult::Miss { .. } => {
+                    CacheResult::Fresh { .. } => {
                         prop_assert!(
                             false,
                             "cache entry should persist across store reopen"

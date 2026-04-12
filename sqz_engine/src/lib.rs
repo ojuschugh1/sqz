@@ -77,8 +77,8 @@ pub use types::*;
 pub use preset::{
     BudgetConfig, CollapseArraysConfig, CompressionConfig, CondenseConfig, CustomTransformsConfig,
     FlattenConfig, GitDiffFoldConfig, KeepFieldsConfig, ModelConfig, ModelPricingConfig, Preset,
-    PresetMeta, PresetParser, StripFieldsConfig, StripNullsConfig, TerseLevel, TerseModeConfig,
-    ToolSelectionConfig, TruncateStringsConfig,
+    PresetHeader, PresetMeta, PresetParser, StripFieldsConfig, StripNullsConfig, TerseLevel,
+    TerseModeConfig, ToolSelectionConfig, TruncateStringsConfig,
 };
 pub use progressive_throttle::{ProgressiveThrottler, ThrottleConfig, ThrottleLevel};
 pub use dashboard::{

@@ -109,7 +109,7 @@ pub struct CompressedContent {
 // --- Session types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationTurn {
+pub struct Turn {
     pub role: Role,
     pub content: String,
     pub tokens: u32,
@@ -117,30 +117,38 @@ pub struct ConversationTurn {
     pub timestamp: DateTime<Utc>,
 }
 
+pub type ConversationTurn = Turn;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PinEntry {
+pub struct PinnedSegment {
     pub turn_index: usize,
     pub reason: String,
     pub tokens: u32,
 }
 
+pub type PinEntry = PinnedSegment;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Learning {
+pub struct KvFact {
     pub key: String,
     pub value: String,
     pub source_turn: usize,
 }
 
+pub type Learning = KvFact;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BudgetState {
+pub struct WindowUsage {
     pub window_size: u32,
     pub consumed: u32,
     pub pinned: u32,
     pub model_family: ModelFamily,
 }
 
+pub type BudgetState = WindowUsage;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolUsageRecord {
+pub struct ToolCall {
     pub tool_name: String,
     pub tokens_input: u32,
     pub tokens_output: u32,
@@ -148,8 +156,10 @@ pub struct ToolUsageRecord {
     pub timestamp: DateTime<Utc>,
 }
 
+pub type ToolUsageRecord = ToolCall;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CorrectionEntry {
+pub struct EditRecord {
     pub id: CorrectionId,
     pub timestamp: DateTime<Utc>,
     pub original: String,
@@ -157,25 +167,32 @@ pub struct CorrectionEntry {
     pub context: String,
 }
 
+pub type CorrectionEntry = EditRecord;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CorrectionLog {
-    pub entries: Vec<CorrectionEntry>,
+pub struct EditHistory {
+    pub entries: Vec<EditRecord>,
 }
 
+pub type CorrectionLog = EditHistory;
+
+/// Active compression session — tracks conversation, budget, and tool usage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionState {
+pub struct Session {
     pub id: SessionId,
     pub project_dir: PathBuf,
-    pub conversation: Vec<ConversationTurn>,
-    pub corrections: CorrectionLog,
-    pub pins: Vec<PinEntry>,
-    pub learnings: Vec<Learning>,
+    pub conversation: Vec<Turn>,
+    pub corrections: EditHistory,
+    pub pins: Vec<PinnedSegment>,
+    pub learnings: Vec<KvFact>,
     pub compressed_summary: String,
-    pub budget: BudgetState,
-    pub tool_usage: Vec<ToolUsageRecord>,
+    pub budget: WindowUsage,
+    pub tool_usage: Vec<ToolCall>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+pub type SessionState = Session;
 
 /// Configuration for a single compression stage
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

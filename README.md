@@ -173,10 +173,10 @@ Native VS Code and JetBrains extensions that intercept file reads at the editor 
 - **ANSI auto-strip** — removes color codes before compression
 
 ### Caching & Memory
-- **SHA-256 file cache** — re-reads cost ~13 tokens, LRU eviction, persisted across sessions
-- **SQLite FTS5 session store** — cross-session memory with full-text search
+- **SHA-256 file cache** — on a miss, content is compressed and stored; on a hit, the engine returns a compact inline reference (~13 tokens) instead of resending the full payload. LRU eviction, persisted across sessions. (Rust API: `CacheResult::Dedup` vs `Fresh`.)
+- **SQLite FTS5 session store** — cross-session memory with full-text search (`Session` in code; `SessionState` is a compatibility alias)
 - **Correction log** — immutable append-only log that survives compaction
-- **CTX format** — portable session state across Claude, GPT, and Gemini
+- **CTX format** — portable session graph across Claude, GPT, and Gemini
 
 ### Intelligence
 - **Prompt cache awareness** — preserves Anthropic 90% and OpenAI 50% cache boundaries
@@ -228,7 +228,7 @@ sqz cost <session>    # Show USD cost breakdown
 
 ## Configuration
 
-sqz uses TOML presets with hot-reload:
+sqz uses TOML presets with hot-reload. The `[preset]` table maps to the Rust `PresetHeader` type (`name`, `version`, optional `description`).
 
 ```toml
 [preset]
@@ -277,7 +277,7 @@ complexity_threshold = 0.4
        │  Compression Pipeline (8 stages)     │
        │  TOON Encoder (lossless JSON)        │
        │  AST Parser (tree-sitter + regex, 18 langs)  │
-       │  Cache Manager (SHA-256 dedup)       │
+       │  Cache manager (SHA-256 file cache)        │
        │  Session Store (SQLite FTS5)         │
        │  Budget Tracker (multi-agent)        │
        │  Cost Calculator (real-time USD)     │
@@ -310,6 +310,10 @@ cargo test --workspace    # 549 tests
 cargo build --release     # optimized binary
 ```
 
+### Rust API names
+
+Downstream crates should prefer **`Session`** and **`PresetHeader`**. **`SessionState`** and **`PresetMeta`** remain as `type` aliases. Sandbox output uses **`SandboxResult`** fields `status_code`, `was_truncated`, and `was_indexed`.
+
 ### Project Structure
 
 ```
@@ -330,7 +334,7 @@ The test suite includes 549 tests with 57 property-based correctness properties 
 - TOON round-trip fidelity
 - Compression preserves semantically significant content
 - ASCII-safe output across all inputs
-- Cache deduplication and invalidation
+- File cache — deduplication, hits, and invalidation
 - Budget token count invariants
 - Pin/unpin compaction round-trips
 - CTX format round-trip serialization
