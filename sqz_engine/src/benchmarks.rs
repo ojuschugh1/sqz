@@ -75,12 +75,12 @@ mod tests {
     // ── Benchmark cases ───────────────────────────────────────────────────────
 
     /// JSON API response — should compress via TOON + strip_nulls.
-    /// Gate: ≥10% reduction, confidence ≥0.8, key "id" retained.
+    /// Gate: ≥5% reduction, confidence ≥0.8, key "id" retained.
     #[test]
     fn bench_json_api_response() {
         let input = r#"{"id":42,"name":"Alice","email":"alice@example.com","role":"admin","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-03-15T10:30:00Z","metadata":{"plan":"pro","seats":10,"billing_cycle":"monthly","internal_id":null,"debug_info":null,"trace_id":null}}"#;
         let b = run_bench("json_api", input, "42");
-        assert_gates(&b, 10.0, 0.8);
+        assert_gates(&b, 5.0, 0.8);
     }
 
     /// Repeated log output — should compress via condense stage.

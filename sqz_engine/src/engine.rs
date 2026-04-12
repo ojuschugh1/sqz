@@ -113,7 +113,7 @@ impl SqzEngine {
     ///
     /// Two-pass pipeline:
     /// 1. Route to compression mode based on content entropy and risk patterns.
-    /// 2. Compress using the pipeline.
+    /// 2. Compress using the pipeline (safe preset for Safe mode, default otherwise).
     /// 3. Verify invariants (error lines, JSON keys, diff hunks, etc.).
     /// 4. If verification confidence is low, fall back to safe mode and re-compress.
     pub fn compress(&self, input: &str) -> Result<CompressedContent> {
@@ -125,17 +125,24 @@ impl SqzEngine {
             session_id: "engine".to_string(),
         };
 
-        // Pass 1: compress
+        // Step 1: Route — check content risk before compressing
+        let mode = self.confidence_router.route(input);
+
+        // Step 2: If Safe mode, skip aggressive pipeline and go straight to safe compress
+        if mode == crate::confidence_router::CompressionMode::Safe {
+            return self.compress_safe(input, &pipeline, &ctx);
+        }
+
+        // Step 3: Compress with the configured pipeline
         let mut result = pipeline.compress(input, &ctx, &preset)?;
 
-        // Pass 2: verify invariants
+        // Step 4: Verify invariants
         let verify = Verifier::verify(input, &result.data);
         let fallback = verify.fallback_triggered;
         result.verify = Some(verify);
 
-        // If verifier signals low confidence, re-compress with safe settings
+        // Step 5: If verifier signals low confidence, re-compress with safe settings
         if fallback && result.data != input {
-            // Safe mode: only strip ANSI and condense repeated lines
             let safe_result = self.compress_safe(input, &pipeline, &ctx)?;
             return Ok(safe_result);
         }

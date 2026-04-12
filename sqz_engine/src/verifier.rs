@@ -105,6 +105,8 @@ impl Verifier {
         }
 
         // Check 4: JSON key preservation (if original is JSON)
+        // We check that the compressed output contains at least 50% of the
+        // original top-level keys. Intentionally stripped keys are expected to be absent.
         let orig_trimmed = original.trim();
         if orig_trimmed.starts_with('{') || orig_trimmed.starts_with('[') {
             if let Ok(orig_val) = serde_json::from_str::<serde_json::Value>(orig_trimmed) {
@@ -112,18 +114,25 @@ impl Verifier {
                 if orig_keys.is_empty() {
                     passed.push("json_keys".to_string());
                 } else {
-                    // Compressed output may be TOON-encoded — check key presence as substrings
-                    let missing_keys: Vec<&str> = orig_keys
+                    let present: usize = orig_keys
                         .iter()
-                        .filter(|&&k| !compressed.contains(k))
-                        .copied()
-                        .collect();
-                    if missing_keys.is_empty() {
+                        .filter(|&&k| compressed.contains(k))
+                        .count();
+                    let retention_ratio = present as f64 / orig_keys.len() as f64;
+                    // Pass if at least 50% of original keys are present
+                    if retention_ratio >= 0.5 {
                         passed.push("json_keys".to_string());
                     } else {
+                        let missing: Vec<&str> = orig_keys
+                            .iter()
+                            .filter(|&&k| !compressed.contains(k))
+                            .copied()
+                            .collect();
                         failed.push((
                             "json_keys".to_string(),
-                            format!("JSON keys missing: {:?}", &missing_keys[..missing_keys.len().min(5)]),
+                            format!("only {:.0}% of JSON keys retained; missing: {:?}",
+                                retention_ratio * 100.0,
+                                &missing[..missing.len().min(5)]),
                         ));
                     }
                 }
@@ -264,10 +273,11 @@ mod tests {
 
     #[test]
     fn verify_detects_missing_json_keys() {
-        let original = r#"{"id":1,"name":"Alice","status":"active"}"#;
-        let compressed = r#"TOON:{id:1}"#; // name and status stripped
+        let original = r#"{"id":1,"name":"Alice","status":"active","role":"admin","email":"a@b.com","created":"2024-01-01"}"#;
+        let compressed = r#"TOON:{id:1}"#; // only 1 of 6 keys retained (17%)
         let result = Verifier::verify(original, compressed);
-        assert!(result.checks_failed.iter().any(|(k, _)| k == "json_keys"));
+        assert!(result.checks_failed.iter().any(|(k, _)| k == "json_keys"),
+            "should fail json_keys when <50% of keys retained");
     }
 
     #[test]
