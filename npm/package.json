@@ -1,5 +1,5 @@
 {
-  "name": "@ojuschugh1/sqz",
+  "name": "sqz",
   "version": "0.1.0",
   "description": "Universal context intelligence layer — compresses LLM context across CLI, MCP, browser, and IDE",
   "keywords": ["llm", "context", "compression", "mcp", "ai", "cli"],
