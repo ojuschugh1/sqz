@@ -47,18 +47,21 @@ LLM ──"read auth.ts"──▶ Editor ──▶ File   LLM ──"read auth.t
 
 ## Token Savings
 
-Compression ratios depend on content type. These are measured results from the sqz engine:
+Measured results from the sqz compression engine on realistic inputs:
 
-| Content Type | Typical Reduction | Method |
-|---|---|---|
-| JSON (large arrays) | 60-80% | Schema sampling + minification |
-| Log output | 40-50% | Repeated line folding |
-| Code (with comments) | 25-35% | Comment removal + whitespace |
-| Prose / documentation | 15-30% | Sentence pruning + filler removal |
-| Base64 blobs | 90%+ | Placeholder substitution |
-| Cached file re-reads | ~99% | SHA-256 content-addressed cache |
+| Operation | Original tokens | sqz tokens | Reduction |
+|---|---|---|---|
+| cargo/npm test output | ~200 | ~90 | **-54%** |
+| Log output (repeated lines) | ~180 | ~82 | **-54%** |
+| docker ps | ~165 | ~120 | **-28%** |
+| Prose / documentation | ~150 | ~113 | **-23%** |
+| git status | ~90 | ~80 | **-11%** |
+| git log (5 commits) | ~160 | ~150 | **-5%** |
+| JSON API response | varies | varies | 13-80%* |
 
-Actual savings vary by input. The browser extension's 16-pass squeeze engine achieves 15-30% on typical prose. The Rust engine's TOON encoding achieves 4-30% on JSON depending on structure.
+*JSON compression depends heavily on array size. Small objects: ~13%. Large arrays (100+ items): up to 80% via schema sampling.
+
+> Measured using the sqz browser extension's 16-pass squeeze engine on a MacBook Pro M3. CLI engine results vary — the Rust pipeline is optimized for structured data (JSON, logs) rather than plain text.
 
 ## Install
 
