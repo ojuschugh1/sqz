@@ -15,6 +15,10 @@
 </p>
 
 <p align="center">
+  <em>sqz: Compress what is safe, preserve what is critical.</em>
+</p>
+
+<p align="center">
   Single Rust binary · Zero telemetry · 549 tests · 57 property-based correctness proofs
 </p>
 
@@ -91,6 +95,16 @@ Measured by compressing 138 real text/code/config files in this repo with `sqz c
 | `cargo test --workspace` | 10,750 | 10,750 | **0.0%** |
 
 > Why some operations show 0%: sqz is intentionally conservative on outputs it classifies as high-risk or already compact, and preserves critical/error-heavy outputs via fallback semantics.
+
+### Why sqz may show lower savings than some tools
+
+sqz is optimized for trust and correctness first, not maximum compression at any cost.
+
+- **Conservative guardrails:** verifier + safe mode reduce over-compression risk.
+- **Faithfulness-first behavior:** critical content (errors, stack traces, diffs, key JSON fields) is preserved by design.
+- **Real benchmarks over marketing benchmarks:** numbers shown here are measured on real runs, not idealized samples.
+- **Content-dependent savings:** repetitive logs and large arrays compress heavily; already compact code/test outputs often compress less.
+- **No cheap wins:** sqz intentionally avoids aggressive deletions that can hurt model reliability.
 
 ## Install
 
