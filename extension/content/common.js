@@ -510,9 +510,10 @@ function sqzAttachInterceptor(opts) {
 
   let pendingCompressed = null;
   let pendingOriginal = null;
-  let lastCompressedText = null; // track what we last wrote to prevent re-trigger
-  let lastStableTokens = 0; // track token count to detect stable state
-  let stableCount = 0; // how many times we've seen the same token count
+  let lastCompressedText = null;
+  let lastStableTokens = 0;
+  let stableCount = 0;
+  let isProcessing = false; // lock to prevent concurrent handleInput calls
 
   // Handle text grabbed directly from clipboard (before site converts to attachment)
   async function handlePastedText(el, clipText) {
@@ -545,6 +546,11 @@ function sqzAttachInterceptor(opts) {
   }
 
   async function handleInput(el) {
+    // Prevent concurrent calls — async compression can overlap with MutationObserver
+    if (isProcessing) return;
+    isProcessing = true;
+
+    try {
     const text = getText(el);
 
     // Skip if this is the text we just wrote via compression
@@ -607,6 +613,9 @@ function sqzAttachInterceptor(opts) {
         pendingOriginal = null;
       }
     );
+    } finally {
+      isProcessing = false;
+    }
   }
 
   function handleSubmit() {
