@@ -245,15 +245,10 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
-        /// **Validates: Requirements 40.1, 40.2**
-        ///
-        /// Property 42: Progressive throttling enforces limits
-        ///
-        /// For any sequence of N identical tool calls with arbitrary config
-        /// thresholds, calls 1..=normal_limit are Normal, calls
-        /// (normal_limit+1)..=reduced_limit are Reduced, and calls
-        /// > reduced_limit are Blocked. After reset(), all levels return
-        /// to Normal.
+        // Validates: Requirements 40.1, 40.2
+        // Property 42: Progressive throttling enforces limits
+        // For any sequence of N identical tool calls, calls 1..=normal_limit are Normal,
+        // (normal_limit+1)..=reduced_limit are Reduced, and calls > reduced_limit are Blocked.
         proptest! {
             #[test]
             fn progressive_throttling_enforces_limits(

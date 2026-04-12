@@ -12,6 +12,7 @@ const DEFAULT_MAX_SNAPSHOT_BYTES: usize = 2048;
 const MAX_GUIDE_CHARS: usize = 2000;
 
 /// Maximum token budget for the Session Guide.
+#[cfg(test)]
 const MAX_GUIDE_TOKENS: u32 = 500;
 
 // ── Event types ───────────────────────────────────────────────────────────────

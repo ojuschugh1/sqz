@@ -25,7 +25,7 @@ pub struct CompressionPipeline {
 impl CompressionPipeline {
     /// Construct the pipeline from a preset, creating all 8 built-in stages
     /// sorted by priority.
-    pub fn new(preset: &Preset) -> Self {
+    pub fn new(_preset: &Preset) -> Self {
         let mut stages: Vec<Box<dyn crate::stages::CompressionStage>> = vec![
             Box::new(AnsiStripper),
             Box::new(KeepFieldsStage),
@@ -39,8 +39,6 @@ impl CompressionPipeline {
             Box::new(CustomTransformsStage),
         ];
         stages.sort_by_key(|s| s.priority());
-
-        let _ = preset; // preset is used for config lookup in compress()
 
         Self {
             stages,
@@ -118,7 +116,7 @@ impl CompressionPipeline {
     /// Rebuild stage list from a new preset (hot-reload support).
     /// Built-in stages are recreated; plugin stages are dropped and must be
     /// re-inserted by the caller.
-    pub fn reload_preset(&mut self, preset: &Preset) -> Result<()> {
+    pub fn reload_preset(&mut self, _preset: &Preset) -> Result<()> {
         let mut stages: Vec<Box<dyn crate::stages::CompressionStage>> = vec![
             Box::new(AnsiStripper),
             Box::new(KeepFieldsStage),
@@ -133,7 +131,6 @@ impl CompressionPipeline {
         ];
         stages.sort_by_key(|s| s.priority());
         self.stages = stages;
-        let _ = preset;
         Ok(())
     }
 }

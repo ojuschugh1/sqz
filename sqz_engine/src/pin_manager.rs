@@ -250,12 +250,9 @@ mod tests {
 
     // ── Property tests ────────────────────────────────────────────────────────
 
-    /// **Property 13: Pin/unpin compaction round-trip**
-    ///
-    /// **Validates: Requirements 10.1, 10.4**
-    ///
-    /// For any turn_index, after pin then unpin, `is_compaction_eligible`
-    /// returns `true`.
+    // Property 13: Pin/unpin compaction round-trip
+    // Validates: Requirements 10.1, 10.4
+    // For any turn_index, after pin then unpin, is_compaction_eligible returns true.
     proptest! {
         #[test]
         fn prop_pin_unpin_restores_compaction_eligibility(
@@ -285,12 +282,10 @@ mod tests {
         }
     }
 
-    /// **Property 14: Pin persistence**
-    ///
-    /// **Validates: Requirements 10.2**
-    ///
-    /// For any set of pin entries saved to the Session_Store, reloading the
-    /// session SHALL produce the same set of pin entries.
+    // Property 14: Pin persistence
+    // Validates: Requirements 10.2
+    // For any set of pin entries saved to the Session_Store, reloading the
+    // session produces the same set of pin entries.
     proptest! {
         #[test]
         fn prop_pins_persist_across_store_reload(

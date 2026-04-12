@@ -25,22 +25,14 @@
     if (!el) return;
 
     // Remove ChatGPT's auto-generated file attachments from pasted text
-    // DOM: div.relative.flex.group\/file with button containing × icon
+    // Search the entire document for "Remove file" buttons — most reliable approach
     try {
-      var fileTiles = document.querySelectorAll(
-        '[class*="group/file"], [class*="file-tile"], [class*="file_tile"]'
-      );
-      fileTiles.forEach(function(tile) {
-        // Look for a close/remove button inside
-        var closeBtn = tile.querySelector(
-          'button[aria-label*="Remove"], button[aria-label*="remove"], ' +
-          'button[aria-label*="Delete"], button[aria-label*="Close"], ' +
-          'button[class*="interactive-bg-secondary"]'
-        );
-        if (closeBtn) {
-          closeBtn.click();
-        } else {
-          tile.remove();
+      // Find ALL "Remove file" buttons anywhere in the document
+      var allButtons = document.querySelectorAll('button[aria-label]');
+      allButtons.forEach(function(btn) {
+        var label = btn.getAttribute('aria-label') || '';
+        if (label.startsWith('Remove file') || label.startsWith('Remove File')) {
+          btn.click();
         }
       });
     } catch (e) {
@@ -59,10 +51,26 @@
       }
       el.dispatchEvent(new Event('input', { bubbles: true }));
     } else {
-      // contenteditable — use execCommand for undo-stack compatibility
+      // contenteditable (ProseMirror) — use Selection API scoped to the element
+      // to avoid document.execCommand('selectAll') navigating away on Chrome
       el.focus();
-      document.execCommand('selectAll', false, null);
-      document.execCommand('insertText', false, text);
+      try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.execCommand('insertText', false, text);
+        // If execCommand didn't work (some Chrome versions), fall back to direct DOM
+        if (el.innerText !== text && el.textContent !== text) {
+          el.innerText = text;
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+        }
+      } catch (e) {
+        // Last resort: direct assignment
+        el.innerText = text;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      }
     }
   }
 

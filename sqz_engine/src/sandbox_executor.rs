@@ -915,14 +915,14 @@ for i in $(seq 1 50); do echo "success: test suite $i passed with 100% coverage"
             "[a-zA-Z0-9]{1,20}"
         }
 
-        /// **Validates: Requirements 30.1, 30.2**
-        ///
-        /// Property 35: Sandbox execution isolation — stdout only
-        ///
-        /// For any code execution that writes to both stdout and stderr,
-        /// only stdout content appears in the returned SandboxResult.
-        /// We use distinct prefixes to guarantee stdout and stderr
-        /// messages are distinguishable.
+        // **Validates: Requirements 30.1, 30.2**
+        //
+        // Property 35: Sandbox execution isolation — stdout only
+        //
+        // For any code execution that writes to both stdout and stderr,
+        // only stdout content appears in the returned SandboxResult.
+        // We use distinct prefixes to guarantee stdout and stderr
+        // messages are distinguishable.
         proptest! {
             #[test]
             fn prop_only_stdout_captured(
@@ -957,13 +957,13 @@ for i in $(seq 1 50); do echo "success: test suite $i passed with 100% coverage"
             }
         }
 
-        /// **Validates: Requirements 30.1, 30.2**
-        ///
-        /// Property 35: Sandbox execution isolation — subprocess isolation
-        ///
-        /// Each execution runs in an isolated subprocess with no shared
-        /// state. Setting an env var in one execution must not be visible
-        /// in a subsequent execution.
+        // **Validates: Requirements 30.1, 30.2**
+        //
+        // Property 35: Sandbox execution isolation — subprocess isolation
+        //
+        // Each execution runs in an isolated subprocess with no shared
+        // state. Setting an env var in one execution must not be visible
+        // in a subsequent execution.
         proptest! {
             #[test]
             fn prop_no_shared_state_between_executions(
