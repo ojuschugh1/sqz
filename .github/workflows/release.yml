@@ -37,9 +37,9 @@ jobs:
             os: ubuntu-latest
             cross: true
 
-          # macOS x86_64
+          # macOS x86_64 (cross-compiled on Apple Silicon runner)
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             cross: false
 
           # macOS aarch64 (Apple Silicon)
