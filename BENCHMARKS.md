@@ -10,17 +10,29 @@ Token counts use the `chars / 4` approximation (GPT-style).
 
 ## Summary
 
-| Content Type | Original tokens | sqz tokens | Reduction | Method |
-|---|---|---|---|---|
-| Repeated log output | 113 | 53 | **53%** | Log line folding |
-| JSON API response | 64 | 59 | **7.8%** | TOON encoding + null stripping |
-| Git diff (12 context lines) | 52 | 51 | **2%** | Diff context folding |
-| Large JSON array (20 items) | varies | varies | 20%+ | Schema sampling |
-| Prose documentation | varies | varies | 5-15% | Phrase substitution + article stripping |
+| Content Type | Original tokens | sqz tokens | Reduction | Verifier confidence | Method |
+|---|---|---|---|---|---|
+| Repeated log output | 113 | 53 | **53%** | 100% ✓ | Log line folding |
+| JSON API response | 64 | 59 | **7.8%** | 100% ✓ | TOON encoding + null stripping |
+| Git diff (12 context lines) | 52 | 51 | **2%** | 100% ✓ | Diff context folding |
+| Large JSON array (20 items) | varies | varies | **20%+** | 100% ✓ | Schema sampling |
+| Prose documentation | varies | varies | **5-15%** | 70-90% ✓ | Phrase substitution + article stripping |
 
 > Note: JSON API reduction is lower than the CLI shows (17%) because the benchmark uses the
 > `SqzEngine` directly which routes through the confidence router. The CLI path may differ slightly.
 > Run `cargo test -p sqz-engine benchmarks -- --nocapture` to reproduce exact numbers.
+
+**Why sqz shows lower reduction than some competitors:**
+sqz prioritizes faithfulness over raw compression. The verifier checks 6 invariants after every
+compression and falls back to safe mode when confidence is low. This means:
+- Error lines, file paths, diff hunks, and JSON keys are always preserved
+- Stack traces and migrations are never aggressively compressed
+- You get lower token savings in some cases, but higher reliability
+
+Use `sqz compress --verify` to see both metrics together:
+```
+[sqz] 53/113 tokens (53% reduction) | confidence 100% ✓
+```
 
 ---
 

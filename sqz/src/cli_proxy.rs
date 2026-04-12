@@ -53,6 +53,72 @@ pub const CLI_PATTERNS: &[&str] = &[
     "ffmpeg", "convert", "identify",
 ];
 
+// ── Command-aware pre-processors ─────────────────────────────────────────
+
+/// git log: strip author email lines, keep hash + subject + date
+fn preprocess_git_log(output: &str) -> String {
+    output.lines()
+        .filter(|l| !l.starts_with("Author:") || l.contains("@"))
+        .filter(|l| {
+            // Keep lines that aren't just "Author: Name <email>" — keep the rest
+            let lower = l.trim().to_lowercase();
+            !lower.starts_with("author:") || lower.contains("error") || lower.contains("merge")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// docker ps: strip container ID column (first 12-char hex), keep image+name+status
+fn preprocess_docker_ps(output: &str) -> String {
+    let mut result = Vec::new();
+    for line in output.lines() {
+        // Skip lines that are just a 12-char hex ID at the start
+        let trimmed = line.trim_start();
+        if trimmed.len() > 12 {
+            let prefix = &trimmed[..12];
+            if prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+                // Replace the ID with a short placeholder
+                result.push(format!("[id] {}", &trimmed[12..].trim_start()));
+                continue;
+            }
+        }
+        result.push(line.to_owned());
+    }
+    result.join("\n")
+}
+
+/// ls -la: strip inode numbers, collapse permission strings
+fn preprocess_ls(output: &str) -> String {
+    output.lines()
+        .map(|line| {
+            // Remove inode column if present (ls -i)
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() > 2 && parts[0].chars().all(|c| c.is_ascii_digit()) {
+                // Likely inode number — skip it
+                parts[1..].join(" ")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// npm/yarn install: strip progress bars, download lines, keep summary
+fn preprocess_package_install(output: &str) -> String {
+    output.lines()
+        .filter(|l| {
+            let t = l.trim();
+            // Skip progress/download noise
+            !t.starts_with("npm warn") && !t.starts_with("npm notice")
+            && !t.contains("⠋") && !t.contains("⠙") && !t.contains("⠹")
+            && !t.contains("downloading") && !t.contains("Downloading")
+            && !t.starts_with("fetch") && !t.starts_with("Fetching")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ── CliProxy ─────────────────────────────────────────────────────────────
 
 pub struct CliProxy {
@@ -87,13 +153,35 @@ impl CliProxy {
         }
     }
 
-    /// Internal: run `output` through the engine pipeline.
+    /// Internal: run `output` through the engine pipeline with command-aware pre-processing.
+    ///
+    /// Low-risk commands (ls, git status, docker ps, etc.) get additional
+    /// command-specific transforms before the main pipeline.
     fn compress_output(
         &self,
-        _cmd: &str,
+        cmd: &str,
         output: &str,
     ) -> sqz_engine::Result<CompressedContent> {
-        self.engine.compress(output)
+        let base_cmd = cmd.split_whitespace().next().unwrap_or(cmd)
+            .rsplit('/').next().unwrap_or(cmd)
+            .rsplit('\\').next().unwrap_or(cmd);
+
+        // Apply command-specific pre-processing for low-risk outputs
+        let preprocessed = match base_cmd {
+            // git log: strip author email, keep hash+message
+            "git" if cmd.contains("log") => preprocess_git_log(output),
+            // docker ps: strip container IDs (first 12 chars), keep names
+            "docker" if cmd.contains("ps") => preprocess_docker_ps(output),
+            // ls -la: strip inode numbers and timestamps
+            "ls" => preprocess_ls(output),
+            // npm/yarn install: strip progress bars and download lines
+            "npm" | "yarn" | "pnpm" if cmd.contains("install") || cmd.contains("add") => {
+                preprocess_package_install(output)
+            }
+            _ => output.to_owned(),
+        };
+
+        self.engine.compress(&preprocessed)
     }
 
     /// Return `true` when `cmd` matches one of the registered CLI patterns.

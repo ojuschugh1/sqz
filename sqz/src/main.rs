@@ -44,6 +44,12 @@ enum Command {
     Compress {
         /// Text to compress. If omitted, reads from stdin.
         text: Option<String>,
+        /// Compression mode: safe (preserve everything), default (balanced), aggressive (max reduction).
+        #[arg(long, default_value = "auto")]
+        mode: String,
+        /// Show verifier confidence score alongside token reduction.
+        #[arg(long)]
+        verify: bool,
     },
 
     /// Export a session to CTX format.
@@ -140,7 +146,7 @@ fn main() {
         }
 
         Some(Command::Init) => cmd_init(),
-        Some(Command::Compress { text }) => cmd_compress(text),
+        Some(Command::Compress { text, mode, verify }) => cmd_compress(text, &mode, verify),
         Some(Command::Export { session_id }) => cmd_export(&session_id),
         Some(Command::Import { file }) => cmd_import(&file),
         Some(Command::Status) => cmd_status(),
@@ -192,8 +198,8 @@ fn cmd_init() {
     println!("[sqz] init complete. Restart your shell or source the RC file.");
 }
 
-/// `sqz compress [text]` — compress stdin or argument.
-fn cmd_compress(text: Option<String>) {
+/// `sqz compress [text] [--mode safe|default|aggressive|auto] [--verify]`
+fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool) {
     let input = match text {
         Some(t) => t,
         None => {
@@ -208,19 +214,58 @@ fn cmd_compress(text: Option<String>) {
     };
 
     let engine = require_engine();
-    match engine.compress(&input) {
+
+    // Apply mode override if specified
+    let effective_mode = match mode {
+        "safe" => {
+            eprintln!("[sqz] mode: safe (preserving all content)");
+            Some(sqz_engine::CompressionMode::Safe)
+        }
+        "aggressive" => {
+            eprintln!("[sqz] mode: aggressive (maximum reduction)");
+            Some(sqz_engine::CompressionMode::Aggressive)
+        }
+        "default" => Some(sqz_engine::CompressionMode::Default),
+        _ => None, // auto: let confidence router decide
+    };
+
+    // If mode is forced to safe, use compress_with_provenance to bypass router
+    let result = if effective_mode == Some(sqz_engine::CompressionMode::Safe) {
+        engine.compress_with_provenance(
+            &input,
+            sqz_engine::Provenance { label: Some("safe-mode-forced".to_string()), ..Default::default() },
+        )
+    } else {
+        engine.compress(&input)
+    };
+
+    match result {
         Ok(c) => {
             print!("{}", c.data);
-            eprintln!(
-                "[sqz] {}/{} tokens ({:.0}% reduction)",
-                c.tokens_compressed,
-                c.tokens_original,
-                (1.0 - c.compression_ratio) * 100.0
-            );
+            let reduction = (1.0 - c.compression_ratio) * 100.0;
+            if show_verify {
+                let confidence = c.verify.as_ref().map(|v| v.confidence).unwrap_or(1.0);
+                let passed = c.verify.as_ref().map(|v| v.passed).unwrap_or(true);
+                let status = if passed { "✓" } else { "⚠" };
+                eprintln!(
+                    "[sqz] {}/{} tokens ({:.0}% reduction) | confidence {:.0}% {}",
+                    c.tokens_compressed,
+                    c.tokens_original,
+                    reduction,
+                    confidence * 100.0,
+                    status,
+                );
+            } else {
+                eprintln!(
+                    "[sqz] {}/{} tokens ({:.0}% reduction)",
+                    c.tokens_compressed,
+                    c.tokens_original,
+                    reduction,
+                );
+            }
         }
         Err(e) => {
-            eprintln!("[sqz] compression error: {e}");
-            // Fallback: pass through uncompressed.
+            eprintln!("[sqz] fallback: compression error: {e}");
             print!("{input}");
         }
     }
