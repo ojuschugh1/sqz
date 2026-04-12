@@ -130,6 +130,7 @@ impl SqzEngine {
 
         // Step 2: If Safe mode, skip aggressive pipeline and go straight to safe compress
         if mode == crate::confidence_router::CompressionMode::Safe {
+            eprintln!("[sqz] fallback: safe mode — content classified as high-risk (stack trace / migration / secret)");
             return self.compress_safe(input, &pipeline, &ctx);
         }
 
@@ -143,6 +144,8 @@ impl SqzEngine {
 
         // Step 5: If verifier signals low confidence, re-compress with safe settings
         if fallback && result.data != input {
+            eprintln!("[sqz] fallback: verifier confidence {:.2} below threshold — re-compressing in safe mode",
+                result.verify.as_ref().map(|v| v.confidence).unwrap_or(0.0));
             let safe_result = self.compress_safe(input, &pipeline, &ctx)?;
             return Ok(safe_result);
         }

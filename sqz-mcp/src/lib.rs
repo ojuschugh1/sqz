@@ -364,6 +364,8 @@ impl McpServer {
                             serde_json::json!({
                                 "name": t.id,
                                 "description": t.description,
+                                "inputSchema": t.input_schema,
+                                "sqz:transforms": t.compression_transforms,
                             })
                         }).collect();
                         JsonRpcResponse::ok(req.id, serde_json::json!({ "tools": tool_list }))
@@ -411,47 +413,145 @@ impl McpServer {
 // ── Default tool definitions ──────────────────────────────────────────────────
 
 /// Returns the default set of MCP tool definitions registered at startup.
+/// Each tool includes:
+/// - `input_schema`: JSON Schema for the tool's input parameters
+/// - `compression_transforms`: exactly what sqz does to this tool's output
 pub fn default_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             id: "read_file".to_string(),
             name: "Read File".to_string(),
             description: "Read the contents of a file from the filesystem. Returns file content as text.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute or relative file path" }
+                },
+                "required": ["path"]
+            }),
+            compression_transforms: vec![
+                "sha256_cache: re-reads cost ~13 tokens if content unchanged".to_string(),
+                "ast_extract: code files → signatures only (functions, classes, types)".to_string(),
+                "ansi_strip: removes color codes".to_string(),
+                "truncate_strings: strings > 500 chars are truncated with '...'".to_string(),
+            ],
         },
         ToolDefinition {
             id: "write_file".to_string(),
             name: "Write File".to_string(),
             description: "Write or overwrite a file on the filesystem with the provided content.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path to write" },
+                    "content": { "type": "string", "description": "Content to write" }
+                },
+                "required": ["path", "content"]
+            }),
+            compression_transforms: vec![
+                "passthrough: write confirmations are short, no compression applied".to_string(),
+            ],
         },
         ToolDefinition {
             id: "search_files".to_string(),
             name: "Search Files".to_string(),
             description: "Search for files matching a pattern or containing specific text content.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Search pattern or text" },
+                    "path": { "type": "string", "description": "Directory to search in" }
+                },
+                "required": ["pattern"]
+            }),
+            compression_transforms: vec![
+                "condense: repeated identical match lines collapsed to max 3".to_string(),
+                "path_shorten: common path prefixes replaced with ~/".to_string(),
+                "git_diff_fold: unchanged context lines folded if output is diff-like".to_string(),
+            ],
         },
         ToolDefinition {
             id: "list_directory".to_string(),
             name: "List Directory".to_string(),
             description: "List the contents of a directory, showing files and subdirectories.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Directory path to list" }
+                },
+                "required": ["path"]
+            }),
+            compression_transforms: vec![
+                "path_shorten: common path prefixes replaced with ~/".to_string(),
+                "condense: repeated permission/ownership patterns collapsed".to_string(),
+            ],
         },
         ToolDefinition {
             id: "execute_command".to_string(),
             name: "Execute Command".to_string(),
             description: "Execute a shell command and return its stdout and stderr output.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command to execute" },
+                    "cwd": { "type": "string", "description": "Working directory (optional)" }
+                },
+                "required": ["command"]
+            }),
+            compression_transforms: vec![
+                "ansi_strip: removes color/formatting codes".to_string(),
+                "condense: repeated output lines collapsed to max 3".to_string(),
+                "git_diff_fold: diff output has unchanged context lines folded".to_string(),
+                "log_fold: repeated log lines with timestamps folded to [xN]".to_string(),
+                "safe_fallback: error/warning lines always preserved verbatim".to_string(),
+            ],
         },
         ToolDefinition {
             id: "edit_file".to_string(),
             name: "Edit File".to_string(),
             description: "Apply targeted edits to a file by replacing specific text sections.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path to edit" },
+                    "old_str": { "type": "string", "description": "Text to replace" },
+                    "new_str": { "type": "string", "description": "Replacement text" }
+                },
+                "required": ["path", "old_str", "new_str"]
+            }),
+            compression_transforms: vec![
+                "passthrough: edit confirmations are short, no compression applied".to_string(),
+            ],
         },
         ToolDefinition {
             id: "create_directory".to_string(),
             name: "Create Directory".to_string(),
             description: "Create a new directory at the specified path.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Directory path to create" }
+                },
+                "required": ["path"]
+            }),
+            compression_transforms: vec![
+                "passthrough: directory creation confirmations are short".to_string(),
+            ],
         },
         ToolDefinition {
             id: "delete_file".to_string(),
             name: "Delete File".to_string(),
             description: "Delete a file or empty directory from the filesystem.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to delete" }
+                },
+                "required": ["path"]
+            }),
+            compression_transforms: vec![
+                "passthrough: deletion confirmations are short".to_string(),
+            ],
         },
     ]
 }

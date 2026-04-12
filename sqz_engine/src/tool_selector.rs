@@ -1,15 +1,23 @@
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Result, SqzError};
 use crate::preset::Preset;
 use crate::types::ToolId;
 
 /// A tool definition with an id, name, and description.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolDefinition {
     pub id: ToolId,
     pub name: String,
     pub description: String,
+    /// JSON Schema for the tool's input parameters.
+    #[serde(default)]
+    pub input_schema: serde_json::Value,
+    /// Description of what sqz does to this tool's output.
+    #[serde(default)]
+    pub compression_transforms: Vec<String>,
 }
 
 /// Bag-of-words representation: a set of lowercase word tokens.
@@ -171,6 +179,7 @@ mod tests {
                 description: format!(
                     "This tool performs operation number {i} for task category alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega {i}"
                 ),
+                ..Default::default()
             })
             .collect()
     }
@@ -254,6 +263,7 @@ mod tests {
             id: "t1".to_string(),
             name: "T1".to_string(),
             description: "alpha beta gamma".to_string(),
+            ..Default::default()
         }];
         selector.register_tools(&tools).unwrap();
 
@@ -261,6 +271,7 @@ mod tests {
             id: "t1".to_string(),
             name: "T1".to_string(),
             description: "delta epsilon zeta".to_string(),
+            ..Default::default()
         };
         selector.update_tool(&updated).unwrap();
 
@@ -277,6 +288,7 @@ mod tests {
             id: "nonexistent".to_string(),
             name: "X".to_string(),
             description: "desc".to_string(),
+            ..Default::default()
         });
         assert!(result.is_err());
     }

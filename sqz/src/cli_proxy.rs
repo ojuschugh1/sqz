@@ -81,7 +81,7 @@ impl CliProxy {
         match self.compress_output(cmd, output) {
             Ok(compressed) => compressed.data,
             Err(e) => {
-                eprintln!("[sqz] compression error for command '{cmd}': {e}");
+                eprintln!("[sqz] fallback: compression error for command '{cmd}': {e}");
                 output.to_owned()
             }
         }
