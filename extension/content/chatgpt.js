@@ -25,26 +25,14 @@
     if (!el) return;
 
     // Remove ChatGPT's auto-generated file attachments from pasted text
-    // DOM: div[role="group"] with class containing "file-tile"
-    // Close button: aria-label starts with "Remove file"
+    // Search the entire document for "Remove file" buttons — most reliable approach
     try {
-      var fileTiles = document.querySelectorAll(
-        'div[role="group"][class*="file-tile"], ' +
-        '[class*="group/file"], [class*="file-tile"], [class*="file_tile"]'
-      );
-      fileTiles.forEach(function(tile) {
-        // Primary: aria-label starts with "Remove file" (ChatGPT's exact pattern)
-        var closeBtn = tile.querySelector(
-          'button[aria-label^="Remove file"], ' +
-          'button[class*="interactive-bg-primary"][aria-label*="Remove"], ' +
-          'button[class*="interactive-bg-secondary"], ' +
-          'button[aria-label*="Remove"], button[aria-label*="remove"], ' +
-          'button[aria-label*="Delete"], button[aria-label*="Close"]'
-        );
-        if (closeBtn) {
-          closeBtn.click();
-        } else {
-          tile.remove();
+      // Find ALL "Remove file" buttons anywhere in the document
+      var allButtons = document.querySelectorAll('button[aria-label]');
+      allButtons.forEach(function(btn) {
+        var label = btn.getAttribute('aria-label') || '';
+        if (label.startsWith('Remove file') || label.startsWith('Remove File')) {
+          btn.click();
         }
       });
     } catch (e) {
