@@ -11,6 +11,15 @@
 // Cross-browser API shim (Firefox uses browser.*, Chrome uses chrome.*)
 const sqzApi = typeof browser !== 'undefined' ? browser : chrome;
 
+// Check if extension context is still valid (invalidated after reload during dev)
+function sqzContextValid() {
+  try {
+    return !!(sqzApi && sqzApi.runtime && sqzApi.runtime.id);
+  } catch (e) {
+    return false;
+  }
+}
+
 console.log('[sqz] Common content script loaded');
 
 // ---------------------------------------------------------------------------
@@ -517,6 +526,7 @@ function sqzAttachInterceptor(opts) {
 
   // Handle text grabbed directly from clipboard (before site converts to attachment)
   async function handlePastedText(el, clipText) {
+    if (!sqzContextValid()) return;
     const originalTokens = sqzEstimateTokens(clipText);
     const compressed = await sqzCompress(clipText);
     const compressedTokens = sqzEstimateTokens(compressed);
@@ -546,6 +556,7 @@ function sqzAttachInterceptor(opts) {
   }
 
   async function handleInput(el) {
+    if (!sqzContextValid()) return;
     // Prevent concurrent calls — async compression can overlap with MutationObserver
     if (isProcessing) return;
     isProcessing = true;
