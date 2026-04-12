@@ -257,7 +257,7 @@ mod tests {
     use super::*;
     use crate::preset::{
         BudgetConfig, CollapseArraysConfig, CompressionConfig, CondenseConfig,
-        CustomTransformsConfig, GitDiffFoldConfig, ModelConfig, PresetMeta,
+        CustomTransformsConfig, ModelConfig, PresetMeta,
         StripNullsConfig, ToolSelectionConfig, TruncateStringsConfig,
         TerseModeConfig,
     };
