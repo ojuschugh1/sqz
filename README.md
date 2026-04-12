@@ -61,7 +61,7 @@ Measured results from the sqz compression engine on realistic inputs:
 
 *JSON compression depends heavily on array size. Small objects: ~13%. Large arrays (100+ items): up to 80% via schema sampling.
 
-> Measured using the sqz browser extension's 16-pass squeeze engine on a MacBook Pro M3. CLI engine results vary — the Rust pipeline is optimized for structured data (JSON, logs) rather than plain text.
+> Measured using the sqz browser extension's 16-pass squeeze engine. CLI engine results vary — the Rust pipeline is optimized for structured data (JSON, logs) rather than plain text.
 
 ## Install
 
