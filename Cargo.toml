@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "sqz_engine",
+    "sqz",
+    "sqz-mcp",
+    "sqz-wasm",
+]
+resolver = "2"
+
+# ── Release profile: strip symbols and enable LTO for minimal binary size ──
+# Requirement 16.1: single statically-linked binary per platform.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+thiserror = "1"
+rusqlite = { version = "0.31", features = ["bundled", "vtab", "array"] }
+toml = "0.8"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+
+proptest = "1"

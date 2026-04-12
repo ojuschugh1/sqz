@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>sqz</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      background: #1a1a2e;
+      color: #e0e0e0;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 1px solid #2e2e4e;
+    }
+
+    header h1 {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: #a0a0ff;
+    }
+
+    header span.tagline {
+      font-size: 11px;
+      color: #888;
+    }
+
+    section {
+      padding: 12px 16px;
+      border-bottom: 1px solid #2e2e4e;
+    }
+
+    section h2 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #888;
+      margin-bottom: 8px;
+    }
+
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 3px 0;
+    }
+
+    .stat-label { color: #aaa; }
+    .stat-value { font-weight: 600; color: #e0e0e0; }
+    .stat-value.highlight { color: #a0a0ff; }
+
+    .setting-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+    }
+
+    .setting-label { color: #ccc; }
+
+    /* Toggle switch */
+    .toggle {
+      position: relative;
+      width: 36px;
+      height: 20px;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: #444;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toggle-slider::before {
+      content: '';
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      left: 3px;
+      top: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .toggle input:checked + .toggle-slider { background: #4a4a8a; }
+    .toggle input:checked + .toggle-slider::before { transform: translateX(16px); }
+
+    select {
+      background: #2e2e4e;
+      color: #e0e0e0;
+      border: 1px solid #4a4a8a;
+      border-radius: 4px;
+      padding: 3px 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    footer {
+      padding: 8px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    button.reset-btn {
+      background: transparent;
+      color: #888;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    button.reset-btn:hover { color: #ccc; border-color: #666; }
+
+    .version { font-size: 10px; color: #555; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>sqz</h1>
+    <span class="tagline">context compression</span>
+  </header>
+
+  <section aria-label="Compression statistics">
+    <h2>Stats</h2>
+    <div class="stat-row">
+      <span class="stat-label">Compressions</span>
+      <span class="stat-value" id="stat-compressions">0</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Tokens saved</span>
+      <span class="stat-value highlight" id="stat-saved">0</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Reduction</span>
+      <span class="stat-value highlight" id="stat-reduction">—</span>
+    </div>
+  </section>
+
+  <section aria-label="Settings">
+    <h2>Settings</h2>
+
+    <div class="setting-row">
+      <span class="setting-label">Enable compression</span>
+      <label class="toggle" aria-label="Enable compression">
+        <input type="checkbox" id="setting-enabled" checked />
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+
+    <div class="setting-row">
+      <span class="setting-label">Show preview banner</span>
+      <label class="toggle" aria-label="Show preview banner">
+        <input type="checkbox" id="setting-preview" checked />
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+
+    <div class="setting-row">
+      <span class="setting-label">Preset</span>
+      <select id="setting-preset" aria-label="Compression preset">
+        <option value="default">Default</option>
+        <option value="aggressive">Aggressive</option>
+        <option value="minimal">Minimal</option>
+      </select>
+    </div>
+  </section>
+
+  <footer>
+    <button class="reset-btn" id="btn-reset">Reset stats</button>
+    <span class="version">v0.1.0</span>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

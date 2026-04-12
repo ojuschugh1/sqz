@@ -1,0 +1,69 @@
+<!-- Plugin descriptor for the sqz JetBrains plugin.
+     Requirements: 6.1, 6.2, 6.3, 6.4, 6.5 -->
+<idea-plugin>
+    <id>com.sqz.jetbrains-plugin</id>
+    <name>sqz — Context Intelligence</name>
+    <vendor email="sqz@example.com" url="https://github.com/ojuschugh1/sqz">sqz</vendor>
+    <description><![CDATA[
+        sqz compresses file content sent to AI assistants, reducing token usage by 40-80%.
+        <ul>
+            <li>Intercepts file reads and compresses them via the sqz CLI</li>
+            <li>AST-based compression for 18+ languages (tree-sitter)</li>
+            <li>Line-based fallback for unsupported languages</li>
+            <li>Token budget display in the status bar</li>
+            <li>Commands: Compress, Export CTX, Import CTX, Status, Cost</li>
+        </ul>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Application-level service holding the shared SqzBridge -->
+        <applicationService
+            serviceImplementation="com.sqz.SqzService"/>
+
+        <!-- Status bar widget factory -->
+        <statusBarWidgetFactory
+            id="SqzStatusBarWidget"
+            implementation="com.sqz.SqzStatusBarWidgetFactory"
+            order="last"/>
+    </extensions>
+
+    <projectListeners>
+        <!-- File-open interceptor -->
+        <listener
+            class="com.sqz.SqzFileListener"
+            topic="com.intellij.openapi.fileEditor.FileEditorManagerListener"/>
+    </projectListeners>
+
+    <actions>
+        <group id="SqzActionGroup" text="sqz" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+
+            <action id="sqz.compress"
+                    class="com.sqz.SqzCompressAction"
+                    text="Compress with sqz"
+                    description="Compress the active file and show token savings"/>
+
+            <action id="sqz.status"
+                    class="com.sqz.SqzStatusAction"
+                    text="sqz: Budget Status"
+                    description="Show current token budget usage"/>
+
+            <action id="sqz.cost"
+                    class="com.sqz.SqzCostAction"
+                    text="sqz: Cost Report"
+                    description="Show USD cost breakdown for the current session"/>
+
+            <action id="sqz.exportCtx"
+                    class="com.sqz.SqzExportCtxAction"
+                    text="sqz: Export CTX"
+                    description="Export the current session to a .ctx file"/>
+
+            <action id="sqz.importCtx"
+                    class="com.sqz.SqzImportCtxAction"
+                    text="sqz: Import CTX"
+                    description="Import a .ctx session file"/>
+        </group>
+    </actions>
+</idea-plugin>

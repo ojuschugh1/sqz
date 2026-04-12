@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ea385bdf38f7661ac206f8093f555a332b8c4039c3ad9a82508e70777898a102 # shrinks to significant_lines = ["error: connection refused"], noise_line = "---", noise_repeat = 5

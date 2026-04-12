@@ -1,0 +1,29 @@
+# Cross-compilation targets and static linking configuration.
+# Requirement 16.1: single statically-linked binary per platform.
+
+# ── Linux x86_64 ──────────────────────────────────────────────────────────
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# ── Linux aarch64 ─────────────────────────────────────────────────────────
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# ── macOS x86_64 ──────────────────────────────────────────────────────────
+# macOS does not support fully static binaries; the system dylibs
+# (libSystem, libc) are always dynamically linked. We still set
+# crt-static so that the Rust standard library is linked statically.
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# ── macOS aarch64 (Apple Silicon) ─────────────────────────────────────────
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# ── Windows x86_64 ────────────────────────────────────────────────────────
+# MSVC target: link the CRT statically so the binary runs without the
+# Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

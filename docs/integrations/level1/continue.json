@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "sqz": {
+      "command": "sqz-mcp",
+      "args": ["--transport", "stdio"],
+      "env": {}
+    }
+  }
+}

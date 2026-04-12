@@ -1,0 +1,80 @@
+{
+  "name": "sqz",
+  "displayName": "sqz — Context Intelligence",
+  "description": "Compress and manage LLM context in VS Code. Intercepts file reads, shows token budget, and reduces context window waste.",
+  "version": "0.1.0",
+  "publisher": "sqz",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "Programming Languages"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sqz.compress",
+        "title": "sqz: Compress Current File"
+      },
+      {
+        "command": "sqz.exportCtx",
+        "title": "sqz: Export Session (.ctx)"
+      },
+      {
+        "command": "sqz.importCtx",
+        "title": "sqz: Import Session (.ctx)"
+      },
+      {
+        "command": "sqz.status",
+        "title": "sqz: Show Budget Status"
+      },
+      {
+        "command": "sqz.cost",
+        "title": "sqz: Show Cost Report"
+      },
+      {
+        "command": "sqz.pin",
+        "title": "sqz: Pin Current File"
+      },
+      {
+        "command": "sqz.unpin",
+        "title": "sqz: Unpin Current File"
+      }
+    ],
+    "configuration": {
+      "title": "sqz",
+      "properties": {
+        "sqz.binaryPath": {
+          "type": "string",
+          "default": "sqz",
+          "description": "Path to the sqz CLI binary."
+        },
+        "sqz.autoCompress": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically compress files when opened by AI assistants."
+        },
+        "sqz.sessionId": {
+          "type": "string",
+          "default": "default",
+          "description": "Session ID for budget tracking."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "@vscode/test-electron": "^2.3.8",
+    "typescript": "^5.3.0"
+  }
+}

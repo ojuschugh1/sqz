@@ -1,0 +1,11 @@
+{
+  "context_servers": {
+    "sqz": {
+      "command": {
+        "path": "sqz-mcp",
+        "args": ["--transport", "stdio"],
+        "env": {}
+      }
+    }
+  }
+}

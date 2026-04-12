@@ -1,0 +1,26 @@
+{
+  "name": "sqz",
+  "version": "0.1.0",
+  "description": "Universal context intelligence layer — compresses LLM context across CLI, MCP, browser, and IDE",
+  "keywords": ["llm", "context", "compression", "mcp", "ai", "cli"],
+  "homepage": "https://github.com/ojuschugh1/sqz",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ojuschugh1/sqz.git"
+  },
+  "license": "ELv2",
+  "bin": {
+    "sqz": "bin/sqz",
+    "sqz-mcp": "bin/sqz-mcp"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/",
+    "install.js"
+  ],
+  "engines": {
+    "node": ">=14"
+  }
+}

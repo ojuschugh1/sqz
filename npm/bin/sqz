@@ -1,0 +1,24 @@
+#!/usr/bin/env node
+// Thin wrapper — delegates to the downloaded sqz binary
+// Requirement 16.2: npx sqz / npm install -g sqz
+
+"use strict";
+
+const path = require("path");
+const { spawnSync } = require("child_process");
+
+const ext = process.platform === "win32" ? ".exe" : "";
+const binary = path.join(__dirname, `sqz${ext}`);
+
+const result = spawnSync(binary, process.argv.slice(2), { stdio: "inherit" });
+
+if (result.error) {
+  if (result.error.code === "ENOENT") {
+    console.error("sqz binary not found. Try reinstalling: npm install -g sqz");
+  } else {
+    console.error("Failed to run sqz:", result.error.message);
+  }
+  process.exit(1);
+}
+
+process.exit(result.status ?? 0);

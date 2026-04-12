@@ -1,0 +1,48 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+.kiro/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (npm/extension builds)
+node_modules/
+dist/
+out/
+*.vsix
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+
+# JetBrains plugin
+jetbrains-plugin/build/
+jetbrains-plugin/.gradle/
+
+# SQLite databases (test artifacts)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Proptest regression files are checked in intentionally
+# sqz_engine/proptest-regressions/
+
+# Environment
+.env
+.env.local
+
+# Cargo packaging
+*.crate
