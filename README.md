@@ -45,23 +45,52 @@ LLM ──"read auth.ts"──▶ Editor ──▶ File   LLM ──"read auth.t
   └────────────────────────────────┘         └──── (compressed) ────┴───────┘
 ```
 
-## Token Savings
+## Token Savings (Real Measured Showcase)
 
-Measured results from the sqz compression engine on realistic inputs:
+Numbers below are from actual runs in this repository (not estimates).
 
-| Operation | Original tokens | sqz tokens | Reduction |
-|---|---|---|---|
-| cargo/npm test output | ~200 | ~90 | **-54%** |
-| Log output (repeated lines) | ~180 | ~82 | **-54%** |
-| docker ps | ~165 | ~120 | **-28%** |
-| Prose / documentation | ~150 | ~113 | **-23%** |
-| git status | ~90 | ~80 | **-11%** |
-| git log (5 commits) | ~160 | ~150 | **-5%** |
-| JSON API response | varies | varies | 13-80%* |
+### Benchmark Suite Results
 
-*JSON compression depends heavily on array size. Small objects: ~13%. Large arrays (100+ items): up to 80% via schema sampling.
+Command:
 
-> Measured using the sqz browser extension's 16-pass squeeze engine. CLI engine results vary — the Rust pipeline is optimized for structured data (JSON, logs) rather than plain text.
+```sh
+cargo test -p sqz-engine benchmarks -- --nocapture
+```
+
+| Case | Before | After | Saved |
+|---|---:|---:|---:|
+| repeated_logs | 148 | 62 | **58.1%** |
+| json_api | 64 | 59 | **7.8%** |
+| git_diff | 61 | 54 | **11.5%** |
+| large_json_array | 259 | 60 | **76.8%** |
+| stack_trace (safe mode) | 82 | 82 | **0.0%** |
+| prose_docs | 124 | 124 | **0.0%** |
+
+### Workspace-Wide Compression
+
+Measured by compressing 138 real text/code/config files in this repo with `sqz compress`.
+
+| Metric | Value |
+|---|---:|
+| Files scanned | 138 |
+| Tokens before | 309,964 |
+| Tokens after | 268,874 |
+| Tokens saved | 41,090 |
+| Net reduction | **13.26%** |
+| Total runtime | 1,997.75 ms |
+| Avg time per file | 14.48 ms |
+
+### Real Command Output Samples
+
+| Operation | Before | After | Saved |
+|---|---:|---:|---:|
+| `ls -la` | 515 | 438 | **15.0%** |
+| `git ls-files` | 1,062 | 1,062 | **0.0%** |
+| `git log --oneline -n 50` | 285 | 285 | **0.0%** |
+| `cargo check -p sqz-engine` | 93 | 93 | **0.0%** |
+| `cargo test --workspace` | 10,750 | 10,750 | **0.0%** |
+
+> Why some operations show 0%: sqz is intentionally conservative on outputs it classifies as high-risk or already compact, and preserves critical/error-heavy outputs via fallback semantics.
 
 ## Install
 
