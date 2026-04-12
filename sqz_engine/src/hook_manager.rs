@@ -167,10 +167,8 @@ impl Default for HookManager {
 const KNOWN_PLATFORMS: &[&str] = &[
     "claude-code",
     "cursor",
-    "kiro",
     "copilot",
     "windsurf",
-    "cline",
     "gemini-cli",
     "codex",
     "opencode",
@@ -179,7 +177,6 @@ const KNOWN_PLATFORMS: &[&str] = &[
     "amp",
     "continue",
     "zed",
-    "amazon-q",
 ];
 
 /// Generate a platform-specific hook configuration for `sqz init --agent <platform>`.
@@ -191,11 +188,11 @@ const KNOWN_PLATFORMS: &[&str] = &[
 pub fn generate_platform_config(platform: &str) -> Option<String> {
     match platform {
         // ── Level 1: MCP config only ──────────────────────────────────
-        "continue" | "zed" | "amazon-q" => Some(generate_level1_config(platform)),
+        "continue" | "zed" => Some(generate_level1_config(platform)),
 
         // ── Level 2: Shell hook + MCP + hooks ─────────────────────────
-        "claude-code" | "cursor" | "kiro" | "copilot" | "windsurf" | "cline"
-        | "gemini-cli" | "codex" | "opencode" | "goose" | "aider" | "amp" => {
+        "claude-code" | "cursor" | "copilot" | "windsurf" | "gemini-cli" | "codex"
+        | "opencode" | "goose" | "aider" | "amp" => {
             Some(generate_level2_config(platform))
         }
 
@@ -212,7 +209,6 @@ fn generate_level1_config(platform: &str) -> String {
     let config_path = match platform {
         "continue" => "~/.continue/config.json",
         "zed" => "~/.config/zed/settings.json",
-        "amazon-q" => "~/.aws/amazonq/mcp.json",
         _ => "mcp.json",
     };
 
@@ -235,10 +231,8 @@ fn generate_level2_config(platform: &str) -> String {
     let config_path = match platform {
         "claude-code" => ".claude/mcp_servers.json",
         "cursor" => "~/.cursor/mcp.json",
-        "kiro" => ".kiro/settings/mcp.json",
         "copilot" => ".github/copilot/mcp.json",
         "windsurf" => "~/.windsurf/mcp.json",
-        "cline" => "~/.cline/mcp.json",
         _ => "mcp.json",
     };
 
@@ -542,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_generate_config_level1_platforms_produce_json() {
-        for platform in &["continue", "zed", "amazon-q"] {
+        for platform in &["continue", "zed"] {
             let config = generate_platform_config(platform).unwrap();
             assert!(config.contains("mcpServers"), "missing mcpServers for {platform}");
             assert!(config.contains("sqz-mcp"), "missing sqz-mcp for {platform}");
@@ -552,8 +546,8 @@ mod tests {
     #[test]
     fn test_generate_config_level2_platforms_produce_toml() {
         for platform in &[
-            "claude-code", "cursor", "kiro", "copilot", "windsurf", "cline",
-            "gemini-cli", "codex", "opencode", "goose", "aider", "amp",
+            "claude-code", "cursor", "copilot", "windsurf", "gemini-cli", "codex",
+            "opencode", "goose", "aider", "amp",
         ] {
             let config = generate_platform_config(platform).unwrap();
             assert!(
@@ -578,9 +572,9 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_config_kiro_has_correct_path() {
-        let config = generate_platform_config("kiro").unwrap();
-        assert!(config.contains(".kiro/settings/mcp.json"));
+    fn test_generate_config_windsurf_has_correct_path() {
+        let config = generate_platform_config("windsurf").unwrap();
+        assert!(config.contains("~/.windsurf/mcp.json"));
     }
 
     #[test]
@@ -591,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_known_platforms_covers_all() {
-        assert_eq!(known_platforms().len(), 15);
+        assert_eq!(known_platforms().len(), 12);
         // Every known platform should produce a config.
         for p in known_platforms() {
             assert!(

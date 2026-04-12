@@ -12,7 +12,6 @@ These platforms support MCP natively. Just add the `sqz-mcp` server to their con
 |---|---|
 | Continue | `~/.continue/config.json` |
 | Zed | `~/.config/zed/settings.json` |
-| Amazon Q Developer | `~/.aws/amazonq/mcp.json` |
 
 See [`level1/`](./level1/) for ready-to-paste config snippets.
 
@@ -29,7 +28,7 @@ sqz init
 # Step 2: add MCP config (see platform-specific guide below)
 ```
 
-Platforms: Claude Code, Cursor, Copilot, Windsurf, Kiro, Cline, Gemini CLI, Codex, OpenCode, Goose, Aider, Amp
+Platforms: Claude Code, Cursor, Copilot, Windsurf, Gemini CLI, Codex, OpenCode, Goose, Aider, Amp
 
 See [`level2/`](./level2/) for platform-specific guides.
 

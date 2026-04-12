@@ -9,7 +9,6 @@ homepage = "https://github.com/ojuschugh1/sqz"
 keywords = ["llm", "mcp", "compression", "context", "ai"]
 categories = ["command-line-utilities", "web-programming"]
 readme = "../README.md"
-exclude = [".kiro/"]
 
 [[bin]]
 name = "sqz-mcp"

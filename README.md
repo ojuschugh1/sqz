@@ -205,10 +205,10 @@ Native VS Code and JetBrains extensions that intercept file reads at the editor 
 sqz integrates with AI coding tools across 3 levels:
 
 ### Level 1 — MCP Config Only
-Continue · Zed · Amazon Q Developer
+Continue · Zed
 
 ### Level 2 — Shell Hook + MCP
-Claude Code · Cursor · Copilot · Windsurf · Kiro · Cline · Gemini CLI · Codex · OpenCode · Goose · Aider · Amp
+Claude Code · Cursor · Copilot · Windsurf · Gemini CLI · Codex · OpenCode · Goose · Aider · Amp
 
 ### Level 3 — Native / Deep
 VS Code · JetBrains · Chrome (ChatGPT, Claude.ai, Gemini, Grok, Perplexity)

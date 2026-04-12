@@ -88,42 +88,6 @@ File: `~/.codeium/windsurf/mcp_config.json`
 
 ---
 
-### Kiro
-
-File: `.kiro/settings/mcp.json` (workspace) or global Kiro MCP config
-
-```json
-{
-  "mcpServers": {
-    "sqz": {
-      "command": "sqz-mcp",
-      "args": ["--transport", "stdio"],
-      "env": {}
-    }
-  }
-}
-```
-
----
-
-### Cline
-
-File: VS Code settings → Cline MCP Servers, or `cline_mcp_settings.json`
-
-```json
-{
-  "mcpServers": {
-    "sqz": {
-      "command": "sqz-mcp",
-      "args": ["--transport", "stdio"],
-      "env": {}
-    }
-  }
-}
-```
-
----
-
 ### Gemini CLI
 
 File: `~/.gemini/settings.json`

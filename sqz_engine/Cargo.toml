@@ -9,7 +9,7 @@ homepage = "https://github.com/ojuschugh1/sqz"
 keywords = ["llm", "compression", "context", "tokens", "ai"]
 categories = ["text-processing", "command-line-utilities"]
 readme = "../README.md"
-exclude = [".kiro/", "proptest-regressions/"]
+exclude = ["proptest-regressions/"]
 
 [dependencies]
 serde = { workspace = true }

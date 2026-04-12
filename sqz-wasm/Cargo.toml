@@ -9,7 +9,6 @@ homepage = "https://github.com/ojuschugh1/sqz"
 keywords = ["llm", "wasm", "compression", "browser", "ai"]
 categories = ["wasm", "text-processing"]
 readme = "../README.md"
-exclude = [".kiro/"]
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
