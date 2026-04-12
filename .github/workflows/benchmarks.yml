@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable, "1.75"]  # stable + MSRV
+        rust: [stable, "1.85"]  # stable + MSRV (indexmap 2.14 requires 1.85)
 
     steps:
       - uses: actions/checkout@v4
