@@ -449,7 +449,7 @@ fn install_completions(hook: &ShellHook) {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    let (dest, content) = match hook {
+    let (dest, content): (std::path::PathBuf, &str) = match hook {
         ShellHook::Fish => (
             home.join(".config").join("fish").join("completions").join("sqz.fish"),
             include_str!("../../completions/sqz.fish"),
@@ -462,7 +462,21 @@ fn install_completions(hook: &ShellHook) {
             home.join(".local").join("share").join("bash-completion").join("completions").join("sqz"),
             include_str!("../../completions/sqz.bash"),
         ),
-        _ => return, // Nushell/PowerShell: completions handled differently
+        ShellHook::Nushell => (
+            home.join(".config").join("nushell").join("completions").join("sqz.nu"),
+            include_str!("../../completions/sqz.nu"),
+        ),
+        ShellHook::PowerShell => {
+            // Append to PowerShell profile
+            let profile = std::env::var("PROFILE")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    home.join("Documents")
+                        .join("PowerShell")
+                        .join("Microsoft.PowerShell_profile.ps1")
+                });
+            (profile, include_str!("../../completions/sqz.ps1"))
+        }
     };
 
     if let Some(parent) = dest.parent() {
@@ -471,7 +485,23 @@ fn install_completions(hook: &ShellHook) {
         }
     }
 
-    match std::fs::write(&dest, content) {
+    // For PowerShell, append to profile rather than overwrite
+    let write_result = if matches!(hook, ShellHook::PowerShell) {
+        let existing = std::fs::read_to_string(&dest).unwrap_or_default();
+        if existing.contains("Register-ArgumentCompleter -Native -CommandName sqz") {
+            return; // already installed
+        }
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&dest)
+            .and_then(|mut f| writeln!(f, "\n{content}"))
+    } else {
+        std::fs::write(&dest, content)
+    };
+
+    match write_result {
         Ok(()) => println!("[sqz] completions installed to {}", dest.display()),
         Err(_) => {} // silently skip — completions are optional
     }
