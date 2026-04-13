@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // postinstall script — downloads the correct sqz binary for the current platform
-// Requirement 16.2: npm install -g sqz / npx sqz wrapper
+// Requirement 16.2: npm install -g sqz-cli / npx sqz-cli wrapper
 
 "use strict";
 

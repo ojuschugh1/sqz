@@ -14,7 +14,7 @@ const result = spawnSync(binary, process.argv.slice(2), { stdio: "inherit" });
 
 if (result.error) {
   if (result.error.code === "ENOENT") {
-    console.error("sqz-mcp binary not found. Try reinstalling: npm install -g sqz");
+    console.error("sqz-mcp binary not found. Try reinstalling: npm install -g sqz-cli");
   } else {
     console.error("Failed to run sqz-mcp:", result.error.message);
   }

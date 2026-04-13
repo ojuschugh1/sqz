@@ -6,8 +6,9 @@ use crate::stages::{
     CollapseArraysStage, CondenseStage, CustomTransformsStage, FlattenStage, GitDiffFoldStage,
     KeepFieldsStage, StripFieldsStage, StripNullsStage, TruncateStringsStage,
 };
+use crate::token_counter::TokenCounter;
 use crate::toon::ToonEncoder;
-use crate::types::{CompressedContent, Content, ContentType, StageConfig};
+use crate::types::{CompressedContent, Content, ContentType, ModelFamily, StageConfig};
 
 /// Minimal session context passed to the pipeline.
 pub struct SessionContext {
@@ -18,6 +19,7 @@ pub struct SessionContext {
 pub struct CompressionPipeline {
     stages: Vec<Box<dyn crate::stages::CompressionStage>>,
     toon_encoder: ToonEncoder,
+    token_counter: TokenCounter,
     #[allow(dead_code)]
     prompt_cache_detector: PromptCacheDetector,
 }
@@ -43,6 +45,7 @@ impl CompressionPipeline {
         Self {
             stages,
             toon_encoder: ToonEncoder,
+            token_counter: TokenCounter::new(),
             prompt_cache_detector: PromptCacheDetector,
         }
     }
@@ -55,7 +58,8 @@ impl CompressionPipeline {
         _ctx: &SessionContext,
         preset: &Preset,
     ) -> Result<CompressedContent> {
-        let tokens_original = (input.chars().count() as u32).saturating_add(3) / 4;
+        let model_family = model_family_from_preset(preset);
+        let tokens_original = self.token_counter.count(input, &model_family);
 
         let mut content = Content {
             raw: input.to_owned(),
@@ -89,7 +93,7 @@ impl CompressionPipeline {
             content.raw
         };
 
-        let tokens_compressed = (data.chars().count() as u32).saturating_add(3) / 4;
+        let tokens_compressed = self.token_counter.count(&data, &model_family);
         let compression_ratio = if tokens_original == 0 {
             1.0
         } else {
@@ -132,6 +136,16 @@ impl CompressionPipeline {
         stages.sort_by_key(|s| s.priority());
         self.stages = stages;
         Ok(())
+    }
+}
+
+/// Derive the `ModelFamily` from the preset's model configuration.
+fn model_family_from_preset(preset: &Preset) -> ModelFamily {
+    match preset.model.family.to_lowercase().as_str() {
+        "anthropic" | "claude" => ModelFamily::AnthropicClaude,
+        "openai" | "gpt" => ModelFamily::OpenAiGpt,
+        "google" | "gemini" => ModelFamily::GoogleGemini,
+        other => ModelFamily::Local(other.to_string()),
     }
 }
 

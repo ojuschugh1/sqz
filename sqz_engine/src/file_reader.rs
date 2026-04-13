@@ -135,7 +135,7 @@ fn filter_high_entropy(blocks: &[BlockEntropy], percentile: f64) -> Vec<&BlockEn
 // ── FTS5 task-mode helpers ────────────────────────────────────────────────────
 
 /// Index file chunks into an in-memory FTS5 table and return sections matching
-/// the intent via BM25 ranking.
+/// the intent. SQLite FTS5 uses BM25 by default via `ORDER BY rank`.
 fn fts5_task_filter(source: &str, intent: &str) -> Result<String> {
     let chunks = chunk_by_blocks(source);
     if chunks.is_empty() {

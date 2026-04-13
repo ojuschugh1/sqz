@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  Single Rust binary · Zero telemetry · 549 tests · 57 property-based correctness proofs
+  Single Rust binary · Zero telemetry · 586 tests · 61 property-based correctness proofs
 </p>
 
 <p align="center">
@@ -102,7 +102,7 @@ sqz stats         # Cumulative compression report
 curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh
 cargo install sqz-cli
 brew install sqz
-npm install -g sqz
+npm install -g sqz-cli
 pip install sqz
 ```
 
@@ -290,7 +290,7 @@ complexity_threshold = 0.4
 |---|---|
 | Cargo | `cargo install sqz-cli` |
 | Homebrew | `brew install sqz` |
-| npm | `npm install -g sqz` / `npx sqz` |
+| npm | `npm install -g sqz-cli` / `npx sqz-cli` |
 | pip | `pip install sqz` |
 | curl | `curl -fsSL .../install.sh \| sh` |
 | Docker | `docker run sqz` |
@@ -301,7 +301,7 @@ complexity_threshold = 0.4
 ```sh
 git clone https://github.com/ojuschugh1/sqz.git
 cd sqz
-cargo test --workspace    # 549 tests
+cargo test --workspace    # 586 tests
 cargo build --release     # optimized binary
 ```
 
@@ -340,7 +340,7 @@ docs/           Integration guides and documentation
 
 ### Testing
 
-The test suite includes 549 tests with 57 property-based correctness properties validated via proptest:
+The test suite includes 586 tests with 61 property-based correctness properties validated via proptest:
 
 - TOON round-trip fidelity
 - Compression preserves semantically significant content

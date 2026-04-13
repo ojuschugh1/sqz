@@ -71,7 +71,7 @@ impl ToolSelector {
     /// Create a new `ToolSelector` from a `Preset`.
     ///
     /// `model_path` is accepted for API compatibility but is unused because we use
-    /// a TF-IDF/Jaccard approach rather than a neural embedding model.
+    /// a bag-of-words Jaccard similarity approach rather than a neural embedding model.
     pub fn new(_model_path: &std::path::Path, preset: &Preset) -> Result<Self> {
         let threshold = preset.tool_selection.similarity_threshold;
         let default_tools = preset.tool_selection.default_tools.clone();

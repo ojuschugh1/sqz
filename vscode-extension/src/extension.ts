@@ -20,6 +20,24 @@ export function activate(context: vscode.ExtensionContext): void {
   const sessionId: string = config.get("sessionId") ?? "default";
 
   bridge = new SqzBridge(binaryPath);
+
+  // Pre-flight check: verify the sqz binary is available on PATH
+  if (!bridge.isAvailable()) {
+    const install = "Install Instructions";
+    vscode.window
+      .showErrorMessage(
+        `sqz binary not found. Install via: cargo install sqz-cli`,
+        install
+      )
+      .then((choice) => {
+        if (choice === install) {
+          vscode.env.openExternal(
+            vscode.Uri.parse("https://github.com/ojuschugh1/sqz#install")
+          );
+        }
+      });
+  }
+
   statusBar = new SqzStatusBar(bridge, sessionId);
   statusBar.startPolling(30_000);
 
