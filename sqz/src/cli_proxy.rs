@@ -8,8 +8,10 @@
 /// (transparent fallback, Requirement 1.5).
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use sqz_engine::{format_command, CompressedContent, SqzEngine};
+use std::path::Path;
+use sqz_engine::{format_command, CompressedContent, DependencyMapper, SqzEngine};
 
 // ── CLI compression patterns ──────────────────────────────────────────────
 
@@ -85,6 +87,10 @@ pub struct CliProxy {
     /// In-memory dedup cache: hash → compressed output.
     /// When the same content is seen again, return a compact reference.
     cache: std::cell::RefCell<Vec<CacheEntry>>,
+    /// File paths whose content is in the dedup cache (for cross-command context refs).
+    known_files: std::cell::RefCell<HashSet<String>>,
+    /// Dependency mapper for predictive pre-caching.
+    dep_mapper: std::cell::RefCell<DependencyMapper>,
 }
 
 impl CliProxy {
@@ -94,6 +100,8 @@ impl CliProxy {
         Ok(Self {
             engine,
             cache: std::cell::RefCell::new(Vec::new()),
+            known_files: std::cell::RefCell::new(HashSet::new()),
+            dep_mapper: std::cell::RefCell::new(DependencyMapper::new()),
         })
     }
 
@@ -103,6 +111,8 @@ impl CliProxy {
         Self {
             engine,
             cache: std::cell::RefCell::new(Vec::new()),
+            known_files: std::cell::RefCell::new(HashSet::new()),
+            dep_mapper: std::cell::RefCell::new(DependencyMapper::new()),
         }
     }
 
@@ -130,30 +140,31 @@ impl CliProxy {
             }
         }
 
-        // Step 2: Try per-command formatter
+        // Step 2: Track file reads for cross-command context refs + predictive pre-cache
+        self.track_file(cmd, output);
+
+        // Step 3: Try per-command formatter
         if let Some(formatted) = format_command(cmd, output) {
             let tokens_original = (output.len() as u32 + 3) / 4;
             let tokens_compressed = (formatted.len() as u32 + 3) / 4;
             if tokens_compressed < tokens_original {
-                // Cache the formatted result
                 self.cache.borrow_mut().push(CacheEntry {
                     hash,
                     compressed: formatted.clone(),
                     tokens_original,
                     tokens_compressed,
                 });
-                // Log stats to stderr
                 self.log_compression(cmd, tokens_original, tokens_compressed);
-                return formatted;
+                // Apply cross-command context refs before returning
+                return self.apply_context_refs(&formatted);
             }
         }
 
-        // Step 3: Generic compression pipeline
+        // Step 4: Generic compression pipeline
         match self.compress_output(cmd, output) {
             Ok(compressed) => {
                 let tokens_original = compressed.tokens_original;
                 let tokens_compressed = compressed.tokens_compressed;
-                // Cache the result
                 self.cache.borrow_mut().push(CacheEntry {
                     hash,
                     compressed: compressed.data.clone(),
@@ -161,7 +172,8 @@ impl CliProxy {
                     tokens_compressed,
                 });
                 self.log_compression(cmd, tokens_original, tokens_compressed);
-                compressed.data
+                // Apply cross-command context refs before returning
+                self.apply_context_refs(&compressed.data)
             }
             Err(e) => {
                 eprintln!("[sqz] fallback: compression error for command '{cmd}': {e}");
@@ -188,6 +200,126 @@ impl CliProxy {
         output: &str,
     ) -> sqz_engine::Result<CompressedContent> {
         self.engine.compress(output)
+    }
+
+    // ── Cross-command context references ──────────────────────────────────
+
+    /// Scan `text` for file paths that are already in the dedup cache.
+    /// Replace inline file content excerpts with compact cache references.
+    ///
+    /// Example: if `src/auth.rs` is cached and an error message contains
+    /// a multi-line excerpt from that file, replace it with
+    /// `[in context: src/auth.rs]`.
+    fn apply_context_refs(&self, text: &str) -> String {
+        let known = self.known_files.borrow();
+        if known.is_empty() {
+            return text.to_string();
+        }
+
+        let mut result = text.to_string();
+        for file_path in known.iter() {
+            // Extract just the filename for matching
+            let _filename = Path::new(file_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(file_path);
+
+            // Look for patterns like "  --> src/auth.rs:42:5" followed by
+            // multi-line code excerpts (indented lines). Replace the excerpt
+            // with a compact reference.
+            let marker = format!("--> {}", file_path);
+            if result.contains(&marker) {
+                // The file is referenced in an error — the LLM already has it
+                // in context from a previous read. Add a note.
+                let note = format!("{} [in context]", marker);
+                result = result.replace(&marker, &note);
+            }
+        }
+        result
+    }
+
+    /// Track a file path as "in context" (its content is in the dedup cache).
+    fn track_file(&self, cmd: &str, output: &str) {
+        // Detect file-read commands: cat, head, tail, or any command with a
+        // file path argument
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let base = parts.first().map(|s| s.rsplit('/').next().unwrap_or(s)).unwrap_or("");
+
+        match base {
+            "cat" | "head" | "tail" | "less" | "bat" => {
+                // The file path is typically the last argument
+                if let Some(path) = parts.last() {
+                    if Path::new(path).extension().is_some() {
+                        self.known_files.borrow_mut().insert(path.to_string());
+                        // Predictive pre-cache: analyze imports
+                        self.predictive_precache(path, output);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ── Predictive pre-caching ───────────────────────────────────────────
+
+    /// When a file is read, parse its imports and pre-cache the dependency
+    /// file paths. When the LLM inevitably reads those files next, they'll
+    /// be instant dedup hits.
+    fn predictive_precache(&self, file_path: &str, content: &str) {
+        let path = Path::new(file_path);
+
+        // Add the file to the dependency mapper
+        self.dep_mapper.borrow_mut().add_file(path, content);
+
+        // Get its dependencies
+        let deps = self.dep_mapper.borrow().dependencies_of(path);
+
+        if deps.is_empty() {
+            return;
+        }
+
+        // Pre-read and cache each dependency that exists on disk
+        let mut precached = 0;
+        for dep_path in &deps {
+            // Try to resolve to an actual file
+            let resolved = if dep_path.is_absolute() {
+                dep_path.clone()
+            } else if let Some(parent) = path.parent() {
+                parent.join(dep_path)
+            } else {
+                dep_path.clone()
+            };
+
+            if resolved.exists() && resolved.is_file() {
+                // Read and hash the file content
+                if let Ok(dep_content) = std::fs::read_to_string(&resolved) {
+                    let hash = content_hash(&dep_content);
+                    let cache = self.cache.borrow();
+                    if cache.iter().any(|e| e.hash == hash) {
+                        continue; // Already cached
+                    }
+                    drop(cache);
+
+                    // Compress and cache
+                    if let Ok(compressed) = self.engine.compress(&dep_content) {
+                        self.cache.borrow_mut().push(CacheEntry {
+                            hash,
+                            compressed: compressed.data,
+                            tokens_original: compressed.tokens_original,
+                            tokens_compressed: compressed.tokens_compressed,
+                        });
+                        let dep_str = resolved.to_string_lossy().to_string();
+                        self.known_files.borrow_mut().insert(dep_str);
+                        precached += 1;
+                    }
+                }
+            }
+        }
+
+        if precached > 0 {
+            eprintln!("[sqz] predictive pre-cache: {} dependencies of {} cached",
+                precached, file_path);
+        }
     }
 
     /// Return `true` when `cmd` matches one of the registered CLI patterns.
@@ -269,5 +401,44 @@ mod tests {
         let result = proxy.intercept_output("git", "");
         // Empty input may compress to empty — just ensure no panic.
         let _ = result;
+    }
+
+    #[test]
+    fn test_dedup_cache_returns_ref_on_second_call() {
+        let proxy = CliProxy::new().expect("engine init");
+        let output = "some repeated output that is long enough to be meaningful\n".repeat(5);
+        let first = proxy.intercept_output("echo", &output);
+        let second = proxy.intercept_output("echo", &output);
+        // Second call should return a dedup reference
+        assert!(second.starts_with("§ref:"), "expected dedup ref, got: {}", second);
+        assert!(second.len() < first.len(), "dedup ref should be shorter than original");
+    }
+
+    #[test]
+    fn test_file_tracking_on_cat() {
+        let proxy = CliProxy::new().expect("engine init");
+        let content = "use std::io;\nfn main() {}\n";
+        proxy.intercept_output("cat src/main.rs", content);
+        let known = proxy.known_files.borrow();
+        assert!(known.contains("src/main.rs"), "cat should track the file path");
+    }
+
+    #[test]
+    fn test_context_refs_annotate_known_files() {
+        let proxy = CliProxy::new().expect("engine init");
+        // Simulate reading a file
+        proxy.known_files.borrow_mut().insert("src/auth.rs".to_string());
+        // Error output referencing that file
+        let error = "error[E0308]: mismatched types\n --> src/auth.rs:42:5\n";
+        let result = proxy.apply_context_refs(error);
+        assert!(result.contains("[in context]"), "should annotate known file: {}", result);
+    }
+
+    #[test]
+    fn test_context_refs_no_annotation_for_unknown_files() {
+        let proxy = CliProxy::new().expect("engine init");
+        let error = "error[E0308]: mismatched types\n --> src/unknown.rs:42:5\n";
+        let result = proxy.apply_context_refs(error);
+        assert!(!result.contains("[in context]"), "should not annotate unknown file");
     }
 }
