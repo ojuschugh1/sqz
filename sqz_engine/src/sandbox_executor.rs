@@ -57,8 +57,8 @@ pub struct SandboxResult {
     pub was_indexed: bool,
 }
 
-/// Threshold in bytes above which intent-driven filtering kicks in.
-const OUTPUT_FILTER_THRESHOLD: usize = 5 * 1024; // 5 KB
+/// Default threshold in bytes above which intent-driven filtering kicks in.
+const DEFAULT_FILTER_THRESHOLD: usize = 5 * 1024; // 5 KB
 
 /// Result of intent-driven output filtering via FTS5 BM25 search.
 #[derive(Debug, Clone)]
@@ -80,6 +80,7 @@ pub struct FilteredOutput {
 pub struct SandboxExecutor {
     timeout: Duration,
     max_output_bytes: usize,
+    filter_threshold: usize,
     runtimes: HashMap<String, RuntimeInfo>,
 }
 
@@ -267,6 +268,7 @@ impl SandboxExecutor {
         Self {
             timeout,
             max_output_bytes,
+            filter_threshold: DEFAULT_FILTER_THRESHOLD,
             runtimes,
         }
     }
@@ -308,7 +310,7 @@ impl SandboxExecutor {
     ) -> Result<(SandboxResult, Option<FilteredOutput>)> {
         let mut result = self.execute(code, language)?;
 
-        let should_filter = result.stdout.len() > OUTPUT_FILTER_THRESHOLD
+        let should_filter = result.stdout.len() > self.filter_threshold
             && intent.map_or(false, |i| !i.trim().is_empty());
 
         if should_filter {
@@ -387,7 +389,7 @@ impl SandboxExecutor {
             .stderr(Stdio::null()) // stderr never enters context
             .envs(env);
 
-        self.run_with_timeout(cmd)
+        self.run_with_timeout(cmd, &format!("runtime={}", runtime.language))
     }
 
     /// Execute Go code: write to temp file, run with `go run`.
@@ -411,7 +413,7 @@ impl SandboxExecutor {
             .stderr(Stdio::null())
             .envs(env);
 
-        self.run_with_timeout(cmd)
+        self.run_with_timeout(cmd, "runtime=go")
     }
 
     /// Execute Rust code: write to temp file, compile with rustc, then run.
@@ -458,11 +460,11 @@ impl SandboxExecutor {
             .stderr(Stdio::null())
             .envs(env);
 
-        self.run_with_timeout(cmd)
+        self.run_with_timeout(cmd, "runtime=rust")
     }
 
     /// Spawn the command, enforce timeout, capture stdout, and truncate if needed.
-    fn run_with_timeout(&self, mut cmd: Command) -> Result<SandboxResult> {
+    fn run_with_timeout(&self, mut cmd: Command, context: &str) -> Result<SandboxResult> {
         let mut child = cmd.spawn().map_err(SqzError::Io)?;
 
         // Wait with timeout
@@ -473,8 +475,9 @@ impl SandboxExecutor {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(SqzError::Other(format!(
-                    "sandbox execution timed out after {}s",
-                    self.timeout.as_secs()
+                    "sandbox execution timed out after {}s ({})",
+                    self.timeout.as_secs(),
+                    context
                 )));
             }
         };
@@ -591,7 +594,8 @@ fn detect_runtimes() -> HashMap<String, RuntimeInfo> {
 
 /// Check if a binary is available on PATH.
 fn is_binary_available(name: &str) -> bool {
-    Command::new("which")
+    let probe = if cfg!(windows) { "where" } else { "which" };
+    Command::new(probe)
         .arg(name)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
