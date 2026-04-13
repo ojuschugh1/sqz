@@ -479,7 +479,6 @@ fn cmd_uninstall() {
 /// `sqz stats [session-id]` — full compression stats report.
 fn cmd_stats(session_id: Option<String>) {
     let engine = require_engine();
-    let report = engine.usage_report("default");
 
     // Table drawing helpers
     let bar = "├─────────────────────────┼──────────────────┤";
@@ -494,11 +493,13 @@ fn cmd_stats(session_id: Option<String>) {
     println!("│ {:^42} │", "sqz compression stats");
     println!("{bar}");
 
-    // Budget section
-    row("Budget (window)", &format!("{} tokens", report.allocated));
-    row("Consumed", &format!("{} ({:.1}%)", report.consumed, report.consumed_pct * 100.0));
-    row("Pinned", &format!("{} tokens", report.pinned));
-    row("Available", &format!("{} tokens", report.available));
+    // Cumulative compression stats
+    let cs = engine.session_store().compression_stats().unwrap_or_default();
+    row("Total compressions", &format!("{}", cs.total_compressions));
+    row("Tokens in (total)", &format!("{}", cs.total_tokens_in));
+    row("Tokens out (total)", &format!("{}", cs.total_tokens_out));
+    row("Tokens saved", &format!("{}", cs.tokens_saved()));
+    row("Avg reduction", &format!("{:.1}%", cs.reduction_pct()));
 
     // Session cost section (if session_id provided)
     if let Some(ref sid) = session_id {
@@ -531,18 +532,6 @@ fn cmd_stats(session_id: Option<String>) {
     println!("{bar}");
     row("Cache entries", &format!("{}", cache_entries.len()));
     row("Cache size", &format_bytes(cache_size));
-
-    // Cumulative compression stats
-    if let Ok(cs) = engine.session_store().compression_stats() {
-        if cs.total_compressions > 0 {
-            println!("{bar}");
-            row("Total compressions", &format!("{}", cs.total_compressions));
-            row("Tokens in (total)", &format!("{}", cs.total_tokens_in));
-            row("Tokens out (total)", &format!("{}", cs.total_tokens_out));
-            row("Tokens saved", &format!("{}", cs.tokens_saved()));
-            row("Avg reduction", &format!("{:.1}%", cs.reduction_pct()));
-        }
-    }
 
     println!("{bot}");
     println!();
