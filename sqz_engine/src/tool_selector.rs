@@ -49,7 +49,7 @@ fn jaccard(a: &BagOfWords, b: &BagOfWords) -> f64 {
     }
 }
 
-/// Selects 3–5 relevant tools per task using TF-IDF-style word-overlap (Jaccard) similarity.
+/// Selects 3–5 relevant tools per task using bag-of-words Jaccard similarity.
 ///
 /// # Selection rules
 /// - Compute Jaccard similarity between the intent query and each tool description.

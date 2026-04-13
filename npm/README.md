@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  Single Rust binary · Zero telemetry · 586 tests · 61 property-based correctness proofs
+  Single Rust binary · Zero telemetry · 586 tests · 60 property-based correctness proofs
 </p>
 
 <p align="center">
@@ -113,7 +113,7 @@ sqz is optimized for trust and correctness first, not maximum compression at any
 curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh
 cargo install sqz-cli
 brew install sqz
-npm install -g sqz
+npm install -g sqz-cli
 pip install sqz
 ```
 
@@ -345,7 +345,7 @@ docs/           Integration guides and documentation
 
 ### Testing
 
-The test suite includes 586 tests with 61 property-based correctness properties validated via proptest:
+The test suite includes 586 tests with 60 property-based correctness properties validated via proptest:
 
 - TOON round-trip fidelity
 - Compression preserves semantically significant content
