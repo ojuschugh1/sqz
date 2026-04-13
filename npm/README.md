@@ -161,7 +161,7 @@ Chrome extension for ChatGPT, Claude.ai, Gemini, Grok, and Perplexity. Compresse
 
 ### 4. IDE Extensions
 
-Native VS Code and JetBrains extensions that intercept file reads at the editor level, with AST-aware compression for 18 languages and a status bar showing token budget.
+Native [VS Code](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz) and JetBrains extensions that intercept file reads at the editor level, with AST-aware compression for 18 languages and a status bar showing token budget.
 
 ## Features
 
@@ -211,7 +211,7 @@ Continue · Zed
 Claude Code · Cursor · Copilot · Windsurf · Gemini CLI · Codex · OpenCode · Goose · Aider · Amp
 
 ### Level 3 — Native / Deep
-VS Code · JetBrains · Chrome (ChatGPT, Claude.ai, Gemini, Grok, Perplexity)
+[VS Code](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz) · JetBrains · Chrome (ChatGPT, Claude.ai, Gemini, Grok, Perplexity)
 
 See [docs/integrations/](docs/integrations/) for platform-specific setup guides.
 
