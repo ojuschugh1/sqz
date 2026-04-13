@@ -240,6 +240,15 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool) {
         Ok(c) => {
             print!("{}", c.data);
             let reduction = (1.0 - c.compression_ratio) * 100.0;
+
+            // Log to session DB for cumulative stats
+            let _ = engine.session_store().log_compression(
+                c.tokens_original,
+                c.tokens_compressed,
+                &c.stages_applied,
+                mode,
+            );
+
             if show_verify {
                 let confidence = c.verify.as_ref().map(|v| v.confidence).unwrap_or(1.0);
                 let passed = c.verify.as_ref().map(|v| v.passed).unwrap_or(true);
@@ -522,6 +531,18 @@ fn cmd_stats(session_id: Option<String>) {
     println!("{bar}");
     row("Cache entries", &format!("{}", cache_entries.len()));
     row("Cache size", &format_bytes(cache_size));
+
+    // Cumulative compression stats
+    if let Ok(cs) = engine.session_store().compression_stats() {
+        if cs.total_compressions > 0 {
+            println!("{bar}");
+            row("Total compressions", &format!("{}", cs.total_compressions));
+            row("Tokens in (total)", &format!("{}", cs.total_tokens_in));
+            row("Tokens out (total)", &format!("{}", cs.total_tokens_out));
+            row("Tokens saved", &format!("{}", cs.tokens_saved()));
+            row("Avg reduction", &format!("{:.1}%", cs.reduction_pct()));
+        }
+    }
 
     println!("{bot}");
     println!();

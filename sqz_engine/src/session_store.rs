@@ -68,6 +68,15 @@ CREATE TABLE IF NOT EXISTS cache_entries (
     data        TEXT NOT NULL,
     accessed_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS compression_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    tokens_original  INTEGER NOT NULL,
+    tokens_compressed INTEGER NOT NULL,
+    stages_applied   TEXT NOT NULL,
+    mode             TEXT NOT NULL DEFAULT 'auto',
+    created_at       TEXT NOT NULL
+);
 "#;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -339,6 +348,62 @@ impl SessionStore {
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(SqzError::SessionStore(e)),
+        }
+    }
+
+    /// Log a compression event for cumulative stats tracking.
+    pub fn log_compression(
+        &self,
+        tokens_original: u32,
+        tokens_compressed: u32,
+        stages: &[String],
+        mode: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let stages_str = stages.join(",");
+        self.db.execute(
+            "INSERT INTO compression_log (tokens_original, tokens_compressed, stages_applied, mode, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![tokens_original, tokens_compressed, stages_str, mode, now],
+        ).map_err(SqzError::SessionStore)?;
+        Ok(())
+    }
+
+    /// Get cumulative compression stats from the log.
+    pub fn compression_stats(&self) -> Result<CompressionStats> {
+        let mut stmt = self.db.prepare(
+            "SELECT COUNT(*), COALESCE(SUM(tokens_original), 0), COALESCE(SUM(tokens_compressed), 0) FROM compression_log",
+        ).map_err(SqzError::SessionStore)?;
+
+        let stats = stmt.query_row([], |row| {
+            Ok(CompressionStats {
+                total_compressions: row.get::<_, u32>(0)?,
+                total_tokens_in: row.get::<_, u64>(1)?,
+                total_tokens_out: row.get::<_, u64>(2)?,
+            })
+        }).map_err(SqzError::SessionStore)?;
+
+        Ok(stats)
+    }
+}
+
+/// Cumulative compression statistics.
+#[derive(Debug, Clone, Default)]
+pub struct CompressionStats {
+    pub total_compressions: u32,
+    pub total_tokens_in: u64,
+    pub total_tokens_out: u64,
+}
+
+impl CompressionStats {
+    pub fn tokens_saved(&self) -> u64 {
+        self.total_tokens_in.saturating_sub(self.total_tokens_out)
+    }
+
+    pub fn reduction_pct(&self) -> f64 {
+        if self.total_tokens_in == 0 {
+            0.0
+        } else {
+            (1.0 - self.total_tokens_out as f64 / self.total_tokens_in as f64) * 100.0
         }
     }
 }
