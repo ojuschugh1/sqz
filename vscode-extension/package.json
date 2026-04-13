@@ -1,8 +1,8 @@
 {
   "name": "sqz",
-  "displayName": "sqz — Context Intelligence",
+  "displayName": "sqz - Context Intelligence",
   "description": "Compress and manage LLM context in VS Code. Intercepts file reads, shows token budget, and reduces context window waste.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "ojuschugh1",
   "license": "SEE LICENSE IN LICENSE",
   "icon": "icon.png",
