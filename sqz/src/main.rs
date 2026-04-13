@@ -116,6 +116,13 @@ enum Command {
         /// Session ID. If omitted, shows aggregate stats for the default agent.
         session_id: Option<String>,
     },
+
+    /// Show accumulated token savings over time.
+    Gain {
+        /// Number of days to show (default: 7).
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -163,6 +170,7 @@ fn main() {
         Some(Command::Proxy { port }) => cmd_proxy(port),
         Some(Command::Uninstall) => cmd_uninstall(),
         Some(Command::Stats { session_id }) => cmd_stats(session_id),
+        Some(Command::Gain { days }) => cmd_gain(days),
     }
 }
 
@@ -534,6 +542,47 @@ fn cmd_stats(session_id: Option<String>) {
     row("Cache size", &format_bytes(cache_size));
 
     println!("{bot}");
+    println!();
+}
+
+/// `sqz gain [--days N]` — show accumulated token savings over time.
+fn cmd_gain(days: u32) {
+    let engine = require_engine();
+    let gains = engine.session_store().daily_gains(days).unwrap_or_default();
+    let stats = engine.session_store().compression_stats().unwrap_or_default();
+
+    if gains.is_empty() {
+        println!("[sqz] No compression data yet. Run `sqz compress` to start tracking.");
+        return;
+    }
+
+    let max_saved = gains.iter().map(|g| g.tokens_saved).max().unwrap_or(1).max(1);
+    let bar_width: u64 = 30;
+
+    println!();
+    println!("  sqz token savings (last {} days)", days);
+    println!("  {}", "─".repeat(50));
+
+    for g in &gains {
+        let bar_len = (g.tokens_saved * bar_width / max_saved) as usize;
+        let bar: String = "█".repeat(bar_len);
+        let pad: String = " ".repeat(bar_width as usize - bar_len);
+        println!(
+            "  {} │{}{}│ {} saved",
+            &g.date[5..], // MM-DD
+            bar,
+            pad,
+            g.tokens_saved,
+        );
+    }
+
+    println!("  {}", "─".repeat(50));
+    println!(
+        "  Total: {} compressions, {} tokens saved ({:.1}% avg reduction)",
+        stats.total_compressions,
+        stats.tokens_saved(),
+        stats.reduction_pct(),
+    );
     println!();
 }
 

@@ -46,5 +46,10 @@ jetbrains-plugin/.gradle/
 # Cargo packaging
 *.crate
 
+# Build artifacts
+*.xpi
+sqz-source.zip
+.audit-external/
+
 # Gradle wrapper jar (downloaded on first run by gradlew script)
 jetbrains-plugin/gradle/wrapper/gradle-wrapper.jar

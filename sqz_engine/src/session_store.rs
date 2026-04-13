@@ -384,6 +384,34 @@ impl SessionStore {
 
         Ok(stats)
     }
+
+    /// Get daily compression gains for the last N days.
+    pub fn daily_gains(&self, days: u32) -> Result<Vec<DailyGain>> {
+        let mut stmt = self.db.prepare(
+            "SELECT date(created_at) as d, COUNT(*), SUM(tokens_original), SUM(tokens_compressed) \
+             FROM compression_log \
+             WHERE created_at >= date('now', ?1) \
+             GROUP BY d ORDER BY d",
+        ).map_err(SqzError::SessionStore)?;
+
+        let offset = format!("-{days} days");
+        let rows = stmt.query_map(params![offset], |row| {
+            let tokens_in: u64 = row.get(2)?;
+            let tokens_out: u64 = row.get(3)?;
+            Ok(DailyGain {
+                date: row.get(0)?,
+                compressions: row.get(1)?,
+                tokens_in,
+                tokens_saved: tokens_in.saturating_sub(tokens_out),
+            })
+        }).map_err(SqzError::SessionStore)?;
+
+        let mut gains = Vec::new();
+        for row in rows {
+            gains.push(row.map_err(SqzError::SessionStore)?);
+        }
+        Ok(gains)
+    }
 }
 
 /// Cumulative compression statistics.
@@ -406,6 +434,15 @@ impl CompressionStats {
             (1.0 - self.total_tokens_out as f64 / self.total_tokens_in as f64) * 100.0
         }
     }
+}
+
+/// A single day's compression gain.
+#[derive(Debug, Clone)]
+pub struct DailyGain {
+    pub date: String,
+    pub compressions: u32,
+    pub tokens_saved: u64,
+    pub tokens_in: u64,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
