@@ -66,7 +66,7 @@ sqz saves tokens in two ways: compression (removing noise from content) and dedu
 | Scenario | Savings | Why |
 |---|---:|---|
 | Repeated file reads (5x) | **86%** | Dedup cache: 13-token ref after first read |
-| JSON API responses with nulls | **56%** | Strip nulls + TOON encoding |
+| JSON API responses with nulls | **7–56%** | Strip nulls + TOON encoding (varies by null density) |
 | Repeated log lines | **58%** | Condense stage collapses duplicates |
 | Large JSON arrays | **77%** | Array sampling + collapse |
 
@@ -105,12 +105,14 @@ sqz stats         # Cumulative compression report
 ## Install
 
 ```sh
-# Pick one:
-curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh
+# Confirmed working:
 cargo install sqz-cli
-brew install sqz
-npm install -g sqz-cli
-pip install sqz
+
+# Coming soon (scaffolded, not yet live):
+# curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh
+# brew install sqz
+# npm install -g sqz-cli
+# pip install sqz
 ```
 
 > All install channels point to [github.com/ojuschugh1/sqz](https://github.com/ojuschugh1/sqz).
@@ -293,15 +295,15 @@ complexity_threshold = 0.4
 
 ## Distribution
 
-| Channel | Command |
-|---|---|
-| Cargo | `cargo install sqz-cli` |
-| Homebrew | `brew install sqz` |
-| npm | `npm install -g sqz-cli` / `npx sqz-cli` |
-| pip | `pip install sqz` |
-| curl | `curl -fsSL .../install.sh \| sh` |
-| Docker | `docker run sqz` |
-| GitHub Releases | Pre-built binaries for Linux, macOS, Windows |
+| Channel | Command | Status |
+|---|---|---|
+| Cargo | `cargo install sqz-cli` | Live |
+| Homebrew | `brew install sqz` | Coming soon |
+| npm | `npm install -g sqz-cli` / `npx sqz-cli` | Coming soon |
+| pip | `pip install sqz` | Coming soon |
+| curl | `curl -fsSL .../install.sh \| sh` | Coming soon |
+| Docker | `docker run sqz` | Coming soon |
+| GitHub Releases | Pre-built binaries for Linux, macOS, Windows | Coming soon |
 
 ## Development
 
