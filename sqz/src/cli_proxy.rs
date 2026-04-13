@@ -1,11 +1,15 @@
 /// CLI Proxy — intercepts command output and compresses it through SqzEngine.
 ///
 /// `CliProxy::intercept_output` is the core entry point: it takes raw command
-/// output, runs it through the compression pipeline, and returns the
-/// compressed text.  On any failure it logs the error and returns the
-/// original output unchanged (transparent fallback, Requirement 1.5).
+/// output, runs it through per-command formatters first, then the compression
+/// pipeline, with SHA-256 dedup cache for repeated content.
+///
+/// On any failure it logs the error and returns the original output unchanged
+/// (transparent fallback, Requirement 1.5).
 
-use sqz_engine::{CompressedContent, SqzEngine};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use sqz_engine::{format_command, CompressedContent, SqzEngine};
 
 // ── CLI compression patterns ──────────────────────────────────────────────
 
@@ -54,98 +58,111 @@ pub const CLI_PATTERNS: &[&str] = &[
 ];
 
 // ── Command-aware pre-processors ─────────────────────────────────────────
+// (Moved to sqz_engine::cmd_formatters for reuse across CLI, MCP, and IDE)
 
-/// git log: strip author email lines, keep hash + subject + date
-fn preprocess_git_log(output: &str) -> String {
-    output.lines()
-        .filter(|l| !l.starts_with("Author:") || l.contains("@"))
-        .filter(|l| {
-            // Keep lines that aren't just "Author: Name <email>" — keep the rest
-            let lower = l.trim().to_lowercase();
-            !lower.starts_with("author:") || lower.contains("error") || lower.contains("merge")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+// ── Dedup cache ──────────────────────────────────────────────────────────
 
-/// docker ps: strip container ID column (first 12-char hex), keep image+name+status
-fn preprocess_docker_ps(output: &str) -> String {
-    let mut result = Vec::new();
-    for line in output.lines() {
-        // Skip lines that are just a 12-char hex ID at the start
-        let trimmed = line.trim_start();
-        if trimmed.len() > 12 {
-            let prefix = &trimmed[..12];
-            if prefix.chars().all(|c| c.is_ascii_hexdigit()) {
-                // Replace the ID with a short placeholder
-                result.push(format!("[id] {}", &trimmed[12..].trim_start()));
-                continue;
-            }
-        }
-        result.push(line.to_owned());
-    }
-    result.join("\n")
-}
-
-/// ls -la: strip inode numbers, collapse permission strings
-fn preprocess_ls(output: &str) -> String {
-    output.lines()
-        .map(|line| {
-            // Remove inode column if present (ls -i)
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() > 2 && parts[0].chars().all(|c| c.is_ascii_digit()) {
-                // Likely inode number — skip it
-                parts[1..].join(" ")
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// npm/yarn install: strip progress bars, download lines, keep summary
-fn preprocess_package_install(output: &str) -> String {
-    output.lines()
-        .filter(|l| {
-            let t = l.trim();
-            // Skip progress/download noise
-            !t.starts_with("npm warn") && !t.starts_with("npm notice")
-            && !t.contains("⠋") && !t.contains("⠙") && !t.contains("⠹")
-            && !t.contains("downloading") && !t.contains("Downloading")
-            && !t.starts_with("fetch") && !t.starts_with("Fetching")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Compute a fast hash of content for dedup detection.
+fn content_hash(content: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 // ── CliProxy ─────────────────────────────────────────────────────────────
 
+/// In-memory dedup cache entry.
+#[allow(dead_code)]
+struct CacheEntry {
+    hash: u64,
+    compressed: String,
+    tokens_original: u32,
+    tokens_compressed: u32,
+}
+
 pub struct CliProxy {
     engine: SqzEngine,
+    /// In-memory dedup cache: hash → compressed output.
+    /// When the same content is seen again, return a compact reference.
+    cache: std::cell::RefCell<Vec<CacheEntry>>,
 }
 
 impl CliProxy {
     /// Create a new `CliProxy` backed by a default `SqzEngine`.
     pub fn new() -> sqz_engine::Result<Self> {
         let engine = SqzEngine::new()?;
-        Ok(Self { engine })
+        Ok(Self {
+            engine,
+            cache: std::cell::RefCell::new(Vec::new()),
+        })
     }
 
     /// Create a `CliProxy` with an existing engine (useful in tests).
     #[allow(dead_code)]
     pub fn with_engine(engine: SqzEngine) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            cache: std::cell::RefCell::new(Vec::new()),
+        }
     }
 
     /// Intercept `output` produced by `cmd`, compress it, and return the
     /// compressed text.
     ///
+    /// Flow:
+    /// 1. Check dedup cache — if exact content was seen before, return a
+    ///    compact reference (~13 tokens instead of full re-compression).
+    /// 2. Try per-command formatter (git status, cargo test, etc.).
+    /// 3. Fall back to generic compression pipeline.
+    /// 4. Cache the result for future dedup.
+    ///
     /// On any compression error the original `output` is returned unchanged
     /// and the error is logged to stderr (Requirement 1.5 fallback).
     pub fn intercept_output(&self, cmd: &str, output: &str) -> String {
+        // Step 1: Dedup cache check
+        let hash = content_hash(output);
+        {
+            let cache = self.cache.borrow();
+            if let Some(entry) = cache.iter().find(|e| e.hash == hash) {
+                eprintln!("[sqz] dedup hit: §ref:{:016x}§ ({} → 13 tokens)",
+                    entry.hash, entry.tokens_original);
+                return format!("§ref:{:016x}§", entry.hash);
+            }
+        }
+
+        // Step 2: Try per-command formatter
+        if let Some(formatted) = format_command(cmd, output) {
+            let tokens_original = (output.len() as u32 + 3) / 4;
+            let tokens_compressed = (formatted.len() as u32 + 3) / 4;
+            if tokens_compressed < tokens_original {
+                // Cache the formatted result
+                self.cache.borrow_mut().push(CacheEntry {
+                    hash,
+                    compressed: formatted.clone(),
+                    tokens_original,
+                    tokens_compressed,
+                });
+                // Log stats to stderr
+                self.log_compression(cmd, tokens_original, tokens_compressed);
+                return formatted;
+            }
+        }
+
+        // Step 3: Generic compression pipeline
         match self.compress_output(cmd, output) {
-            Ok(compressed) => compressed.data,
+            Ok(compressed) => {
+                let tokens_original = compressed.tokens_original;
+                let tokens_compressed = compressed.tokens_compressed;
+                // Cache the result
+                self.cache.borrow_mut().push(CacheEntry {
+                    hash,
+                    compressed: compressed.data.clone(),
+                    tokens_original,
+                    tokens_compressed,
+                });
+                self.log_compression(cmd, tokens_original, tokens_compressed);
+                compressed.data
+            }
             Err(e) => {
                 eprintln!("[sqz] fallback: compression error for command '{cmd}': {e}");
                 output.to_owned()
@@ -153,35 +170,24 @@ impl CliProxy {
         }
     }
 
-    /// Internal: run `output` through the engine pipeline with command-aware pre-processing.
-    ///
-    /// Low-risk commands (ls, git status, docker ps, etc.) get additional
-    /// command-specific transforms before the main pipeline.
+    /// Log compression stats to stderr.
+    fn log_compression(&self, cmd: &str, original: u32, compressed: u32) {
+        let saved = original.saturating_sub(compressed);
+        let pct = if original > 0 { (saved as f64 / original as f64 * 100.0) as u32 } else { 0 };
+        eprintln!("[sqz] {}/{} tokens ({}% reduction) [{}]", compressed, original, pct, cmd);
+        // Also log to session store for `sqz gain` tracking
+        let _ = self.engine.session_store().log_compression(
+            original, compressed, &[], cmd,
+        );
+    }
+
+    /// Internal: run `output` through the engine pipeline.
     fn compress_output(
         &self,
-        cmd: &str,
+        _cmd: &str,
         output: &str,
     ) -> sqz_engine::Result<CompressedContent> {
-        let base_cmd = cmd.split_whitespace().next().unwrap_or(cmd)
-            .rsplit('/').next().unwrap_or(cmd)
-            .rsplit('\\').next().unwrap_or(cmd);
-
-        // Apply command-specific pre-processing for low-risk outputs
-        let preprocessed = match base_cmd {
-            // git log: strip author email, keep hash+message
-            "git" if cmd.contains("log") => preprocess_git_log(output),
-            // docker ps: strip container IDs (first 12 chars), keep names
-            "docker" if cmd.contains("ps") => preprocess_docker_ps(output),
-            // ls -la: strip inode numbers and timestamps
-            "ls" => preprocess_ls(output),
-            // npm/yarn install: strip progress bars and download lines
-            "npm" | "yarn" | "pnpm" if cmd.contains("install") || cmd.contains("add") => {
-                preprocess_package_install(output)
-            }
-            _ => output.to_owned(),
-        };
-
-        self.engine.compress(&preprocessed)
+        self.engine.compress(output)
     }
 
     /// Return `true` when `cmd` matches one of the registered CLI patterns.

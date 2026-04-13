@@ -123,6 +123,19 @@ enum Command {
         #[arg(long, default_value_t = 7)]
         days: u32,
     },
+
+    /// Find missed savings opportunities by analyzing recent command history.
+    Discover {
+        /// Number of days to analyze (default: 7).
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+    },
+
+    /// Resume a previous session — inject a session guide into the context.
+    Resume {
+        /// Session ID to resume. If omitted, uses the most recent session.
+        session_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -171,6 +184,8 @@ fn main() {
         Some(Command::Uninstall) => cmd_uninstall(),
         Some(Command::Stats { session_id }) => cmd_stats(session_id),
         Some(Command::Gain { days }) => cmd_gain(days),
+        Some(Command::Discover { days }) => cmd_discover(days),
+        Some(Command::Resume { session_id }) => cmd_resume(session_id),
     }
 }
 
@@ -594,6 +609,166 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+// ── Discover ──────────────────────────────────────────────────────────────
+
+fn cmd_discover(days: u32) {
+    let engine = require_engine();
+    let store = engine.session_store();
+
+    let stats = match store.compression_stats() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[sqz] failed to read stats: {e}");
+            return;
+        }
+    };
+
+    let gains = match store.daily_gains(days) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("[sqz] failed to read daily gains: {e}");
+            return;
+        }
+    };
+
+    println!("sqz discover — missed savings analysis (last {} days)", days);
+    println!("{}", "─".repeat(50));
+
+    if stats.total_compressions == 0 {
+        println!();
+        println!("  No compression data found.");
+        println!("  sqz hasn't intercepted any commands yet.");
+        println!();
+        println!("  To start saving tokens:");
+        println!("    sqz init          # install shell hooks");
+        println!("    # then restart your AI tool");
+        println!();
+        return;
+    }
+
+    let total_original = stats.total_tokens_in;
+    let total_compressed = stats.total_tokens_out;
+    let total_saved = stats.tokens_saved();
+    let avg_reduction = stats.reduction_pct();
+
+    println!();
+    println!("  Compressions:    {}", stats.total_compressions);
+    println!("  Tokens original: {}", total_original);
+    println!("  Tokens after:    {}", total_compressed);
+    println!("  Tokens saved:    {} ({:.1}% avg reduction)", total_saved, avg_reduction);
+    println!();
+
+    // Estimate what could be saved with better adoption
+    let days_with_data = gains.iter().filter(|g| g.tokens_saved > 0).count();
+    let days_without = (days as usize).saturating_sub(days_with_data);
+
+    if days_without > 0 && days_with_data > 0 {
+        let avg_daily_savings = total_saved / days_with_data.max(1) as u64;
+        let missed = avg_daily_savings * days_without as u64;
+        println!("  {} days with no sqz activity.", days_without);
+        println!("  Estimated missed savings: ~{} tokens", missed);
+        println!();
+    }
+
+    // Suggest high-value commands
+    println!("  High-value commands to route through sqz:");
+    println!("    git status/diff/log  → 70-80% reduction");
+    println!("    cargo test/build     → 80-90% reduction (failures only)");
+    println!("    docker ps/images     → 70-80% reduction");
+    println!("    npm test/install     → 60-90% reduction");
+    println!("    kubectl get          → 60-70% reduction");
+    println!();
+}
+
+// ── Resume ────────────────────────────────────────────────────────────────
+
+fn cmd_resume(session_id: Option<String>) {
+    let engine = require_engine();
+    let store = engine.session_store();
+
+    // If no session ID given, try to find the most recent session
+    let sid = match session_id {
+        Some(id) => id,
+        None => {
+            // Search for any session, sorted by most recent
+            match store.search("*") {
+                Ok(sessions) if !sessions.is_empty() => {
+                    sessions[0].id.clone()
+                }
+                _ => {
+                    eprintln!("[sqz] no sessions found. Start a session first.");
+                    return;
+                }
+            }
+        }
+    };
+
+    // Load the session
+    let session = match store.load_session(sid.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[sqz] failed to load session '{}': {e}", sid);
+            return;
+        }
+    };
+
+    // Generate a session guide using SessionContinuityManager
+    use sqz_engine::SessionContinuityManager;
+    let continuity = SessionContinuityManager::new(store);
+
+    // Build a snapshot from the session
+    use sqz_engine::{Snapshot, SnapshotEvent, SnapshotEventType};
+    let mut events = Vec::new();
+
+    // Add summary as context
+    if !session.compressed_summary.is_empty() {
+        events.push(SnapshotEvent::new(
+            SnapshotEventType::Summary,
+            session.compressed_summary.clone(),
+        ));
+    }
+
+    // Add recent conversation turns
+    for (i, turn) in session.conversation.iter().rev().take(5).enumerate() {
+        let event_type = if i == 0 && turn.role == sqz_engine::Role::User {
+            SnapshotEventType::LastPrompt
+        } else {
+            SnapshotEventType::Context
+        };
+        let content = if turn.content.len() > 200 {
+            format!("{}...", &turn.content[..200])
+        } else {
+            turn.content.clone()
+        };
+        events.push(SnapshotEvent::new(event_type, content));
+    }
+
+    // Add learnings
+    for learning in &session.learnings {
+        events.push(SnapshotEvent::new(
+            SnapshotEventType::Learning,
+            format!("{}: {}", learning.key, learning.value),
+        ));
+    }
+
+    // Add corrections as decisions
+    for correction in &session.corrections.entries {
+        events.push(SnapshotEvent::new(
+            SnapshotEventType::Decision,
+            format!("{} → {}", correction.original, correction.correction),
+        ));
+    }
+
+    let snapshot = Snapshot {
+        events,
+    };
+
+    let guide = continuity.generate_guide(&snapshot);
+
+    println!("{}", guide.text);
+    eprintln!("[sqz] session guide: {} tokens from session '{}'", guide.token_count, sid);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
