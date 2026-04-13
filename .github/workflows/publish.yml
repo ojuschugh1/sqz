@@ -31,7 +31,7 @@ jobs:
           npm version "$VERSION" --no-git-tag-version
 
       - name: Publish to npm
-        run: cd npm && npm publish --access=public
+        run: cd npm && npm publish --registry=https://registry.npmjs.org --access=public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
