@@ -23,11 +23,16 @@
 </p>
 
 <p align="center">
+  <a href="https://discord.gg/j8EEyH5dSB"><img src="https://img.shields.io/discord/1234567890?logo=discord&logoColor=white&label=Discord&color=5865F2" alt="Discord"></a>
+</p>
+
+<p align="center">
   <a href="#install">Install</a> ·
   <a href="#how-it-works">How It Works</a> ·
   <a href="#features">Features</a> ·
   <a href="#platforms">Platforms</a> ·
-  <a href="CHANGELOG.md">Changelog</a>
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="https://discord.gg/j8EEyH5dSB">Discord</a>
 </p>
 
 ---
