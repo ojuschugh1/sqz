@@ -110,6 +110,12 @@ enum Command {
 
     /// Remove sqz shell hooks from the RC file.
     Uninstall,
+
+    /// Show a full compression stats report for a session.
+    Stats {
+        /// Session ID. If omitted, shows aggregate stats for the default agent.
+        session_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,6 +162,7 @@ fn main() {
         Some(Command::Dashboard { port }) => cmd_dashboard(port),
         Some(Command::Proxy { port }) => cmd_proxy(port),
         Some(Command::Uninstall) => cmd_uninstall(),
+        Some(Command::Stats { session_id }) => cmd_stats(session_id),
     }
 }
 
@@ -457,6 +464,76 @@ fn cmd_uninstall() {
             eprintln!("[sqz] warning: {e}");
             eprintln!("[sqz] could not remove hook; you may need to edit {} manually", hook.rc_path().display());
         }
+    }
+}
+
+/// `sqz stats [session-id]` — full compression stats report.
+fn cmd_stats(session_id: Option<String>) {
+    let engine = require_engine();
+    let report = engine.usage_report("default");
+
+    // Table drawing helpers
+    let bar = "├─────────────────────────┼──────────────────┤";
+    let top = "┌─────────────────────────┬──────────────────┐";
+    let bot = "└─────────────────────────┴──────────────────┘";
+    let row = |label: &str, val: &str| {
+        println!("│ {:<23} │ {:>16} │", label, val);
+    };
+
+    println!();
+    println!("{top}");
+    println!("│ {:^42} │", "sqz compression stats");
+    println!("{bar}");
+
+    // Budget section
+    row("Budget (window)", &format!("{} tokens", report.allocated));
+    row("Consumed", &format!("{} ({:.1}%)", report.consumed, report.consumed_pct * 100.0));
+    row("Pinned", &format!("{} tokens", report.pinned));
+    row("Available", &format!("{} tokens", report.available));
+
+    // Session cost section (if session_id provided)
+    if let Some(ref sid) = session_id {
+        match engine.cost_summary(sid) {
+            Ok(cost) => {
+                println!("{bar}");
+                row("Session", sid);
+                row("Total tokens", &format!("{}", cost.total_tokens));
+                row("Total cost", &format!("${:.6}", cost.total_usd));
+                row("Cache savings", &format!("${:.6}", cost.cache_savings_usd));
+                row("Compression savings", &format!("${:.6}", cost.compression_savings_usd));
+                if cost.total_usd > 0.0 {
+                    let pct = (cost.compression_savings_usd / (cost.total_usd + cost.compression_savings_usd)) * 100.0;
+                    row("Effective reduction", &format!("{:.1}%", pct));
+                }
+            }
+            Err(e) => {
+                println!("{bar}");
+                row("Session", sid);
+                row("Error", &format!("{e}"));
+            }
+        }
+    }
+
+    // Cache stats
+    let cache_entries = engine.session_store()
+        .list_cache_entries_lru()
+        .unwrap_or_default();
+    let cache_size: u64 = cache_entries.iter().map(|(_, sz)| sz).sum();
+    println!("{bar}");
+    row("Cache entries", &format!("{}", cache_entries.len()));
+    row("Cache size", &format_bytes(cache_size));
+
+    println!("{bot}");
+    println!();
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
 
