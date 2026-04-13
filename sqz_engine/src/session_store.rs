@@ -77,6 +77,11 @@ CREATE TABLE IF NOT EXISTS compression_log (
     mode             TEXT NOT NULL DEFAULT 'auto',
     created_at       TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS known_files (
+    path        TEXT PRIMARY KEY,
+    added_at    TEXT NOT NULL
+);
 "#;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -438,6 +443,43 @@ impl SessionStore {
             gains.push(row.map_err(SqzError::SessionStore)?);
         }
         Ok(gains)
+    }
+
+    // ── Known files (persistent cross-command context tracking) ───────────
+
+    /// Record a file path as "known" (its content is in the dedup cache).
+    /// Used by cross-command context refs to annotate error messages.
+    pub fn add_known_file(&self, path: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.execute(
+            "INSERT OR REPLACE INTO known_files (path, added_at) VALUES (?1, ?2)",
+            params![path, now],
+        ).map_err(SqzError::SessionStore)?;
+        Ok(())
+    }
+
+    /// Load all known file paths from the persistent store.
+    pub fn known_files(&self) -> Result<Vec<String>> {
+        let mut stmt = self.db.prepare(
+            "SELECT path FROM known_files ORDER BY added_at DESC",
+        ).map_err(SqzError::SessionStore)?;
+
+        let rows = stmt.query_map([], |row| {
+            row.get::<_, String>(0)
+        }).map_err(SqzError::SessionStore)?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(row.map_err(SqzError::SessionStore)?);
+        }
+        Ok(files)
+    }
+
+    /// Clear all known files (e.g. on session reset).
+    pub fn clear_known_files(&self) -> Result<()> {
+        self.db.execute("DELETE FROM known_files", [])
+            .map_err(SqzError::SessionStore)?;
+        Ok(())
     }
 }
 

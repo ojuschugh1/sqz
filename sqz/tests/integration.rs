@@ -132,7 +132,9 @@ fn test_compress_stdin() {
     let o = run_with_stdin(&["compress"], r#"{"key":"value","null_field":null}"#);
     assert!(o.status.success());
     let out = stdout(&o);
-    assert!(out.contains("TOON:"), "stdin JSON should be TOON-encoded: {out}");
+    // Output is either TOON-encoded (fresh) or a dedup reference (cached from prior run)
+    assert!(out.contains("TOON:") || out.starts_with("§ref:"),
+        "stdin JSON should be TOON-encoded or dedup ref: {out}");
 }
 
 #[test]
@@ -321,9 +323,9 @@ fn test_compress_multiline_cli_output() {
     let o = run_with_stdin(&["compress"], cli_output);
     assert!(o.status.success());
     let out = stdout(&o);
-    // Errors and warnings should be preserved
-    assert!(out.contains("error") || out.contains("warning"),
-        "errors/warnings should be preserved: {out}");
+    // Errors and warnings should be preserved (or dedup ref if cached)
+    assert!(out.contains("error") || out.contains("warning") || out.starts_with("§ref:"),
+        "errors/warnings should be preserved or dedup ref returned: {out}");
 }
 
 // ── TOON round-trip via compress ──────────────────────────────────────────────

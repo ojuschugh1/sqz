@@ -88,9 +88,7 @@ pub struct CliProxy {
     /// In-memory L1 dedup cache (fast hash → seen).
     /// On miss, falls through to the persistent CacheManager (L2).
     l1_cache: std::cell::RefCell<HashSet<u64>>,
-    /// File paths whose content is in the dedup cache (for cross-command context refs).
-    known_files: std::cell::RefCell<HashSet<String>>,
-    /// Dependency mapper for predictive pre-caching.
+    /// Dependency mapper for predictive pre-caching (in-memory, rebuilt per session).
     dep_mapper: std::cell::RefCell<DependencyMapper>,
 }
 
@@ -101,7 +99,6 @@ impl CliProxy {
         Ok(Self {
             engine,
             l1_cache: std::cell::RefCell::new(HashSet::new()),
-            known_files: std::cell::RefCell::new(HashSet::new()),
             dep_mapper: std::cell::RefCell::new(DependencyMapper::new()),
         })
     }
@@ -112,7 +109,6 @@ impl CliProxy {
         Self {
             engine,
             l1_cache: std::cell::RefCell::new(HashSet::new()),
-            known_files: std::cell::RefCell::new(HashSet::new()),
             dep_mapper: std::cell::RefCell::new(DependencyMapper::new()),
         }
     }
@@ -130,6 +126,10 @@ impl CliProxy {
     /// On any compression error the original `output` is returned unchanged
     /// and the error is logged to stderr (Requirement 1.5 fallback).
     pub fn intercept_output(&self, cmd: &str, output: &str) -> String {
+        // Always track file reads for cross-command context refs,
+        // even if the content is a dedup hit (the file is still "known").
+        self.track_file(cmd, output);
+
         // Step 1: L1 in-memory dedup check (fast path)
         let fast_hash = content_hash(output);
         if self.l1_cache.borrow().contains(&fast_hash) {
@@ -148,10 +148,7 @@ impl CliProxy {
             return inline_ref;
         }
 
-        // Step 3: Track file reads for cross-command context refs + predictive pre-cache
-        self.track_file(cmd, output);
-
-        // Step 4: Try per-command formatter
+        // Step 3: Try per-command formatter
         if let Some(formatted) = format_command(cmd, output) {
             let tokens_original = (output.len() as u32 + 3) / 4;
             let tokens_compressed = (formatted.len() as u32 + 3) / 4;
@@ -166,7 +163,7 @@ impl CliProxy {
             }
         }
 
-        // Step 5: Generic compression pipeline
+        // Step 4: Generic compression pipeline
         match self.compress_output(cmd, output) {
             Ok(compressed) => {
                 let tokens_original = compressed.tokens_original;
@@ -206,54 +203,50 @@ impl CliProxy {
 
     // ── Cross-command context references ──────────────────────────────────
 
-    /// Scan `text` for file paths that are already in the dedup cache.
-    /// Replace inline file content excerpts with compact cache references.
-    ///
-    /// Example: if `src/auth.rs` is cached and an error message contains
-    /// a multi-line excerpt from that file, replace it with
-    /// `[in context: src/auth.rs]`.
+    /// Scan `text` for file paths that are already in the persistent known_files
+    /// store. When an error message references a file the LLM has already seen,
+    /// annotate it so the LLM knows not to re-read it.
     fn apply_context_refs(&self, text: &str) -> String {
-        let known = self.known_files.borrow();
+        let known = match self.engine.session_store().known_files() {
+            Ok(files) => files,
+            Err(_) => return text.to_string(),
+        };
         if known.is_empty() {
             return text.to_string();
         }
 
         let mut result = text.to_string();
-        for file_path in known.iter() {
-            // Extract just the filename for matching
-            let _filename = Path::new(file_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(file_path);
-
-            // Look for patterns like "  --> src/auth.rs:42:5" followed by
-            // multi-line code excerpts (indented lines). Replace the excerpt
-            // with a compact reference.
+        for file_path in &known {
+            // Look for error location patterns: "  --> path:line:col"
             let marker = format!("--> {}", file_path);
             if result.contains(&marker) {
-                // The file is referenced in an error — the LLM already has it
-                // in context from a previous read. Add a note.
                 let note = format!("{} [in context]", marker);
                 result = result.replace(&marker, &note);
+            }
+            // Also check for bare path references in error output
+            // e.g. "at src/auth.rs:42" or "file: src/auth.rs"
+            let at_marker = format!("at {}:", file_path);
+            if result.contains(&at_marker) {
+                let note = format!("at {} [in context]:", file_path);
+                result = result.replace(&at_marker, &note);
             }
         }
         result
     }
 
-    /// Track a file path as "in context" (its content is in the dedup cache).
+    /// Track a file path as "in context" — persists to SessionStore so it
+    /// survives across sqz process invocations (each shell hook call is a
+    /// separate process).
     fn track_file(&self, cmd: &str, output: &str) {
-        // Detect file-read commands: cat, head, tail, or any command with a
-        // file path argument
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         let base = parts.first().map(|s| s.rsplit('/').next().unwrap_or(s)).unwrap_or("");
 
         match base {
             "cat" | "head" | "tail" | "less" | "bat" => {
-                // The file path is typically the last argument
                 if let Some(path) = parts.last() {
                     if Path::new(path).extension().is_some() {
-                        self.known_files.borrow_mut().insert(path.to_string());
-                        // Predictive pre-cache: analyze imports
+                        // Persist to SQLite so next sqz invocation sees it
+                        let _ = self.engine.session_store().add_known_file(path);
                         self.predictive_precache(path, output);
                     }
                 }
@@ -308,7 +301,8 @@ impl CliProxy {
                         let hash = content_hash(&dep_content);
                         self.l1_cache.borrow_mut().insert(hash);
                         let dep_str = resolved.to_string_lossy().to_string();
-                        self.known_files.borrow_mut().insert(dep_str);
+                        // Persist to known_files so cross-command refs work
+                        let _ = self.engine.session_store().add_known_file(&dep_str);
                         precached += 1;
                     }
                 }
@@ -336,9 +330,8 @@ impl CliProxy {
             .any(|p| base.eq_ignore_ascii_case(p))
     }
 
-    /// Main event loop: read lines from stdin, compress each one, write to
-    /// stdout.  This is the mode used when the shell hook pipes output
-    /// through `sqz compress`.
+    /// Main event loop: read all stdin, compress, write to stdout.
+    /// Reads `SQZ_CMD` env var for command identity (set by shell hooks).
     pub fn run_proxy(&self) -> sqz_engine::Result<()> {
         use std::io::{self, BufRead, Write};
         let stdin = io::stdin();
@@ -352,7 +345,8 @@ impl CliProxy {
             buf.push('\n');
         }
 
-        let compressed = self.intercept_output("stdin", &buf);
+        let cmd = std::env::var("SQZ_CMD").unwrap_or_else(|_| "stdin".to_string());
+        let compressed = self.intercept_output(&cmd, &buf);
         out.write_all(compressed.as_bytes())
             .map_err(|e| sqz_engine::SqzError::Other(e.to_string()))?;
         Ok(())
@@ -419,15 +413,16 @@ mod tests {
         let proxy = CliProxy::new().expect("engine init");
         let content = "use std::io;\nfn main() {}\n";
         proxy.intercept_output("cat src/main.rs", content);
-        let known = proxy.known_files.borrow();
-        assert!(known.contains("src/main.rs"), "cat should track the file path");
+        // File should be persisted in the session store
+        let known = proxy.engine.session_store().known_files().unwrap();
+        assert!(known.contains(&"src/main.rs".to_string()), "cat should track the file path");
     }
 
     #[test]
     fn test_context_refs_annotate_known_files() {
         let proxy = CliProxy::new().expect("engine init");
-        // Simulate reading a file
-        proxy.known_files.borrow_mut().insert("src/auth.rs".to_string());
+        // Simulate reading a file (persists to session store)
+        let _ = proxy.engine.session_store().add_known_file("src/auth.rs");
         // Error output referencing that file
         let error = "error[E0308]: mismatched types\n --> src/auth.rs:42:5\n";
         let result = proxy.apply_context_refs(error);
