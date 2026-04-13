@@ -172,6 +172,7 @@ export class SqzBridge {
     // Try CLI-based compression
     if (!this.isAvailable()) {
       // CLI not available — fall back to line-based
+      console.warn("[sqz] CLI not available, falling back to line-based");
       return lineFallbackCompress(content);
     }
 
@@ -179,6 +180,7 @@ export class SqzBridge {
       // Pipe content via stdin to sqz compress
       const args = ["compress"];
       const output = this.exec(args, content);
+      console.log("[sqz] CLI compress returned", output.length, "chars");
 
       // Strip the stats line (e.g. "[sqz] 6/9 tokens (33% reduction)")
       const lines = output.split("\n");
@@ -196,8 +198,10 @@ export class SqzBridge {
         language: sqzLang ?? vscodeLanguageId,
         usedAst: true,
       };
-    } catch {
+    } catch (err: unknown) {
       // CLI failed — fall back to line-based
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn("[sqz] CLI compress failed:", msg);
       return lineFallbackCompress(content);
     }
   }

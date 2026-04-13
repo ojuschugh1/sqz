@@ -29,6 +29,7 @@ build/
 # JetBrains plugin
 jetbrains-plugin/build/
 jetbrains-plugin/.gradle/
+jetbrains-plugin/.intellijPlatform/
 
 # SQLite databases (test artifacts)
 *.db

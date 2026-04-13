@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="128" height="128" rx="24" ry="24" fill="url(#bg)"/>
+
+  <!-- Squeeze arrows -->
+  <path d="M 24 48 L 40 64 L 24 80" stroke="#6c63ff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.7"/>
+  <path d="M 104 48 L 88 64 L 104 80" stroke="#6c63ff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.7"/>
+
+  <!-- SQZ -->
+  <text x="64" y="68" font-family="monospace" font-size="32" font-weight="800" fill="#e0e0e0" text-anchor="middle" dominant-baseline="central">SQZ</text>
+</svg>
