@@ -294,16 +294,16 @@ mod tests {
     // -----------------------------------------------------------------------
     //
     // For any content input to the Browser_Extension, if the estimated token
-    // count exceeds 500, the extension SHALL produce a compression preview
+    // count exceeds 100, the extension SHALL produce a compression preview
     // containing both original and compressed token counts.
-    // If the token count is <= 500, no preview SHALL be produced.
+    // If the token count is <= 100, no preview SHALL be produced.
     //
     // We model the "preview decision" as a pure function of the token estimate
     // so that it can be tested without a real DOM or WASM runtime.
 
     /// Returns true when a compression preview should be shown.
     fn should_show_preview(token_count: u32) -> bool {
-        token_count > 500
+        token_count > 100
     }
 
     /// Estimate tokens for a string (mirrors WasmEngine::estimate_tokens).
@@ -315,13 +315,13 @@ mod tests {
         /// **Validates: Requirements 5.3**
         ///
         /// For any string input:
-        /// - If estimate_tokens(input) > 500, should_show_preview MUST return true.
-        /// - If estimate_tokens(input) <= 500, should_show_preview MUST return false.
+        /// - If estimate_tokens(input) > 100, should_show_preview MUST return true.
+        /// - If estimate_tokens(input) <= 100, should_show_preview MUST return false.
         #[test]
         fn prop_browser_compression_preview_threshold(input in ".*") {
             let tokens = estimate_tokens(&input);
             let preview = should_show_preview(tokens);
-            if tokens > 500 {
+            if tokens > 100 {
                 prop_assert!(
                     preview,
                     "expected preview for input with {} tokens (len={})",
@@ -362,10 +362,10 @@ mod tests {
 
     #[test]
     fn preview_threshold_boundary() {
-        // exactly 500 tokens → no preview
-        assert!(!should_show_preview(500));
-        // 501 tokens → preview
-        assert!(should_show_preview(501));
+        // exactly 100 tokens → no preview
+        assert!(!should_show_preview(100));
+        // 101 tokens → preview
+        assert!(should_show_preview(101));
     }
 
     #[test]
