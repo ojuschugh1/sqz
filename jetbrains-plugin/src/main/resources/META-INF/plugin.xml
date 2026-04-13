@@ -3,7 +3,7 @@
 <idea-plugin>
     <id>com.sqz.jetbrains-plugin</id>
     <name>sqz — Context Intelligence</name>
-    <vendor email="sqz@example.com" url="https://github.com/ojuschugh1/sqz">sqz</vendor>
+    <vendor email="ojuschugh@gmail.com" url="https://github.com/ojuschugh1/sqz">Ojus Chugh</vendor>
     <description><![CDATA[
         sqz compresses file content sent to AI assistants, reducing token usage by 40-80%.
         <ul>
