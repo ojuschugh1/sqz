@@ -79,6 +79,8 @@ This is by design. sqz's confidence router detects high-risk content (errors, te
 
 Command: `cargo test -p sqz-engine benchmarks -- --nocapture`
 
+For a full session-level comparison with rtk, see [docs/benchmark-vs-rtk.md](docs/benchmark-vs-rtk.md).
+
 | Case | Before | After | Saved |
 |---|---:|---:|---:|
 | repeated_logs | 148 | 62 | **58.1%** |
