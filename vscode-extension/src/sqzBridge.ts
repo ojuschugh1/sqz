@@ -176,39 +176,26 @@ export class SqzBridge {
     }
 
     try {
-      // Write content to a temp file and compress it
-      const tmpFile = path.join(
-        os.tmpdir(),
-        `sqz_vscode_${Date.now()}_${Math.random().toString(36).slice(2)}.tmp`
-      );
-      fs.writeFileSync(tmpFile, content, "utf8");
+      // Pipe content via stdin to sqz compress
+      const args = ["compress"];
+      const output = this.exec(args, content);
 
-      try {
-        const args = ["compress", tmpFile];
-        if (sqzLang) {
-          args.push("--language", sqzLang);
-        }
-        const output = this.exec(args);
+      // Strip the stats line (e.g. "[sqz] 6/9 tokens (33% reduction)")
+      const lines = output.split("\n");
+      const compressed = lines.filter(l => !l.startsWith("[sqz]")).join("\n");
 
-        const tokensOriginal = Math.ceil(content.length / 4);
-        const tokensCompressed = Math.ceil(output.length / 4);
+      const tokensOriginal = Math.ceil(content.length / 4);
+      const tokensCompressed = Math.ceil(compressed.length / 4);
 
-        return {
-          compressed: output,
-          tokensOriginal,
-          tokensCompressed,
-          compressionRatio:
-            tokensOriginal > 0 ? tokensCompressed / tokensOriginal : 1.0,
-          language: sqzLang ?? vscodeLanguageId,
-          usedAst: true,
-        };
-      } finally {
-        try {
-          fs.unlinkSync(tmpFile);
-        } catch {
-          // ignore cleanup errors
-        }
-      }
+      return {
+        compressed,
+        tokensOriginal,
+        tokensCompressed,
+        compressionRatio:
+          tokensOriginal > 0 ? tokensCompressed / tokensOriginal : 1.0,
+        language: sqzLang ?? vscodeLanguageId,
+        usedAst: true,
+      };
     } catch {
       // CLI failed — fall back to line-based
       return lineFallbackCompress(content);
