@@ -19,21 +19,21 @@ __sqz_postexec() {
 }
 PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__sqz_postexec"
 sqz_run() {
-    "$@" 2>&1 | sqz compress
+    "$@" 2>&1 | SQZ_CMD="$1" sqz compress
 }
 # sudo passthrough: preserve compression for privileged commands
 sqz_sudo() {
-    sudo "$@" 2>&1 | sqz compress
+    sudo "$@" 2>&1 | SQZ_CMD="sudo $1" sqz compress
 }
 "#;
 
 const ZSH_HOOK: &str = r#"
 # sqz — context intelligence layer (auto-installed)
 sqz_run() {
-    "$@" 2>&1 | sqz compress
+    "$@" 2>&1 | SQZ_CMD="$1" sqz compress
 }
 sqz_sudo() {
-    sudo "$@" 2>&1 | sqz compress
+    sudo "$@" 2>&1 | SQZ_CMD="sudo $1" sqz compress
 }
 preexec() {
     export __SQZ_CMD="$1"
@@ -43,9 +43,11 @@ preexec() {
 const FISH_HOOK: &str = r#"
 # sqz — context intelligence layer (auto-installed)
 function sqz_run
+    set -lx SQZ_CMD $argv[1]
     $argv 2>&1 | sqz compress
 end
 function sqz_sudo
+    set -lx SQZ_CMD "sudo $argv[1]"
     sudo $argv 2>&1 | sqz compress
 end
 "#;
@@ -53,6 +55,7 @@ end
 const NUSHELL_HOOK: &str = r#"
 # sqz — context intelligence layer (auto-installed)
 def sqz_run [...args: string] {
+    $env.SQZ_CMD = $args.0
     run-external $args.0 ...$args[1..] | sqz compress
 }
 "#;
@@ -61,11 +64,13 @@ const POWERSHELL_HOOK: &str = r#"
 # sqz — context intelligence layer (auto-installed)
 function Invoke-SqzRun {
     param([string[]]$Command)
+    $env:SQZ_CMD = $Command[0]
     & @Command 2>&1 | sqz compress
 }
 Set-Alias sqz_run Invoke-SqzRun
 function Invoke-SqzSudo {
     param([string[]]$Command)
+    $env:SQZ_CMD = "sudo $($Command[0])"
     Start-Process -Verb RunAs -FilePath $Command[0] -ArgumentList $Command[1..] 2>&1 | sqz compress
 }
 "#;

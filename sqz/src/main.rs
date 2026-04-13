@@ -230,6 +230,7 @@ fn cmd_init() {
 
 /// `sqz compress [text] [--mode safe|default|aggressive|auto] [--verify]`
 fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool) {
+    let is_stdin = text.is_none();
     let input = match text {
         Some(t) => t,
         None => {
@@ -243,6 +244,26 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool) {
         }
     };
 
+    // When reading from stdin in auto mode (the shell hook path), route
+    // through CliProxy to get dedup cache, per-command formatters, context
+    // refs, and predictive pre-caching. The SQZ_CMD env var carries the
+    // original command name from the shell hook.
+    if mode == "auto" && is_stdin {
+        let cmd = std::env::var("SQZ_CMD").unwrap_or_else(|_| "stdin".to_string());
+        let proxy = match CliProxy::new() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[sqz] proxy init error: {e}");
+                print!("{input}");
+                return;
+            }
+        };
+        let compressed = proxy.intercept_output(&cmd, &input);
+        print!("{}", compressed);
+        return;
+    }
+
+    // Explicit mode override or positional text arg — use engine directly
     let engine = require_engine();
 
     // Apply mode override if specified
@@ -692,13 +713,15 @@ fn cmd_resume(session_id: Option<String>) {
     let sid = match session_id {
         Some(id) => id,
         None => {
-            // Search for any session, sorted by most recent
-            match store.search("*") {
-                Ok(sessions) if !sessions.is_empty() => {
-                    sessions[0].id.clone()
-                }
-                _ => {
+            // Find the most recently updated session
+            match store.latest_session() {
+                Ok(Some(summary)) => summary.id,
+                Ok(None) => {
                     eprintln!("[sqz] no sessions found. Start a session first.");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("[sqz] failed to query sessions: {e}");
                     return;
                 }
             }

@@ -257,6 +257,33 @@ impl SessionStore {
         Ok(results)
     }
 
+    /// Return the most recently updated session, or `None` if no sessions exist.
+    pub fn latest_session(&self) -> Result<Option<SessionSummary>> {
+        let mut stmt = self.db.prepare(
+            r#"SELECT id, project_dir, compressed_summary, created_at, updated_at
+               FROM sessions
+               ORDER BY updated_at DESC
+               LIMIT 1"#,
+        ).map_err(SqzError::SessionStore)?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        }).map_err(SqzError::SessionStore)?;
+
+        for row in rows {
+            let (id, project_dir, compressed_summary, created_at, updated_at) =
+                row.map_err(SqzError::SessionStore)?;
+            return Ok(Some(row_to_summary(id, project_dir, compressed_summary, created_at, updated_at)?));
+        }
+        Ok(None)
+    }
+
     /// Query sessions whose `project_dir` matches `dir` exactly.
     pub fn search_by_project(&self, dir: &Path) -> Result<Vec<SessionSummary>> {
         let dir_str = dir.to_string_lossy().to_string();

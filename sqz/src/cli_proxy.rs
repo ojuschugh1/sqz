@@ -63,8 +63,11 @@ pub const CLI_PATTERNS: &[&str] = &[
 // (Moved to sqz_engine::cmd_formatters for reuse across CLI, MCP, and IDE)
 
 // ── Dedup cache ──────────────────────────────────────────────────────────
+// Persistent SHA-256 dedup is handled by SqzEngine's CacheManager.
+// The in-memory cache below is a fast first-level check to avoid
+// hitting SQLite on every call within the same process lifetime.
 
-/// Compute a fast hash of content for dedup detection.
+/// Compute a fast hash of content for in-memory dedup.
 fn content_hash(content: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
@@ -73,20 +76,18 @@ fn content_hash(content: &str) -> u64 {
 
 // ── CliProxy ─────────────────────────────────────────────────────────────
 
-/// In-memory dedup cache entry.
+/// In-memory first-level dedup cache entry (avoids SQLite round-trip).
 #[allow(dead_code)]
 struct CacheEntry {
     hash: u64,
-    compressed: String,
     tokens_original: u32,
-    tokens_compressed: u32,
 }
 
 pub struct CliProxy {
     engine: SqzEngine,
-    /// In-memory dedup cache: hash → compressed output.
-    /// When the same content is seen again, return a compact reference.
-    cache: std::cell::RefCell<Vec<CacheEntry>>,
+    /// In-memory L1 dedup cache (fast hash → seen).
+    /// On miss, falls through to the persistent CacheManager (L2).
+    l1_cache: std::cell::RefCell<HashSet<u64>>,
     /// File paths whose content is in the dedup cache (for cross-command context refs).
     known_files: std::cell::RefCell<HashSet<String>>,
     /// Dependency mapper for predictive pre-caching.
@@ -99,7 +100,7 @@ impl CliProxy {
         let engine = SqzEngine::new()?;
         Ok(Self {
             engine,
-            cache: std::cell::RefCell::new(Vec::new()),
+            l1_cache: std::cell::RefCell::new(HashSet::new()),
             known_files: std::cell::RefCell::new(HashSet::new()),
             dep_mapper: std::cell::RefCell::new(DependencyMapper::new()),
         })
@@ -110,7 +111,7 @@ impl CliProxy {
     pub fn with_engine(engine: SqzEngine) -> Self {
         Self {
             engine,
-            cache: std::cell::RefCell::new(Vec::new()),
+            l1_cache: std::cell::RefCell::new(HashSet::new()),
             known_files: std::cell::RefCell::new(HashSet::new()),
             dep_mapper: std::cell::RefCell::new(DependencyMapper::new()),
         }
@@ -129,50 +130,51 @@ impl CliProxy {
     /// On any compression error the original `output` is returned unchanged
     /// and the error is logged to stderr (Requirement 1.5 fallback).
     pub fn intercept_output(&self, cmd: &str, output: &str) -> String {
-        // Step 1: Dedup cache check
-        let hash = content_hash(output);
-        {
-            let cache = self.cache.borrow();
-            if let Some(entry) = cache.iter().find(|e| e.hash == hash) {
-                eprintln!("[sqz] dedup hit: §ref:{:016x}§ ({} → 13 tokens)",
-                    entry.hash, entry.tokens_original);
-                return format!("§ref:{:016x}§", entry.hash);
+        // Step 1: L1 in-memory dedup check (fast path)
+        let fast_hash = content_hash(output);
+        if self.l1_cache.borrow().contains(&fast_hash) {
+            // L1 hit — check L2 persistent cache for the actual ref
+            if let Ok(Some(inline_ref)) = self.engine.cache_manager().check_dedup(output.as_bytes()) {
+                eprintln!("[sqz] dedup hit: {} (L1+L2)", inline_ref);
+                return inline_ref;
             }
         }
 
-        // Step 2: Track file reads for cross-command context refs + predictive pre-cache
+        // Step 2: L2 persistent SHA-256 dedup check (survives restarts)
+        if let Ok(Some(inline_ref)) = self.engine.cache_manager().check_dedup(output.as_bytes()) {
+            // Promote to L1 for faster future lookups
+            self.l1_cache.borrow_mut().insert(fast_hash);
+            eprintln!("[sqz] dedup hit: {} (L2)", inline_ref);
+            return inline_ref;
+        }
+
+        // Step 3: Track file reads for cross-command context refs + predictive pre-cache
         self.track_file(cmd, output);
 
-        // Step 3: Try per-command formatter
+        // Step 4: Try per-command formatter
         if let Some(formatted) = format_command(cmd, output) {
             let tokens_original = (output.len() as u32 + 3) / 4;
             let tokens_compressed = (formatted.len() as u32 + 3) / 4;
             if tokens_compressed < tokens_original {
-                self.cache.borrow_mut().push(CacheEntry {
-                    hash,
-                    compressed: formatted.clone(),
-                    tokens_original,
-                    tokens_compressed,
-                });
+                // Persist to L2 cache
+                if let Ok(compressed) = self.engine.compress(&formatted) {
+                    let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
+                }
+                self.l1_cache.borrow_mut().insert(fast_hash);
                 self.log_compression(cmd, tokens_original, tokens_compressed);
-                // Apply cross-command context refs before returning
                 return self.apply_context_refs(&formatted);
             }
         }
 
-        // Step 4: Generic compression pipeline
+        // Step 5: Generic compression pipeline
         match self.compress_output(cmd, output) {
             Ok(compressed) => {
                 let tokens_original = compressed.tokens_original;
                 let tokens_compressed = compressed.tokens_compressed;
-                self.cache.borrow_mut().push(CacheEntry {
-                    hash,
-                    compressed: compressed.data.clone(),
-                    tokens_original,
-                    tokens_compressed,
-                });
+                // Persist to L2 cache
+                let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
+                self.l1_cache.borrow_mut().insert(fast_hash);
                 self.log_compression(cmd, tokens_original, tokens_compressed);
-                // Apply cross-command context refs before returning
                 self.apply_context_refs(&compressed.data)
             }
             Err(e) => {
@@ -293,21 +295,18 @@ impl CliProxy {
             if resolved.exists() && resolved.is_file() {
                 // Read and hash the file content
                 if let Ok(dep_content) = std::fs::read_to_string(&resolved) {
-                    let hash = content_hash(&dep_content);
-                    let cache = self.cache.borrow();
-                    if cache.iter().any(|e| e.hash == hash) {
+                    // Check if already in persistent cache
+                    if let Ok(Some(_)) = self.engine.cache_manager().check_dedup(dep_content.as_bytes()) {
                         continue; // Already cached
                     }
-                    drop(cache);
 
-                    // Compress and cache
+                    // Compress and persist to L2 cache
                     if let Ok(compressed) = self.engine.compress(&dep_content) {
-                        self.cache.borrow_mut().push(CacheEntry {
-                            hash,
-                            compressed: compressed.data,
-                            tokens_original: compressed.tokens_original,
-                            tokens_compressed: compressed.tokens_compressed,
-                        });
+                        let _ = self.engine.cache_manager().store_compressed(
+                            dep_content.as_bytes(), &compressed,
+                        );
+                        let hash = content_hash(&dep_content);
+                        self.l1_cache.borrow_mut().insert(hash);
                         let dep_str = resolved.to_string_lossy().to_string();
                         self.known_files.borrow_mut().insert(dep_str);
                         precached += 1;
@@ -409,9 +408,10 @@ mod tests {
         let output = "some repeated output that is long enough to be meaningful\n".repeat(5);
         let first = proxy.intercept_output("echo", &output);
         let second = proxy.intercept_output("echo", &output);
-        // Second call should return a dedup reference
+        // Second call should return a dedup reference (from L1 or L2 cache)
         assert!(second.starts_with("§ref:"), "expected dedup ref, got: {}", second);
-        assert!(second.len() < first.len(), "dedup ref should be shorter than original");
+        assert!(second.len() < first.len() || first.starts_with("§ref:"),
+            "dedup ref should be shorter than original");
     }
 
     #[test]

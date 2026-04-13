@@ -75,6 +75,31 @@ impl CacheManager {
         Ok(CacheResult::Fresh { output: compressed })
     }
 
+    /// Check if `content` is already in the persistent cache (dedup lookup only).
+    ///
+    /// Returns `Some(inline_ref)` if cached, `None` if fresh.
+    pub fn check_dedup(&self, content: &[u8]) -> Result<Option<String>> {
+        let hash = Self::sha256_hex(content);
+        if self.store.get_cache_entry(&hash)?.is_some() {
+            let hash_prefix = &hash[..16];
+            Ok(Some(format!("§ref:{hash_prefix}§")))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Store a compressed result in the persistent cache, keyed by the
+    /// SHA-256 hash of the original content.
+    pub fn store_compressed(
+        &self,
+        original_content: &[u8],
+        compressed: &CompressedContent,
+    ) -> Result<()> {
+        let hash = Self::sha256_hex(original_content);
+        self.store.save_cache_entry(&hash, compressed)?;
+        Ok(())
+    }
+
     /// Invalidate the cache entry for `path` if its current content is known.
     ///
     /// Reads the file at `path`, computes its hash, and removes the matching

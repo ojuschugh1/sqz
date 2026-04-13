@@ -351,6 +351,11 @@ impl SqzEngine {
         &self.session_store
     }
 
+    /// Access the `CacheManager` for persistent dedup.
+    pub fn cache_manager(&self) -> &CacheManager {
+        &self.cache_manager
+    }
+
     /// Access the `AstParser`.
     pub fn ast_parser(&self) -> &AstParser {
         &self.ast_parser
