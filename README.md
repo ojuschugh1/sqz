@@ -23,6 +23,10 @@
 </p>
 
 <p align="center">
+  <a href="https://crates.io/crates/sqz-cli"><img src="https://img.shields.io/crates/v/sqz-cli?logo=rust&logoColor=white&label=crates.io&color=e6522c" alt="Crates.io"></a>
+  <a href="https://www.npmjs.com/package/sqz-cli"><img src="https://img.shields.io/npm/v/sqz-cli?logo=npm&logoColor=white&label=npm&color=cb3837" alt="npm"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz"><img src="https://img.shields.io/visual-studio-marketplace/v/ojuschugh1.sqz?logo=visual-studio-code&logoColor=white&label=VS%20Code&color=007acc" alt="VS Code"></a>
+  <a href="https://addons.mozilla.org/en-US/firefox/addon/sqz-context-compression/"><img src="https://img.shields.io/badge/Firefox-Add--on-ff7139?logo=firefox-browser&logoColor=white" alt="Firefox"></a>
   <a href="https://discord.gg/j8EEyH5dSB"><img src="https://img.shields.io/discord/1493251029075235076?logo=discord&logoColor=white&label=Discord&color=5865F2" alt="Discord"></a>
 </p>
 
@@ -112,7 +116,6 @@ cargo install sqz-cli
 # curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh
 # brew install sqz
 # npm install -g sqz-cli
-# pip install sqz
 ```
 
 > All install channels point to [github.com/ojuschugh1/sqz](https://github.com/ojuschugh1/sqz).
@@ -300,7 +303,6 @@ complexity_threshold = 0.4
 | Cargo | `cargo install sqz-cli` | Live |
 | Homebrew | `brew install sqz` | Coming soon |
 | npm | `npm install -g sqz-cli` / `npx sqz-cli` | Coming soon |
-| pip | `pip install sqz` | Coming soon |
 | curl | `curl -fsSL .../install.sh \| sh` | Coming soon |
 | Docker | `docker run sqz` | Coming soon |
 | GitHub Releases | Pre-built binaries for Linux, macOS, Windows | Coming soon |
