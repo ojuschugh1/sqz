@@ -19,7 +19,7 @@ import {
   lineFallbackCompress,
   vscodeLanguageToSqz,
   AST_SUPPORTED_LANGUAGES,
-} from "../../sqzBridge";
+} from "../sqzBridge";
 
 // ---------------------------------------------------------------------------
 // Helper: create a bridge that always reports the CLI as unavailable so tests

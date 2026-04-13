@@ -4,10 +4,28 @@
   "description": "Compress and manage LLM context in VS Code. Intercepts file reads, shows token budget, and reduces context window waste.",
   "version": "0.1.0",
   "publisher": "sqz",
+  "license": "SEE LICENSE IN LICENSE",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ojuschugh1/sqz.git"
+  },
+  "homepage": "https://github.com/ojuschugh1/sqz",
+  "keywords": [
+    "llm",
+    "context",
+    "compression",
+    "tokens",
+    "ai",
+    "mcp"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other", "Programming Languages"],
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -69,12 +87,22 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^18.0.0",
     "@types/vscode": "^1.85.0",
-    "@types/node": "^20.0.0",
     "@vscode/test-electron": "^2.3.8",
+    "@vscode/vsce": "2.19.0",
+    "glob": "^10.3.0",
+    "mocha": "^10.2.0",
     "typescript": "^5.3.0"
+  },
+  "overrides": {
+    "cheerio": "1.0.0-rc.12"
   }
 }
