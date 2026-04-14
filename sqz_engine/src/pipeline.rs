@@ -1,4 +1,6 @@
 use crate::ansi_strip::AnsiStripper;
+use crate::dict_compressor::DictCompressor;
+use crate::entropy_truncator::EntropyTruncator;
 use crate::error::{Result, SqzError};
 use crate::preset::Preset;
 use crate::prompt_cache::PromptCacheDetector;
@@ -7,6 +9,7 @@ use crate::stages::{
     KeepFieldsStage, StripFieldsStage, StripNullsStage, TruncateStringsStage,
 };
 use crate::token_counter::TokenCounter;
+use crate::token_pruner::TokenPruner;
 use crate::toon::ToonEncoder;
 use crate::types::{CompressedContent, Content, ContentType, ModelFamily, StageConfig};
 
@@ -15,18 +18,23 @@ pub struct SessionContext {
     pub session_id: String,
 }
 
-/// The 8-stage compression pipeline orchestrator.
+/// The compression pipeline orchestrator with integrated token pruning,
+/// dictionary compression, and entropy-weighted truncation.
 pub struct CompressionPipeline {
     stages: Vec<Box<dyn crate::stages::CompressionStage>>,
     toon_encoder: ToonEncoder,
     token_counter: TokenCounter,
+    token_pruner: TokenPruner,
+    dict_compressor: std::cell::RefCell<DictCompressor>,
+    entropy_truncator: EntropyTruncator,
     #[allow(dead_code)]
     prompt_cache_detector: PromptCacheDetector,
 }
 
 impl CompressionPipeline {
-    /// Construct the pipeline from a preset, creating all 8 built-in stages
-    /// sorted by priority.
+    /// Construct the pipeline from a preset, creating all built-in stages
+    /// sorted by priority, plus the token pruner, dictionary compressor,
+    /// and entropy truncator.
     pub fn new(_preset: &Preset) -> Self {
         let mut stages: Vec<Box<dyn crate::stages::CompressionStage>> = vec![
             Box::new(AnsiStripper),
@@ -46,12 +54,17 @@ impl CompressionPipeline {
             stages,
             toon_encoder: ToonEncoder,
             token_counter: TokenCounter::new(),
+            token_pruner: TokenPruner::new(),
+            dict_compressor: std::cell::RefCell::new(DictCompressor::new()),
+            entropy_truncator: EntropyTruncator::new(),
             prompt_cache_detector: PromptCacheDetector,
         }
     }
 
-    /// Run content through all enabled stages then apply TOON encoding if the
-    /// result is JSON.
+    /// Run content through all enabled stages, then apply:
+    /// 1. Dictionary compression + TOON encoding for JSON
+    /// 2. Token pruning for prose/plain text
+    /// 3. Entropy-weighted truncation for long content
     pub fn compress(
         &self,
         input: &str,
@@ -82,13 +95,64 @@ impl CompressionPipeline {
             }
         }
 
-        // Apply TOON encoding if the result is JSON
+        // Post-stage processing: apply the 3 new techniques
+
+        let is_json = ToonEncoder::is_json(&content.raw);
+
+        // Technique 6: Entropy-weighted truncation for long non-JSON content
+        // Only apply to content > 500 chars to avoid overhead on short content
+        if !is_json && content.raw.len() > 500 {
+            if let Ok(trunc_result) = self.entropy_truncator.truncate_string(&content.raw) {
+                if trunc_result.segments_dropped > 0 {
+                    content.raw = trunc_result.text;
+                    stages_applied.push("entropy_truncate".to_owned());
+                }
+            }
+        }
+
+        // Technique 1: Token pruning for prose content (non-JSON, non-code)
+        // Only apply to content > 100 chars that looks like prose
+        if !is_json && content.raw.len() > 100 && looks_like_prose(&content.raw) {
+            if let Ok(prune_result) = self.token_pruner.prune(&content.raw) {
+                if prune_result.tokens_removed > 0 {
+                    content.raw = prune_result.text;
+                    stages_applied.push("token_prune".to_owned());
+                }
+            }
+        }
+
+        // Apply dictionary compression + TOON encoding for JSON
         let data = if ToonEncoder::is_json(&content.raw) {
-            let json: serde_json::Value = serde_json::from_str(&content.raw)
-                .map_err(|e| SqzError::Other(format!("pipeline: JSON parse error: {e}")))?;
-            let encoded = self.toon_encoder.encode(&json)?;
-            stages_applied.push("toon_encode".to_owned());
-            encoded
+            // Technique 4: Dictionary compression — observe and try to compress.
+            // Only use dict compression if it actually saves bytes (header overhead
+            // can make small payloads larger).
+            self.dict_compressor.borrow_mut().observe(&content.raw);
+            let dict_result = self.dict_compressor.borrow().compress(&content.raw)?;
+
+            if dict_result.substitutions > 0 && dict_result.bytes_saved > 50 {
+                // Dict compression was beneficial — encode the JSON body with TOON
+                stages_applied.push("dict_compress".to_owned());
+                if let Some(newline_pos) = dict_result.data.find("\n{") {
+                    let header = &dict_result.data[..newline_pos + 1];
+                    let json_body = &dict_result.data[newline_pos + 1..];
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_body) {
+                        let encoded = self.toon_encoder.encode(&json)?;
+                        stages_applied.push("toon_encode".to_owned());
+                        format!("{header}{encoded}")
+                    } else {
+                        dict_result.data
+                    }
+                } else {
+                    dict_result.data
+                }
+            } else {
+                // No beneficial dict substitutions — standard TOON encoding
+                let json: serde_json::Value = serde_json::from_str(&content.raw)
+                    .map_err(|e| SqzError::Other(format!("pipeline: JSON parse error: {e}")))?;
+                let encoded = self.toon_encoder.encode(&json)?;
+                stages_applied.push("toon_encode".to_owned());
+                encoded
+            }
         } else {
             content.raw
         };
@@ -135,6 +199,8 @@ impl CompressionPipeline {
         ];
         stages.sort_by_key(|s| s.priority());
         self.stages = stages;
+        // Reset session-level state in dict compressor
+        self.dict_compressor.borrow_mut().reset();
         Ok(())
     }
 }
@@ -260,6 +326,47 @@ fn stage_config_from_preset(name: &str, preset: &Preset) -> StageConfig {
         }
         _ => StageConfig::default(),
     }
+}
+
+/// Heuristic: does this text look like prose (documentation, error messages,
+/// README content) rather than code or structured data?
+fn looks_like_prose(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().take(20).collect();
+    if lines.is_empty() {
+        return false;
+    }
+
+    let mut prose_lines = 0;
+    let mut code_lines = 0;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Code indicators
+        if trimmed.ends_with('{')
+            || trimmed.ends_with('}')
+            || trimmed.ends_with(';')
+            || trimmed.starts_with("fn ")
+            || trimmed.starts_with("pub ")
+            || trimmed.starts_with("let ")
+            || trimmed.starts_with("const ")
+            || trimmed.starts_with("import ")
+            || trimmed.starts_with("def ")
+            || trimmed.starts_with("class ")
+            || trimmed.contains("::")
+            || trimmed.contains("->")
+            || trimmed.contains("=>")
+        {
+            code_lines += 1;
+        } else {
+            prose_lines += 1;
+        }
+    }
+
+    // Consider it prose if more than half the lines look like prose
+    prose_lines > code_lines
 }
 
 // ---------------------------------------------------------------------------

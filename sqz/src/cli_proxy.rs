@@ -11,7 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use sqz_engine::{format_command, CompressedContent, DependencyMapper, SqzEngine};
+use sqz_engine::{format_command, CompressedContent, DependencyMapper, NgramAbbreviator, SqzEngine};
 
 // ── CLI compression patterns ──────────────────────────────────────────────
 
@@ -90,6 +90,8 @@ pub struct CliProxy {
     l1_cache: std::cell::RefCell<HashSet<u64>>,
     /// Dependency mapper for predictive pre-caching (in-memory, rebuilt per session).
     dep_mapper: std::cell::RefCell<DependencyMapper>,
+    /// Session-level n-gram abbreviator for recurring phrase compression.
+    abbreviator: std::cell::RefCell<NgramAbbreviator>,
 }
 
 impl CliProxy {
@@ -100,6 +102,7 @@ impl CliProxy {
             engine,
             l1_cache: std::cell::RefCell::new(HashSet::new()),
             dep_mapper: std::cell::RefCell::new(DependencyMapper::new()),
+            abbreviator: std::cell::RefCell::new(NgramAbbreviator::new()),
         })
     }
 
@@ -110,6 +113,7 @@ impl CliProxy {
             engine,
             l1_cache: std::cell::RefCell::new(HashSet::new()),
             dep_mapper: std::cell::RefCell::new(DependencyMapper::new()),
+            abbreviator: std::cell::RefCell::new(NgramAbbreviator::new()),
         }
     }
 
@@ -172,7 +176,20 @@ impl CliProxy {
                 let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
                 self.l1_cache.borrow_mut().insert(fast_hash);
                 self.log_compression(cmd, tokens_original, tokens_compressed);
-                self.apply_context_refs(&compressed.data)
+
+                // Technique 3: N-gram abbreviation — observe output for phrase
+                // frequency tracking, then apply abbreviations to the result
+                let mut abbr = self.abbreviator.borrow_mut();
+                abbr.observe(&compressed.data);
+                let abbreviated = match abbr.abbreviate(&compressed.data) {
+                    Ok(result) if result.total_tokens_saved > 0 => {
+                        eprintln!("[sqz] n-gram abbreviation: {} tokens saved", result.total_tokens_saved);
+                        result.text
+                    }
+                    _ => compressed.data,
+                };
+
+                self.apply_context_refs(&abbreviated)
             }
             Err(e) => {
                 eprintln!("[sqz] fallback: compression error for command '{cmd}': {e}");
