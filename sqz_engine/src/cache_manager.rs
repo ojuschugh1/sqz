@@ -2,6 +2,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+use crate::delta_encoder::DeltaEncoder;
 use crate::error::Result;
 use crate::pipeline::{CompressionPipeline, SessionContext};
 use crate::preset::Preset;
@@ -17,14 +18,25 @@ pub enum CacheResult {
         /// Approximate token cost of the reference (always 13).
         token_cost: u32,
     },
+    /// Near-duplicate of cached content — returns a compact delta.
+    Delta {
+        /// The delta text (header + changed lines).
+        delta_text: String,
+        /// Approximate token cost of the delta.
+        token_cost: u32,
+        /// Similarity to the cached version.
+        similarity: f64,
+    },
     /// Content not seen before — full compression result.
     Fresh { output: CompressedContent },
 }
 
-/// SHA-256 content-hash deduplication cache backed by [`SessionStore`].
+/// SHA-256 content-hash deduplication cache backed by [`SessionStore`],
+/// with delta encoding for near-duplicate content.
 pub struct CacheManager {
     store: SessionStore,
     max_size_bytes: u64,
+    delta_encoder: DeltaEncoder,
 }
 
 impl CacheManager {
@@ -32,6 +44,7 @@ impl CacheManager {
         Self {
             store,
             max_size_bytes,
+            delta_encoder: DeltaEncoder::new(),
         }
     }
 
@@ -44,7 +57,8 @@ impl CacheManager {
 
     /// Look up `content` in the cache.
     ///
-    /// - On dedup: return `CacheResult::Dedup` with a compact reference token.
+    /// - On exact dedup: return `CacheResult::Dedup` with a compact reference token.
+    /// - On near-duplicate: return `CacheResult::Delta` with a compact diff.
     /// - On fresh: compress via `pipeline`, persist to store, return
     ///   `CacheResult::Fresh`.
     pub fn get_or_compress(
@@ -55,6 +69,7 @@ impl CacheManager {
     ) -> Result<CacheResult> {
         let hash = Self::sha256_hex(content);
 
+        // Exact match — return dedup reference
         if self.store.get_cache_entry(&hash)?.is_some() {
             let hash_prefix = &hash[..16];
             let inline_ref = format!("§ref:{hash_prefix}§");
@@ -64,7 +79,25 @@ impl CacheManager {
             });
         }
 
+        // Near-duplicate check: compare against recent cache entries
         let text = String::from_utf8_lossy(content).into_owned();
+        if let Some(delta_result) = self.try_delta_encode(&text)? {
+            // Store the new content in cache for future exact matches
+            let ctx = SessionContext {
+                session_id: "cache".to_string(),
+            };
+            let preset = Preset::default();
+            let compressed = pipeline.compress(&text, &ctx, &preset)?;
+            self.store.save_cache_entry(&hash, &compressed)?;
+
+            let token_cost = (delta_result.delta_text.len() / 4) as u32;
+            return Ok(CacheResult::Delta {
+                delta_text: delta_result.delta_text,
+                token_cost: token_cost.max(5),
+                similarity: delta_result.similarity,
+            });
+        }
+
         let ctx = SessionContext {
             session_id: "cache".to_string(),
         };
@@ -73,6 +106,34 @@ impl CacheManager {
         self.store.save_cache_entry(&hash, &compressed)?;
 
         Ok(CacheResult::Fresh { output: compressed })
+    }
+
+    /// Try to delta-encode content against recent cache entries.
+    /// Returns Some(DeltaResult) if a near-duplicate was found.
+    fn try_delta_encode(
+        &self,
+        new_content: &str,
+    ) -> Result<Option<crate::delta_encoder::DeltaResult>> {
+        let entries = self.store.list_cache_entries_lru()?;
+
+        // Check the most recent entries (up to 10) for near-duplicates
+        let check_count = entries.len().min(10);
+        for (hash, _) in entries.iter().rev().take(check_count) {
+            if let Some(cached) = self.store.get_cache_entry(hash)? {
+                let hash_prefix = &hash[..hash.len().min(16)];
+                if let Ok(Some(delta)) =
+                    self.delta_encoder
+                        .encode(&cached.data, new_content, hash_prefix)
+                {
+                    // Only use delta if it's actually smaller than the full content
+                    if delta.delta_text.len() < new_content.len() {
+                        return Ok(Some(delta));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Check if `content` is already in the persistent cache (dedup lookup only).
@@ -254,7 +315,7 @@ mod tests {
                 assert!(inline_ref.ends_with('§'));
                 assert_eq!(token_cost, 13);
             }
-            CacheResult::Fresh { .. } => panic!("expected cache hit"),
+            CacheResult::Fresh { .. } | CacheResult::Delta { .. } => panic!("expected cache hit"),
         }
     }
 
@@ -269,7 +330,7 @@ mod tests {
         let result = cm
             .get_or_compress(path, b"content v2", &pipeline)
             .unwrap();
-        assert!(matches!(result, CacheResult::Fresh { .. }));
+        assert!(matches!(result, CacheResult::Fresh { .. } | CacheResult::Delta { .. }));
     }
 
     #[test]
@@ -388,7 +449,7 @@ mod tests {
                         "reference token should end with §"
                     );
                 }
-                CacheResult::Fresh { .. } => {
+                CacheResult::Fresh { .. } | CacheResult::Delta { .. } => {
                     prop_assert!(false, "second read should be a cache hit, not a miss");
                 }
             }
@@ -435,8 +496,8 @@ mod tests {
 
             let r3 = cm.get_or_compress(path, &content_b, &pipeline).unwrap();
             prop_assert!(
-                matches!(r3, CacheResult::Fresh { .. }),
-                "read with changed content should be a cache miss"
+                matches!(r3, CacheResult::Fresh { .. } | CacheResult::Delta { .. }),
+                "read with changed content should be a cache miss or delta"
             );
         }
     }
@@ -549,7 +610,7 @@ mod tests {
                             "persisted cache hit should report 13 tokens"
                         );
                     }
-                    CacheResult::Fresh { .. } => {
+                    CacheResult::Fresh { .. } | CacheResult::Delta { .. } => {
                         prop_assert!(
                             false,
                             "cache entry should persist across store reopen"

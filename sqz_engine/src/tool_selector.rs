@@ -34,6 +34,15 @@ fn tokenize(text: &str) -> BagOfWords {
         .collect()
 }
 
+/// Tokenize into a frequency map (term → count) for TF-IDF.
+fn tokenize_tf(text: &str) -> HashMap<String, u32> {
+    let mut freq = HashMap::new();
+    for word in text.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()) {
+        *freq.entry(word.to_lowercase()).or_insert(0) += 1;
+    }
+    freq
+}
+
 /// Jaccard similarity between two bags of words: |A ∩ B| / |A ∪ B|.
 /// Returns 0.0 if both sets are empty.
 fn jaccard(a: &BagOfWords, b: &BagOfWords) -> f64 {
@@ -49,53 +58,162 @@ fn jaccard(a: &BagOfWords, b: &BagOfWords) -> f64 {
     }
 }
 
-/// Selects 3–5 relevant tools per task using bag-of-words Jaccard similarity.
+// ── TF-IDF + Cosine Similarity ────────────────────────────────────────────────
+
+/// Sparse TF-IDF vector: term → weight.
+type TfIdfVector = HashMap<String, f64>;
+
+/// Compute TF-IDF weight for a term in a document.
+///
+/// TF(t,d) = count(t,d) / |d|
+/// IDF(t) = ln(N / DF(t))
+/// TF-IDF(t,d) = TF(t,d) × IDF(t)
+fn compute_tfidf(
+    term_freq: &HashMap<String, u32>,
+    doc_freq: &HashMap<String, u32>,
+    total_docs: u32,
+) -> TfIdfVector {
+    let doc_len: u32 = term_freq.values().sum();
+    if doc_len == 0 {
+        return HashMap::new();
+    }
+
+    let mut vector = HashMap::new();
+    for (term, &count) in term_freq {
+        let tf = count as f64 / doc_len as f64;
+        let df = doc_freq.get(term).copied().unwrap_or(1).max(1);
+        let idf = (total_docs as f64 / df as f64).ln();
+        let weight = tf * idf;
+        if weight > 0.0 {
+            vector.insert(term.clone(), weight);
+        }
+    }
+    vector
+}
+
+/// Cosine similarity between two sparse TF-IDF vectors.
+///
+/// cosine(a, b) = (a · b) / (||a|| × ||b||)
+fn cosine_similarity(a: &TfIdfVector, b: &TfIdfVector) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+
+    let dot: f64 = a
+        .iter()
+        .filter_map(|(term, &wa)| b.get(term).map(|&wb| wa * wb))
+        .sum();
+
+    let norm_a: f64 = a.values().map(|w| w * w).sum::<f64>().sqrt();
+    let norm_b: f64 = b.values().map(|w| w * w).sum::<f64>().sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        dot / (norm_a * norm_b)
+    }
+}
+
+// ── ToolSelector ──────────────────────────────────────────────────────────────
+
+/// Selects 3–5 relevant tools per task using TF-IDF + cosine similarity,
+/// with Jaccard as a fallback for very short descriptions.
 ///
 /// # Selection rules
-/// - Compute Jaccard similarity between the intent query and each tool description.
+/// - Compute TF-IDF vectors for each tool description at registration time.
+/// - At query time, compute the TF-IDF vector for the intent and score via cosine.
 /// - Sort tools by descending similarity score.
 /// - Return between 3 and min(5, tool_count) tools.
 /// - If no tool has similarity > threshold, return the default tool set instead.
 pub struct ToolSelector {
-    /// Bag-of-words for each registered tool description.
+    /// Bag-of-words for each registered tool description (kept for backward compat).
     bags: HashMap<ToolId, BagOfWords>,
+    /// TF-IDF vectors for each registered tool description.
+    tfidf_vectors: HashMap<ToolId, TfIdfVector>,
+    /// Document frequency: term → number of tools containing that term.
+    doc_freq: HashMap<String, u32>,
+    /// Total number of registered tools (for IDF computation).
+    total_docs: u32,
     /// Ordered list of registered tool ids (preserves insertion order for determinism).
     tool_ids: Vec<ToolId>,
     /// Similarity threshold below which we fall back to defaults.
     threshold: f64,
     /// Default tool ids returned when confidence is low.
     default_tools: Vec<ToolId>,
+    /// Raw term frequencies per tool (needed for recomputing TF-IDF on updates).
+    term_freqs: HashMap<ToolId, HashMap<String, u32>>,
 }
 
 impl ToolSelector {
     /// Create a new `ToolSelector` from a `Preset`.
     ///
-    /// `model_path` is accepted for API compatibility but is unused because we use
-    /// a bag-of-words Jaccard similarity approach rather than a neural embedding model.
+    /// `model_path` is accepted for API compatibility but is unused.
     pub fn new(_model_path: &std::path::Path, preset: &Preset) -> Result<Self> {
         let threshold = preset.tool_selection.similarity_threshold;
         let default_tools = preset.tool_selection.default_tools.clone();
         Ok(Self {
             bags: HashMap::new(),
+            tfidf_vectors: HashMap::new(),
+            doc_freq: HashMap::new(),
+            total_docs: 0,
             tool_ids: Vec::new(),
             threshold,
             default_tools,
+            term_freqs: HashMap::new(),
         })
     }
 
-    /// Register a slice of tools, computing bag-of-words for each description.
+    /// Register a slice of tools, computing TF-IDF vectors for each description.
     pub fn register_tools(&mut self, tools: &[ToolDefinition]) -> Result<()> {
+        // First pass: collect term frequencies and update doc_freq
         for tool in tools {
             let bag = tokenize(&tool.description);
+            let tf = tokenize_tf(&tool.description);
+
+            // Update document frequency for new terms
             if !self.bags.contains_key(&tool.id) {
                 self.tool_ids.push(tool.id.clone());
+                self.total_docs += 1;
+                for term in tf.keys() {
+                    *self.doc_freq.entry(term.clone()).or_insert(0) += 1;
+                }
+            } else {
+                // Tool already registered — update doc_freq (remove old, add new)
+                if let Some(old_tf) = self.term_freqs.get(&tool.id) {
+                    for term in old_tf.keys() {
+                        if let Some(count) = self.doc_freq.get_mut(term) {
+                            *count = count.saturating_sub(1);
+                        }
+                    }
+                }
+                for term in tf.keys() {
+                    *self.doc_freq.entry(term.clone()).or_insert(0) += 1;
+                }
             }
+
             self.bags.insert(tool.id.clone(), bag);
+            self.term_freqs.insert(tool.id.clone(), tf);
         }
+
+        // Second pass: recompute all TF-IDF vectors (IDF changed)
+        self.recompute_tfidf();
         Ok(())
     }
 
+    /// Recompute TF-IDF vectors for all registered tools.
+    fn recompute_tfidf(&mut self) {
+        for id in &self.tool_ids {
+            if let Some(tf) = self.term_freqs.get(id) {
+                let vector = compute_tfidf(tf, &self.doc_freq, self.total_docs);
+                self.tfidf_vectors.insert(id.clone(), vector);
+            }
+        }
+    }
+
     /// Select between 3 and min(5, tool_count) tools whose descriptions best match `intent`.
+    ///
+    /// Uses TF-IDF + cosine similarity for scoring. Falls back to Jaccard for
+    /// very short intents (< 3 words) where TF-IDF has insufficient signal.
     ///
     /// Returns the default tool set when no tool exceeds the similarity threshold.
     pub fn select(&self, intent: &str, max_tools: usize) -> Result<Vec<ToolId>> {
@@ -104,26 +222,50 @@ impl ToolSelector {
             return Ok(self.default_tools.clone());
         }
 
-        let intent_bag = tokenize(intent);
-
-        // Score every registered tool.
-        let mut scored: Vec<(f64, &ToolId)> = self
-            .tool_ids
-            .iter()
-            .map(|id| {
-                let bag = self.bags.get(id).expect("bag must exist for registered tool");
-                let score = jaccard(&intent_bag, bag);
-                (score, id)
-            })
+        let intent_words: Vec<&str> = intent
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty())
             .collect();
 
+        // Use TF-IDF + cosine for intents with enough signal, Jaccard for short ones
+        let use_tfidf = intent_words.len() >= 3 && self.total_docs >= 2;
+
+        let mut scored: Vec<(f64, &ToolId)> = if use_tfidf {
+            let intent_tf = tokenize_tf(intent);
+            let intent_vector = compute_tfidf(&intent_tf, &self.doc_freq, self.total_docs);
+
+            self.tool_ids
+                .iter()
+                .map(|id| {
+                    let score = self
+                        .tfidf_vectors
+                        .get(id)
+                        .map(|v| cosine_similarity(&intent_vector, v))
+                        .unwrap_or(0.0);
+                    (score, id)
+                })
+                .collect()
+        } else {
+            // Fallback to Jaccard for short intents
+            let intent_bag = tokenize(intent);
+            self.tool_ids
+                .iter()
+                .map(|id| {
+                    let bag = self.bags.get(id).expect("bag must exist for registered tool");
+                    let score = jaccard(&intent_bag, bag);
+                    (score, id)
+                })
+                .collect()
+        };
+
         // Sort descending by score, then ascending by id for determinism on ties.
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.1.cmp(b.1)));
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(b.1))
+        });
 
         // Check whether any tool exceeds the threshold.
-        // We use strict less-than so that a score equal to the threshold is still
-        // considered "confident enough" (threshold = 0.0 means always select).
         let best_score = scored.first().map(|(s, _)| *s).unwrap_or(0.0);
         if best_score < self.threshold {
             return Ok(self.default_tools.clone());
@@ -151,8 +293,27 @@ impl ToolSelector {
                 tool.id
             )));
         }
+
+        // Update doc_freq: remove old terms, add new
+        if let Some(old_tf) = self.term_freqs.get(&tool.id) {
+            for term in old_tf.keys() {
+                if let Some(count) = self.doc_freq.get_mut(term) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+        }
+
         let bag = tokenize(&tool.description);
+        let tf = tokenize_tf(&tool.description);
+        for term in tf.keys() {
+            *self.doc_freq.entry(term.clone()).or_insert(0) += 1;
+        }
+
         self.bags.insert(tool.id.clone(), bag);
+        self.term_freqs.insert(tool.id.clone(), tf);
+
+        // Recompute all vectors since IDF may have changed
+        self.recompute_tfidf();
         Ok(())
     }
 }
@@ -281,6 +442,84 @@ mod tests {
         let bag = selector.bags.get("t1").unwrap();
         assert!(bag.contains("delta"));
         assert!(!bag.contains("alpha"));
+    }
+
+    // ── TF-IDF specific tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_tfidf_discriminative_ranking() {
+        // TF-IDF should rank a tool with a rare matching term higher than
+        // one with only common terms.
+        let preset = make_preset_with_threshold(0.0, vec![]);
+        let mut selector = ToolSelector::new(Path::new(""), &preset).unwrap();
+
+        let tools = vec![
+            ToolDefinition {
+                id: "generic".to_string(),
+                name: "Generic".to_string(),
+                description: "this tool performs common operations on files and data".to_string(),
+                ..Default::default()
+            },
+            ToolDefinition {
+                id: "specific".to_string(),
+                name: "Specific".to_string(),
+                description: "this tool performs kubernetes pod deployment orchestration".to_string(),
+                ..Default::default()
+            },
+            ToolDefinition {
+                id: "other".to_string(),
+                name: "Other".to_string(),
+                description: "this tool handles database migration and schema updates".to_string(),
+                ..Default::default()
+            },
+        ];
+        selector.register_tools(&tools).unwrap();
+
+        // "kubernetes deployment" should rank "specific" highest because
+        // "kubernetes" and "deployment" are rare (discriminative) terms
+        let result = selector
+            .select("deploy kubernetes pods to the cluster", 5)
+            .unwrap();
+        assert_eq!(
+            result[0], "specific",
+            "TF-IDF should rank the tool with rare matching terms first"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_identical() {
+        let mut a = HashMap::new();
+        a.insert("hello".to_string(), 1.0);
+        a.insert("world".to_string(), 2.0);
+        let sim = cosine_similarity(&a, &a);
+        assert!((sim - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal() {
+        let mut a = HashMap::new();
+        a.insert("hello".to_string(), 1.0);
+        let mut b = HashMap::new();
+        b.insert("world".to_string(), 1.0);
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_cosine_similarity_empty() {
+        let a: TfIdfVector = HashMap::new();
+        let b: TfIdfVector = HashMap::new();
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn test_tfidf_vectors_populated() {
+        let preset = make_preset_with_threshold(0.0, vec![]);
+        let mut selector = ToolSelector::new(Path::new(""), &preset).unwrap();
+        let tools = make_tools(5);
+        selector.register_tools(&tools).unwrap();
+        assert_eq!(selector.tfidf_vectors.len(), 5);
+        assert_eq!(selector.total_docs, 5);
     }
 
     #[test]

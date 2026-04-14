@@ -23,43 +23,68 @@
 </p>
 
 <p align="center">
+  <a href="https://discord.gg/j8EEyH5dSB"><img src="https://img.shields.io/discord/1493251029075235076?logo=discord&logoColor=white&label=Discord&color=5865F2" alt="Discord"></a>
+</p>
+
+<p align="center">
   <a href="#install">Install</a> ·
   <a href="#how-it-works">How It Works</a> ·
   <a href="#features">Features</a> ·
   <a href="#platforms">Platforms</a> ·
-  <a href="CHANGELOG.md">Changelog</a>
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="https://discord.gg/j8EEyH5dSB">Discord</a>
 </p>
 
 ---
 
 ## The Problem
 
-AI coding tools waste 60-90% of your context window on noise. Every file read sends the full content. Every `git status` sends raw output. Every API response dumps uncompressed JSON. You're paying for tokens that carry zero signal.
+AI coding tools waste tokens. Every file read sends the full content — even if the LLM saw it 30 seconds ago. Every `git status` sends raw output. Every API response dumps uncompressed JSON. You're paying for tokens that carry zero signal.
 
 ## The Solution
 
-sqz sits between your AI tool and the LLM, compressing everything before it reaches the model. No workflow changes. Install once, save on every API call.
+sqz sits between your AI tool and the LLM, compressing everything before it reaches the model. The real win isn't just compression — it's deduplication. When the same file gets read 5 times in a session, sqz sends it once and returns a 13-token reference for every subsequent read.
 
 ```
 Without sqz:                              With sqz:
 
-LLM ──"read auth.ts"──▶ Editor ──▶ File   LLM ──"read auth.ts"──▶ sqz ──▶ File
-  ▲                                │         ▲                      │       │
-  │    ~2,000 tokens (full file)   │         │   ~13 tokens         │ cache │
-  └────────────────────────────────┘         └──── (compressed) ────┴───────┘
+File read #1:  2,000 tokens               File read #1:  ~800 tokens (compressed)
+File read #2:  2,000 tokens               File read #2:  ~13 tokens  (dedup ref)
+File read #3:  2,000 tokens               File read #3:  ~13 tokens  (dedup ref)
+─────────────────────────                  ─────────────────────────
+Total:         6,000 tokens               Total:         ~826 tokens (86% saved)
 ```
 
-## Token Savings (Real Measured Showcase)
+No workflow changes. Install once, save on every API call.
 
-Numbers below are from actual runs in this repository (not estimates).
+## Token Savings
 
-### Benchmark Suite Results
+sqz saves tokens in two ways: compression (removing noise from content) and deduplication (replacing repeated reads with 13-token references). The dedup cache is where the biggest savings happen in real sessions.
 
-Command:
+### Where sqz shines
 
-```sh
-cargo test -p sqz-engine benchmarks -- --nocapture
-```
+| Scenario | Savings | Why |
+|---|---:|---|
+| Repeated file reads (5x) | **86%** | Dedup cache: 13-token ref after first read |
+| JSON API responses with nulls | **7–56%** | Strip nulls + TOON encoding (varies by null density) |
+| Repeated log lines | **58%** | Condense stage collapses duplicates |
+| Large JSON arrays | **77%** | Array sampling + collapse |
+
+### Where sqz intentionally preserves content
+
+| Scenario | Savings | Why |
+|---|---:|---|
+| Stack traces | **0%** | Error content is critical — safe mode preserves it |
+| Test output | **0%** | Pass/fail signals must not be altered |
+| Short git output | **0%** | Already compact, nothing to strip |
+
+This is by design. sqz's confidence router detects high-risk content (errors, test results, diffs) and routes it through safe mode to avoid dropping signal. A tool that claims 89% compression on `cargo test` output is either lying or deleting your error messages.
+
+### Benchmark suite
+
+Command: `cargo test -p sqz-engine benchmarks -- --nocapture`
+
+For a full session-level comparison with rtk, see [docs/benchmark-vs-rtk.md](docs/benchmark-vs-rtk.md).
 
 | Case | Before | After | Saved |
 |---|---:|---:|---:|
@@ -70,51 +95,24 @@ cargo test -p sqz-engine benchmarks -- --nocapture
 | stack_trace (safe mode) | 82 | 82 | **0.0%** |
 | prose_docs | 124 | 124 | **0.0%** |
 
-### Workspace-Wide Compression
+### Track your savings
 
-Measured by compressing 138 real text/code/config files in this repo with `sqz compress`.
-
-| Metric | Value |
-|---|---:|
-| Files scanned | 138 |
-| Tokens before | 309,964 |
-| Tokens after | 268,874 |
-| Tokens saved | 41,090 |
-| Net reduction | **13.26%** |
-| Total runtime | 1,997.75 ms |
-| Avg time per file | 14.48 ms |
-
-### Real Command Output Samples
-
-| Operation | Before | After | Saved |
-|---|---:|---:|---:|
-| `ls -la` | 515 | 438 | **15.0%** |
-| `git ls-files` | 1,062 | 1,062 | **0.0%** |
-| `git log --oneline -n 50` | 285 | 285 | **0.0%** |
-| `cargo check -p sqz-engine` | 93 | 93 | **0.0%** |
-| `cargo test --workspace` | 10,750 | 10,750 | **0.0%** |
-
-> Why some operations show 0%: sqz is intentionally conservative on outputs it classifies as high-risk or already compact, and preserves critical/error-heavy outputs via fallback semantics.
-
-### Why sqz may show lower savings than some tools
-
-sqz is optimized for trust and correctness first, not maximum compression at any cost.
-
-- **Conservative guardrails:** verifier + safe mode reduce over-compression risk.
-- **Faithfulness-first behavior:** critical content (errors, stack traces, diffs, key JSON fields) is preserved by design.
-- **Real benchmarks over marketing benchmarks:** numbers shown here are measured on real runs, not idealized samples.
-- **Content-dependent savings:** repetitive logs and large arrays compress heavily; already compact code/test outputs often compress less.
-- **No cheap wins:** sqz intentionally avoids aggressive deletions that can hurt model reliability.
+```sh
+sqz gain          # ASCII chart of daily token savings
+sqz stats         # Cumulative compression report
+```
 
 ## Install
 
 ```sh
-# Pick one:
-curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh
+# Confirmed working:
 cargo install sqz-cli
-brew install sqz
-npm install -g sqz-cli
-pip install sqz
+
+# Coming soon (scaffolded, not yet live):
+# curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh
+# brew install sqz
+# npm install -g sqz-cli
+# pip install sqz
 ```
 
 > All install channels point to [github.com/ojuschugh1/sqz](https://github.com/ojuschugh1/sqz).
@@ -157,7 +155,7 @@ A compiled Rust binary (not Node.js) that serves as an MCP server with intellige
 
 ### 3. Browser Extension
 
-Chrome extension for ChatGPT, Claude.ai, Gemini, Grok, and Perplexity. Compresses pasted content client-side via WASM. Zero network requests.
+Chrome and Firefox extensions for ChatGPT, Claude.ai, Gemini, Grok, and Perplexity. Compresses pasted content client-side via a lightweight WASM engine (TOON encoding + whitespace normalization + phrase substitution). The full 8-stage pipeline runs in the CLI/MCP — the browser uses a fast subset optimized for paste-time latency. Zero network requests.
 
 ### 4. IDE Extensions
 
@@ -220,6 +218,12 @@ See [docs/integrations/](docs/integrations/) for platform-specific setup guides.
 ```sh
 sqz init              # Install shell hooks + default presets
 sqz compress <text>   # Compress text (or pipe from stdin)
+sqz compress --verify # Compress with confidence score
+sqz compress --mode safe|aggressive  # Force compression mode
+sqz stats             # Cumulative compression report
+sqz gain              # ASCII chart of daily token savings
+sqz gain --days 30    # Last 30 days
+sqz analyze <file>    # Per-block Shannon entropy analysis
 sqz export <session>  # Export session to .ctx format
 sqz import <file>     # Import a .ctx file
 sqz status            # Show token budget and usage
@@ -291,15 +295,15 @@ complexity_threshold = 0.4
 
 ## Distribution
 
-| Channel | Command |
-|---|---|
-| Cargo | `cargo install sqz-cli` |
-| Homebrew | `brew install sqz` |
-| npm | `npm install -g sqz-cli` / `npx sqz-cli` |
-| pip | `pip install sqz` |
-| curl | `curl -fsSL .../install.sh \| sh` |
-| Docker | `docker run sqz` |
-| GitHub Releases | Pre-built binaries for Linux, macOS, Windows |
+| Channel | Command | Status |
+|---|---|---|
+| Cargo | `cargo install sqz-cli` | Live |
+| Homebrew | `brew install sqz` | Coming soon |
+| npm | `npm install -g sqz-cli` / `npx sqz-cli` | Coming soon |
+| pip | `pip install sqz` | Coming soon |
+| curl | `curl -fsSL .../install.sh \| sh` | Coming soon |
+| Docker | `docker run sqz` | Coming soon |
+| GitHub Releases | Pre-built binaries for Linux, macOS, Windows | Coming soon |
 
 ## Development
 
