@@ -365,13 +365,94 @@ impl CompressionStage for TruncateStringsStage {
 // Stage 7: collapse_arrays
 // ---------------------------------------------------------------------------
 
-/// For JSON content, if an array has more than `max_items` elements, keep the
-/// first `max_items` and replace the rest with a summary string element.
+/// For JSON content, if an array has more than `max_items` elements:
+/// 1. First, try tabular encoding: if all elements are objects with the same
+///    keys, encode as a header row + data rows for maximum compression.
+/// 2. Otherwise, keep the first `max_items` and replace the rest with a
+///    summary string element.
+///
 /// Config options:
 ///   - `max_items` (u32, default 5)
 ///   - `summary_template` (string, default "... and {remaining} more items")
 /// Non-JSON content passes through unchanged.
 pub struct CollapseArraysStage;
+
+/// Check if all elements in an array are objects with the same set of keys.
+/// Returns the shared keys in a stable order if uniform, None otherwise.
+fn detect_uniform_array(arr: &[serde_json::Value]) -> Option<Vec<String>> {
+    if arr.len() < 2 {
+        return None;
+    }
+
+    let first_keys: Vec<String> = match &arr[0] {
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                return None;
+            }
+            map.keys().cloned().collect()
+        }
+        _ => return None,
+    };
+
+    // Check that every element is an object with exactly the same keys
+    for item in &arr[1..] {
+        match item {
+            serde_json::Value::Object(map) => {
+                if map.len() != first_keys.len() {
+                    return None;
+                }
+                for key in &first_keys {
+                    if !map.contains_key(key) {
+                        return None;
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    Some(first_keys)
+}
+
+/// Encode a uniform array of objects as a compact tabular string:
+/// `[headers] | col1 | col2 | ... \n val1 | val2 | ...`
+fn encode_tabular(arr: &[serde_json::Value], keys: &[String]) -> String {
+    let mut lines = Vec::with_capacity(arr.len() + 1);
+
+    // Header row
+    lines.push(keys.join(" | "));
+
+    // Data rows
+    for item in arr {
+        if let serde_json::Value::Object(map) = item {
+            let row: Vec<String> = keys
+                .iter()
+                .map(|k| value_to_compact_string(map.get(k).unwrap_or(&serde_json::Value::Null)))
+                .collect();
+            lines.push(row.join(" | "));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Convert a JSON value to a compact single-line string for tabular display.
+fn value_to_compact_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => {
+            if s.len() > 50 {
+                format!("{}...", &s[..47])
+            } else {
+                s.clone()
+            }
+        }
+        serde_json::Value::Array(a) => format!("[{} items]", a.len()),
+        serde_json::Value::Object(m) => format!("{{{} keys}}", m.len()),
+    }
+}
 
 fn collapse_arrays_recursive(
     value: &mut serde_json::Value,
@@ -384,8 +465,20 @@ fn collapse_arrays_recursive(
             for item in arr.iter_mut() {
                 collapse_arrays_recursive(item, max_items, summary_template);
             }
-            // Then collapse if needed
+
+            // Try tabular encoding for uniform arrays
             if arr.len() > max_items {
+                if let Some(keys) = detect_uniform_array(arr) {
+                    let table = encode_tabular(arr, &keys);
+                    let count = arr.len();
+                    arr.clear();
+                    arr.push(serde_json::Value::String(
+                        format!("[table: {count} rows]\n{table}"),
+                    ));
+                    return;
+                }
+
+                // Fallback: simple truncation with summary
                 let remaining = arr.len() - max_items;
                 arr.truncate(max_items);
                 let summary = summary_template.replace("{remaining}", &remaining.to_string());
@@ -432,6 +525,200 @@ impl CompressionStage for CollapseArraysStage {
             Ok(())
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7a: word_abbreviate
+// ---------------------------------------------------------------------------
+
+/// For plain text / CLI output, replace common long words with standard
+/// abbreviations (e.g. "implementation" → "impl", "configuration" → "config").
+///
+/// Only replaces whole words (not substrings) and only in prose-like content.
+/// Config options: `enabled` (bool).
+pub struct WordAbbreviateStage;
+
+/// Built-in abbreviation table: (long_form, short_form).
+/// Only includes unambiguous, widely-understood abbreviations.
+const WORD_ABBREVIATIONS: &[(&str, &str)] = &[
+    ("implementation", "impl"),
+    ("implementations", "impls"),
+    ("configuration", "config"),
+    ("configurations", "configs"),
+    ("authentication", "auth"),
+    ("authorization", "authz"),
+    ("application", "app"),
+    ("applications", "apps"),
+    ("environment", "env"),
+    ("environments", "envs"),
+    ("development", "dev"),
+    ("production", "prod"),
+    ("repository", "repo"),
+    ("repositories", "repos"),
+    ("dependency", "dep"),
+    ("dependencies", "deps"),
+    ("documentation", "docs"),
+    ("information", "info"),
+    ("directory", "dir"),
+    ("directories", "dirs"),
+    ("parameter", "param"),
+    ("parameters", "params"),
+    ("argument", "arg"),
+    ("arguments", "args"),
+    ("function", "fn"),
+    ("functions", "fns"),
+    ("reference", "ref"),
+    ("references", "refs"),
+    ("specification", "spec"),
+    ("specifications", "specs"),
+    ("temporary", "tmp"),
+    ("administrator", "admin"),
+    ("administrators", "admins"),
+    ("database", "db"),
+    ("databases", "dbs"),
+    ("message", "msg"),
+    ("messages", "msgs"),
+    ("response", "resp"),
+    ("request", "req"),
+    ("requests", "reqs"),
+    ("attribute", "attr"),
+    ("attributes", "attrs"),
+    ("expression", "expr"),
+    ("expressions", "exprs"),
+    ("operation", "op"),
+    ("operations", "ops"),
+    ("maximum", "max"),
+    ("minimum", "min"),
+    ("number", "num"),
+    ("string", "str"),
+    ("boolean", "bool"),
+    ("integer", "int"),
+    ("previous", "prev"),
+    ("current", "curr"),
+    ("original", "orig"),
+    ("source", "src"),
+    ("destination", "dest"),
+    ("package", "pkg"),
+    ("packages", "pkgs"),
+    ("library", "lib"),
+    ("libraries", "libs"),
+    ("executable", "exec"),
+    ("executables", "execs"),
+    ("command", "cmd"),
+    ("commands", "cmds"),
+    ("variable", "var"),
+    ("variables", "vars"),
+    ("certificate", "cert"),
+    ("certificates", "certs"),
+    ("synchronize", "sync"),
+    ("asynchronous", "async"),
+    ("initialize", "init"),
+    ("allocation", "alloc"),
+    ("allocations", "allocs"),
+    ("generation", "gen"),
+    ("miscellaneous", "misc"),
+    ("utility", "util"),
+    ("utilities", "utils"),
+    ("statistics", "stats"),
+    ("connection", "conn"),
+    ("connections", "conns"),
+    ("transaction", "txn"),
+    ("transactions", "txns"),
+    ("management", "mgmt"),
+    ("notification", "notif"),
+    ("notifications", "notifs"),
+    ("permission", "perm"),
+    ("permissions", "perms"),
+    ("distribution", "distro"),
+    ("distributions", "distros"),
+    ("architecture", "arch"),
+    ("infrastructure", "infra"),
+    ("kubernetes", "k8s"),
+    ("namespace", "ns"),
+    ("namespaces", "nses"),
+    ("container", "ctr"),
+    ("containers", "ctrs"),
+    ("microservice", "svc"),
+    ("microservices", "svcs"),
+];
+
+impl CompressionStage for WordAbbreviateStage {
+    fn name(&self) -> &str {
+        "word_abbreviate"
+    }
+
+    fn priority(&self) -> u32 {
+        25 // After strip_fields (20), before condense (30)
+    }
+
+    fn process(&self, content: &mut Content, config: &StageConfig) -> Result<()> {
+        if !config.enabled {
+            return Ok(());
+        }
+        // Only apply to plain text and CLI output
+        match &content.content_type {
+            ContentType::PlainText | ContentType::CliOutput { .. } => {}
+            _ => return Ok(()),
+        }
+
+        let mut result = content.raw.clone();
+        for &(long, short) in WORD_ABBREVIATIONS {
+            // Replace whole words only (case-insensitive for the check,
+            // but preserve surrounding context)
+            result = replace_whole_word(&result, long, short);
+        }
+
+        content.raw = result;
+        Ok(())
+    }
+}
+
+/// Apply word abbreviation to a plain text string.
+///
+/// This is a convenience function for callers that want to abbreviate
+/// outside the pipeline stage system (e.g. CLI proxy post-processing).
+pub fn abbreviate_words(text: &str) -> String {
+    let mut result = text.to_string();
+    for &(long, short) in WORD_ABBREVIATIONS {
+        result = replace_whole_word(&result, long, short);
+    }
+    result
+}
+
+/// Replace whole-word occurrences of `word` with `replacement`.
+/// A "whole word" is bounded by non-alphanumeric characters or string edges.
+fn replace_whole_word(text: &str, word: &str, replacement: &str) -> String {
+    if text.is_empty() || word.is_empty() {
+        return text.to_string();
+    }
+
+    let lower = text.to_lowercase();
+    let word_lower = word.to_lowercase();
+    let word_len = word.len();
+    let mut result = String::with_capacity(text.len());
+    let mut last_end = 0;
+
+    let text_bytes = text.as_bytes();
+
+    for (start, _) in lower.match_indices(&word_lower) {
+        let end = start + word_len;
+
+        // Check word boundary before
+        let before_ok = start == 0
+            || !text_bytes[start - 1].is_ascii_alphanumeric();
+        // Check word boundary after
+        let after_ok = end >= text.len()
+            || !text_bytes[end].is_ascii_alphanumeric();
+
+        if before_ok && after_ok {
+            result.push_str(&text[last_end..start]);
+            result.push_str(replacement);
+            last_end = end;
+        }
+    }
+
+    result.push_str(&text[last_end..]);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -924,5 +1211,213 @@ mod tests {
         let mut c = text_content(raw);
         CustomTransformsStage.process(&mut c, &disabled_config()).unwrap();
         assert_eq!(c.raw, raw);
+    }
+
+    // --- tabular encoding (in collapse_arrays) ---
+
+    #[test]
+    fn collapse_arrays_tabular_encoding_uniform_objects() {
+        // Array of objects with identical keys → should produce tabular output
+        let raw = r#"{"users":[
+            {"id":1,"name":"Alice","role":"admin"},
+            {"id":2,"name":"Bob","role":"user"},
+            {"id":3,"name":"Carol","role":"user"},
+            {"id":4,"name":"Dave","role":"admin"},
+            {"id":5,"name":"Eve","role":"user"},
+            {"id":6,"name":"Frank","role":"user"}
+        ]}"#;
+        let mut c = json_content(raw);
+        let cfg = enabled_config(json!({
+            "max_items": 3,
+            "summary_template": "... and {remaining} more items"
+        }));
+        CollapseArraysStage.process(&mut c, &cfg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&c.raw).unwrap();
+        let arr = v["users"].as_array().unwrap();
+        // Should be collapsed to a single tabular string element
+        assert_eq!(arr.len(), 1, "uniform array should be encoded as single table element");
+        let table_str = arr[0].as_str().unwrap();
+        assert!(table_str.contains("[table: 6 rows]"), "should contain row count: {}", table_str);
+        assert!(table_str.contains("Alice"), "should contain data: {}", table_str);
+        assert!(table_str.contains("Frank"), "should contain all rows: {}", table_str);
+    }
+
+    #[test]
+    fn collapse_arrays_mixed_objects_falls_back_to_truncation() {
+        // Array of objects with DIFFERENT keys → should fall back to truncation
+        let raw = r#"{"items":[
+            {"id":1,"name":"Alice"},
+            {"x":2,"y":3},
+            {"id":3,"name":"Carol"},
+            {"x":4,"y":5},
+            {"id":5,"name":"Eve"},
+            {"x":6,"y":7}
+        ]}"#;
+        let mut c = json_content(raw);
+        let cfg = enabled_config(json!({
+            "max_items": 3,
+            "summary_template": "... and {remaining} more items"
+        }));
+        CollapseArraysStage.process(&mut c, &cfg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&c.raw).unwrap();
+        let arr = v["items"].as_array().unwrap();
+        // Should fall back to truncation: 3 kept + 1 summary
+        assert_eq!(arr.len(), 4);
+        assert!(arr[3].as_str().unwrap().contains("3 more items"));
+    }
+
+    #[test]
+    fn collapse_arrays_small_uniform_array_unchanged() {
+        // Uniform array but under max_items → no collapse
+        let raw = r#"{"users":[{"id":1,"name":"Alice"},{"id":2,"name":"Bob"}]}"#;
+        let mut c = json_content(raw);
+        let cfg = enabled_config(json!({"max_items": 5}));
+        CollapseArraysStage.process(&mut c, &cfg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&c.raw).unwrap();
+        assert_eq!(v["users"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn detect_uniform_array_returns_keys_for_uniform() {
+        let arr = vec![
+            json!({"a": 1, "b": 2}),
+            json!({"a": 3, "b": 4}),
+        ];
+        let keys = detect_uniform_array(&arr);
+        assert!(keys.is_some());
+        let keys = keys.unwrap();
+        assert!(keys.contains(&"a".to_string()));
+        assert!(keys.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn detect_uniform_array_returns_none_for_mixed() {
+        let arr = vec![
+            json!({"a": 1, "b": 2}),
+            json!({"x": 3, "y": 4}),
+        ];
+        assert!(detect_uniform_array(&arr).is_none());
+    }
+
+    #[test]
+    fn detect_uniform_array_returns_none_for_non_objects() {
+        let arr = vec![json!(1), json!(2), json!(3)];
+        assert!(detect_uniform_array(&arr).is_none());
+    }
+
+    #[test]
+    fn detect_uniform_array_returns_none_for_single_element() {
+        let arr = vec![json!({"a": 1})];
+        assert!(detect_uniform_array(&arr).is_none());
+    }
+
+    #[test]
+    fn value_to_compact_string_truncates_long_strings() {
+        let long = "a".repeat(100);
+        let v = serde_json::Value::String(long);
+        let s = value_to_compact_string(&v);
+        assert!(s.len() <= 53); // 47 chars + "..."
+        assert!(s.ends_with("..."));
+    }
+
+    #[test]
+    fn value_to_compact_string_short_string_unchanged() {
+        let v = serde_json::Value::String("hello".to_string());
+        assert_eq!(value_to_compact_string(&v), "hello");
+    }
+
+    #[test]
+    fn value_to_compact_string_nested_types() {
+        assert_eq!(value_to_compact_string(&json!(null)), "null");
+        assert_eq!(value_to_compact_string(&json!(true)), "true");
+        assert_eq!(value_to_compact_string(&json!(42)), "42");
+        assert_eq!(value_to_compact_string(&json!([1, 2, 3])), "[3 items]");
+        assert_eq!(value_to_compact_string(&json!({"a": 1})), "{1 keys}");
+    }
+
+    // --- word_abbreviate ---
+
+    #[test]
+    fn word_abbreviate_replaces_known_words() {
+        let raw = "The implementation of the configuration is complete.";
+        let mut c = text_content(raw);
+        let cfg = enabled_config(json!({}));
+        WordAbbreviateStage.process(&mut c, &cfg).unwrap();
+        assert!(c.raw.contains("impl"), "should abbreviate 'implementation': {}", c.raw);
+        assert!(c.raw.contains("config"), "should abbreviate 'configuration': {}", c.raw);
+        assert!(!c.raw.contains("implementation"), "original word should be gone: {}", c.raw);
+    }
+
+    #[test]
+    fn word_abbreviate_preserves_partial_matches() {
+        // "implement" should NOT be abbreviated — only "implementation" is in the table
+        let raw = "We need to implement this feature.";
+        let mut c = text_content(raw);
+        let cfg = enabled_config(json!({}));
+        WordAbbreviateStage.process(&mut c, &cfg).unwrap();
+        assert!(c.raw.contains("implement"), "partial match should be preserved: {}", c.raw);
+    }
+
+    #[test]
+    fn word_abbreviate_disabled_passthrough() {
+        let raw = "The implementation is complete.";
+        let mut c = text_content(raw);
+        WordAbbreviateStage.process(&mut c, &disabled_config()).unwrap();
+        assert_eq!(c.raw, raw);
+    }
+
+    #[test]
+    fn word_abbreviate_skips_json() {
+        let raw = r#"{"implementation":"value"}"#;
+        let mut c = json_content(raw);
+        let cfg = enabled_config(json!({}));
+        WordAbbreviateStage.process(&mut c, &cfg).unwrap();
+        assert_eq!(c.raw, raw, "JSON content should pass through unchanged");
+    }
+
+    #[test]
+    fn word_abbreviate_case_insensitive() {
+        let raw = "The Implementation and CONFIGURATION are ready.";
+        let mut c = text_content(raw);
+        let cfg = enabled_config(json!({}));
+        WordAbbreviateStage.process(&mut c, &cfg).unwrap();
+        assert!(c.raw.contains("impl"), "should handle mixed case: {}", c.raw);
+        assert!(c.raw.contains("config"), "should handle uppercase: {}", c.raw);
+    }
+
+    #[test]
+    fn replace_whole_word_basic() {
+        assert_eq!(
+            replace_whole_word("the implementation is done", "implementation", "impl"),
+            "the impl is done"
+        );
+    }
+
+    #[test]
+    fn replace_whole_word_no_partial() {
+        // "implementations" contains "implementation" but shouldn't match
+        // because the 's' after makes it not a word boundary
+        let result = replace_whole_word("multiple implementations exist", "implementation", "impl");
+        // The word "implementations" has "implementation" followed by 's' which is alphanumeric,
+        // so it should NOT be replaced
+        assert_eq!(result, "multiple implementations exist");
+    }
+
+    #[test]
+    fn replace_whole_word_at_boundaries() {
+        assert_eq!(
+            replace_whole_word("implementation", "implementation", "impl"),
+            "impl"
+        );
+        assert_eq!(
+            replace_whole_word("(implementation)", "implementation", "impl"),
+            "(impl)"
+        );
+    }
+
+    #[test]
+    fn replace_whole_word_empty_inputs() {
+        assert_eq!(replace_whole_word("", "word", "w"), "");
+        assert_eq!(replace_whole_word("text", "", "w"), "text");
     }
 }

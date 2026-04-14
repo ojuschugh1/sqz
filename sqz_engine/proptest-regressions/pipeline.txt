@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc ea385bdf38f7661ac206f8093f555a332b8c4039c3ad9a82508e70777898a102 # shrinks to significant_lines = ["error: connection refused"], noise_line = "---", noise_repeat = 5
+cc bce029d2b84b70591283403f3067835cbf8fc4e25d396ccf00905e2b943617d5 # shrinks to significant_lines = ["warning: unused variable detected"], noise_line = "---", noise_repeat = 5

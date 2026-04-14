@@ -153,6 +153,31 @@ impl SqzEngine {
         Ok(result)
     }
 
+    /// Defensive compression: any input in, `CompressedContent` out, guaranteed.
+    ///
+    /// Unlike `compress()` which returns `Result`, this method never returns
+    /// an error. On any internal failure it returns the original input
+    /// unchanged with a 1.0 compression ratio. This makes it safe to call
+    /// from contexts where error handling is impractical (e.g. shell hooks,
+    /// browser extension bridges).
+    pub fn compress_or_passthrough(&self, input: &str) -> CompressedContent {
+        match self.compress(input) {
+            Ok(result) => result,
+            Err(_) => {
+                let tokens = (input.len() as u32 + 3) / 4;
+                CompressedContent {
+                    data: input.to_string(),
+                    tokens_compressed: tokens,
+                    tokens_original: tokens,
+                    stages_applied: vec![],
+                    compression_ratio: 1.0,
+                    provenance: crate::types::Provenance::default(),
+                    verify: None,
+                }
+            }
+        }
+    }
+
     /// Compress with explicit mode override, bypassing the confidence router.
     ///
     /// - `CompressionMode::Safe` → safe pipeline only (ANSI strip + condense)
@@ -421,6 +446,39 @@ mod tests {
     fn test_engine_new() {
         let engine = SqzEngine::new();
         assert!(engine.is_ok(), "SqzEngine::new() should succeed");
+    }
+
+    #[test]
+    fn test_compress_or_passthrough_returns_result_on_valid_input() {
+        let engine = SqzEngine::new().unwrap();
+        let result = engine.compress_or_passthrough("hello world");
+        assert_eq!(result.data, "hello world");
+        assert!(result.tokens_original > 0);
+    }
+
+    #[test]
+    fn test_compress_or_passthrough_never_panics_on_empty() {
+        let engine = SqzEngine::new().unwrap();
+        let result = engine.compress_or_passthrough("");
+        assert_eq!(result.data, "");
+        assert_eq!(result.compression_ratio, 1.0);
+    }
+
+    #[test]
+    fn test_compress_or_passthrough_handles_json() {
+        let engine = SqzEngine::new().unwrap();
+        let result = engine.compress_or_passthrough(r#"{"key":"value"}"#);
+        // Should compress successfully — data may be TOON-encoded
+        assert!(!result.data.is_empty());
+    }
+
+    #[test]
+    fn test_compress_or_passthrough_handles_binary_garbage() {
+        let engine = SqzEngine::new().unwrap();
+        // Feed it something weird — should never panic, always return something
+        let garbage = "\x00\x01\x02\x7f invalid control chars \t\n\r";
+        let result = engine.compress_or_passthrough(garbage);
+        assert!(!result.data.is_empty());
     }
 
     #[test]

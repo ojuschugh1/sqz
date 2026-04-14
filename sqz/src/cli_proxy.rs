@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use sqz_engine::{format_command, CompressedContent, DependencyMapper, NgramAbbreviator, SqzEngine};
+use sqz_engine::stages::abbreviate_words;
 
 // ── CLI compression patterns ──────────────────────────────────────────────
 
@@ -226,10 +227,10 @@ impl CliProxy {
     fn apply_context_refs(&self, text: &str) -> String {
         let known = match self.engine.session_store().known_files() {
             Ok(files) => files,
-            Err(_) => return text.to_string(),
+            Err(_) => return abbreviate_words(text),
         };
         if known.is_empty() {
-            return text.to_string();
+            return abbreviate_words(text);
         }
 
         let mut result = text.to_string();
@@ -248,7 +249,9 @@ impl CliProxy {
                 result = result.replace(&at_marker, &note);
             }
         }
-        result
+        // Word abbreviation as the final output step — after all content
+        // fidelity checks have passed, abbreviate common long words
+        abbreviate_words(&result)
     }
 
     /// Track a file path as "in context" — persists to SessionStore so it
