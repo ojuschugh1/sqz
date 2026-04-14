@@ -238,6 +238,100 @@ impl TokenPruner {
             tokens_original: total_original,
         })
     }
+
+    /// Zipf's Law vocabulary pruning.
+    ///
+    /// Zipf's law: f(r) ∝ 1/r — the frequency of a word is inversely
+    /// proportional to its rank. Words appearing at or above their expected
+    /// Zipf frequency are redundant and can be pruned. Words appearing
+    /// below their expected frequency carry more information and are preserved.
+    ///
+    /// Returns the pruned text and stats.
+    pub fn zipf_prune(&self, text: &str) -> Result<PruneResult> {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let total_original = words.len() as u32;
+
+        if words.len() < 10 {
+            return Ok(PruneResult {
+                text: text.to_string(),
+                tokens_removed: 0,
+                tokens_original: total_original,
+            });
+        }
+
+        // Count word frequencies
+        let mut freq_map: HashMap<String, usize> = HashMap::new();
+        for &w in &words {
+            *freq_map.entry(w.to_lowercase()).or_insert(0) += 1;
+        }
+
+        // Rank words by frequency (descending)
+        let mut ranked: Vec<(String, usize)> = freq_map.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Compute expected Zipf frequency for each rank
+        // f_expected(r) = C / r, where C = total_words / H_n (harmonic number)
+        let _n = ranked.len() as f64;
+        let harmonic: f64 = (1..=ranked.len()).map(|r| 1.0 / r as f64).sum();
+        let c = words.len() as f64 / harmonic;
+
+        // Mark words that are "Zipf-redundant": actual frequency >= 1.5× expected
+        let mut redundant_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (rank_idx, (word, actual_freq)) in ranked.iter().enumerate() {
+            let rank = rank_idx + 1;
+            let expected = c / rank as f64;
+            // Word is redundant if it appears much more than Zipf predicts
+            // AND it's a common filler word (short, non-technical)
+            if *actual_freq as f64 > expected * 1.5
+                && word.len() <= 4
+                && !is_technical_word(word)
+            {
+                redundant_words.insert(word.clone());
+            }
+        }
+
+        if redundant_words.is_empty() {
+            return Ok(PruneResult {
+                text: text.to_string(),
+                tokens_removed: 0,
+                tokens_original: total_original,
+            });
+        }
+
+        // Remove redundant words, keeping at least one occurrence of each
+        let mut seen_counts: HashMap<String, usize> = HashMap::new();
+        let mut kept = Vec::new();
+        let mut removed = 0u32;
+
+        for &w in &words {
+            let lower = w.to_lowercase();
+            if redundant_words.contains(&lower) {
+                let count = seen_counts.entry(lower.clone()).or_insert(0);
+                *count += 1;
+                // Keep the first occurrence, prune subsequent ones
+                if *count <= 1 {
+                    kept.push(w);
+                } else {
+                    removed += 1;
+                }
+            } else {
+                kept.push(w);
+            }
+        }
+
+        let result = kept.join(" ");
+        let result = if text.ends_with('\n') && !result.ends_with('\n') {
+            format!("{result}\n")
+        } else {
+            result
+        };
+
+        Ok(PruneResult {
+            text: result,
+            tokens_removed: removed,
+            tokens_original: total_original,
+        })
+    }
 }
 
 impl Default for TokenPruner {
@@ -316,6 +410,21 @@ fn is_code_line(line: &str) -> bool {
         || trimmed.contains("=>")
         || trimmed.contains("::")
         || trimmed.contains("()")
+}
+
+/// Check if a short word is technical/meaningful (should not be pruned).
+fn is_technical_word(word: &str) -> bool {
+    matches!(
+        word,
+        "null" | "none" | "true" | "false" | "void" | "self" | "this"
+        | "type" | "enum" | "impl" | "func" | "main" | "test" | "init"
+        | "open" | "read" | "send" | "recv" | "lock" | "drop" | "move"
+        | "copy" | "sync" | "push" | "pull" | "port" | "host" | "path"
+        | "file" | "line" | "code" | "data" | "node" | "root" | "hash"
+        | "size" | "name" | "list" | "loop" | "exit" | "fail" | "pass"
+        | "skip" | "todo" | "warn" | "info" | "http" | "json" | "yaml"
+        | "toml" | "html" | "rust" | "java" | "bash"
+    )
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -464,6 +573,61 @@ mod tests {
                 "removed ({}) + remaining ({}) should be <= original ({})",
                 result.tokens_removed, remaining, result.tokens_original
             );
+        }
+    }
+
+    // ── Zipf's Law pruning tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_zipf_prune_short_text_unchanged() {
+        let pruner = TokenPruner::new();
+        let result = pruner.zipf_prune("hello world").unwrap();
+        assert_eq!(result.text, "hello world");
+        assert_eq!(result.tokens_removed, 0);
+    }
+
+    #[test]
+    fn test_zipf_prune_removes_overrepresented_fillers() {
+        let pruner = TokenPruner::new();
+        // "the" appears way more than Zipf predicts for a text this size
+        let text = "the cat the dog the bird the fish the tree the rock the sky the sun the moon the star";
+        let result = pruner.zipf_prune(text).unwrap();
+        // Should remove some "the" occurrences but keep at least one
+        assert!(result.text.contains("the"), "should keep at least one 'the'");
+        assert!(
+            result.tokens_removed > 0,
+            "should prune overrepresented filler words"
+        );
+    }
+
+    #[test]
+    fn test_zipf_prune_preserves_technical_words() {
+        let pruner = TokenPruner::new();
+        let text = "null null null null null null null null null null check for null values";
+        let result = pruner.zipf_prune(text).unwrap();
+        // "null" is a technical word — should NOT be pruned
+        assert_eq!(result.tokens_removed, 0, "technical words should be preserved");
+    }
+
+    #[test]
+    fn test_is_technical_word() {
+        assert!(is_technical_word("null"));
+        assert!(is_technical_word("type"));
+        assert!(is_technical_word("json"));
+        assert!(!is_technical_word("the"));
+        assert!(!is_technical_word("and"));
+        assert!(!is_technical_word("xyz"));
+    }
+
+    proptest! {
+        /// Zipf pruning never produces empty output from non-empty input.
+        #[test]
+        fn prop_zipf_prune_non_empty(
+            text in "[a-z]{2,5}( [a-z]{2,5}){10,30}"
+        ) {
+            let pruner = TokenPruner::new();
+            let result = pruner.zipf_prune(&text).unwrap();
+            prop_assert!(!result.text.is_empty());
         }
     }
 }

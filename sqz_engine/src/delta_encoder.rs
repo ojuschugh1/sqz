@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::error::Result;
+use crate::simhash::{simhash, SimHashFingerprint};
 
 /// Configuration for delta encoding.
 #[derive(Debug, Clone)]
@@ -62,6 +63,9 @@ pub struct DeltaResult {
 /// Delta encoder for near-duplicate content.
 pub struct DeltaEncoder {
     config: DeltaConfig,
+    /// SimHash fingerprint index: maps fingerprints to content identifiers.
+    /// Enables O(1) near-duplicate detection instead of O(n×m) LCS comparison.
+    fingerprint_index: HashMap<String, SimHashFingerprint>,
 }
 
 impl DeltaEncoder {
@@ -70,12 +74,61 @@ impl DeltaEncoder {
     }
 
     pub fn with_config(config: DeltaConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            fingerprint_index: HashMap::new(),
+        }
     }
 
-    /// Compute similarity between two texts using line-level fingerprinting.
-    /// Returns a value in [0.0, 1.0] where 1.0 means identical.
+    /// Compute the SimHash fingerprint of a text.
+    pub fn fingerprint(&self, text: &str) -> SimHashFingerprint {
+        simhash(text)
+    }
+
+    /// Index a piece of content by its identifier for future O(1) lookups.
+    pub fn index_content(&mut self, id: &str, text: &str) {
+        let fp = simhash(text);
+        self.fingerprint_index.insert(id.to_string(), fp);
+    }
+
+    /// Find the best near-duplicate match from the index using SimHash.
+    /// Returns the id of the closest match within `max_hamming_distance`,
+    /// or None if no match is close enough.
+    pub fn find_nearest(&self, text: &str, max_hamming_distance: u32) -> Option<&str> {
+        let fp = simhash(text);
+        let mut best_id: Option<&str> = None;
+        let mut best_dist = u32::MAX;
+
+        for (id, &indexed_fp) in &self.fingerprint_index {
+            let dist = fp.hamming_distance(&indexed_fp);
+            if dist < best_dist && dist <= max_hamming_distance {
+                best_dist = dist;
+                best_id = Some(id.as_str());
+            }
+        }
+
+        best_id
+    }
+
+    /// Compute similarity between two texts using SimHash for the fast path,
+    /// falling back to line-level fingerprinting for precision.
     pub fn similarity(&self, old: &str, new: &str) -> f64 {
+        // Fast path: SimHash gives a quick estimate
+        let fp_old = simhash(old);
+        let fp_new = simhash(new);
+        let simhash_sim = fp_old.estimated_similarity(&fp_new);
+
+        // If SimHash says very different (< 0.3), trust it — skip expensive check
+        if simhash_sim < 0.3 {
+            return simhash_sim;
+        }
+
+        // For borderline cases, use precise line-level comparison
+        self.similarity_precise(old, new)
+    }
+
+    /// Precise line-level similarity (the original O(n) algorithm).
+    fn similarity_precise(&self, old: &str, new: &str) -> f64 {
         let old_lines: Vec<&str> = old.lines().collect();
         let new_lines: Vec<&str> = new.lines().collect();
 

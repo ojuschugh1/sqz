@@ -95,12 +95,42 @@ impl CompressionPipeline {
             }
         }
 
-        // Post-stage processing: apply the 3 new techniques
+        // Post-stage processing: apply advanced compression techniques
 
         let is_json = ToonEncoder::is_json(&content.raw);
 
-        // Technique 6: Entropy-weighted truncation for long non-JSON content
-        // Only apply to content > 500 chars to avoid overhead on short content
+        // RLE: collapse repeated patterns in non-JSON content (generalizes condense)
+        // Only apply when content is long enough to benefit
+        if !is_json && content.raw.len() > 200 {
+            if let Ok(rle_result) = crate::rle_compressor::rle_compress(&content.raw, 3) {
+                if rle_result.runs_collapsed > 0 {
+                    // Safety check: verify critical markers are preserved
+                    let has_error = content.raw.contains("ERROR") || content.raw.contains("error:");
+                    let rle_has_error = rle_result.text.contains("ERROR") || rle_result.text.contains("error:");
+                    if !has_error || rle_has_error {
+                        content.raw = rle_result.text;
+                        stages_applied.push("rle".to_owned());
+                    }
+                }
+            }
+        }
+
+        // Sliding window dedup: catch repeated substrings across non-adjacent lines
+        if !is_json && content.raw.len() > 300 {
+            if let Ok(sw_result) = crate::rle_compressor::sliding_window_dedup(&content.raw, 4) {
+                if sw_result.dedup_count > 0 {
+                    // Safety check: verify critical markers are preserved
+                    let has_error = content.raw.contains("ERROR") || content.raw.contains("error:");
+                    let sw_has_error = sw_result.text.contains("ERROR") || sw_result.text.contains("error:");
+                    if !has_error || sw_has_error {
+                        content.raw = sw_result.text;
+                        stages_applied.push("sliding_window_dedup".to_owned());
+                    }
+                }
+            }
+        }
+
+        // Entropy-weighted truncation for long non-JSON content
         if !is_json && content.raw.len() > 500 {
             if let Ok(trunc_result) = self.entropy_truncator.truncate_string(&content.raw) {
                 if trunc_result.segments_dropped > 0 {
@@ -110,8 +140,7 @@ impl CompressionPipeline {
             }
         }
 
-        // Technique 1: Token pruning for prose content (non-JSON, non-code)
-        // Only apply to content > 100 chars that looks like prose
+        // Token pruning for prose content (non-JSON, non-code)
         if !is_json && content.raw.len() > 100 && looks_like_prose(&content.raw) {
             if let Ok(prune_result) = self.token_pruner.prune(&content.raw) {
                 if prune_result.tokens_removed > 0 {
@@ -123,7 +152,7 @@ impl CompressionPipeline {
 
         // Apply dictionary compression + TOON encoding for JSON
         let data = if ToonEncoder::is_json(&content.raw) {
-            // Technique 4: Dictionary compression — observe and try to compress.
+            // Dictionary compression — observe and try to compress.
             // Only use dict compression if it actually saves bytes (header overhead
             // can make small payloads larger).
             self.dict_compressor.borrow_mut().observe(&content.raw);
