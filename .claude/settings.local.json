@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "matcher": "Bash",
+      "event": "PreToolUse",
+      "type": "command",
+      "command": "sqz hook claude"
+    }
+  ]
+}

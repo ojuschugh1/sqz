@@ -60,19 +60,25 @@ pub fn process_hook(input: &str) -> Result<String> {
     let parsed: serde_json::Value = serde_json::from_str(input)
         .map_err(|e| crate::error::SqzError::Other(format!("hook: invalid JSON input: {e}")))?;
 
+    // Claude Code uses "toolName" + "toolCall", Gemini uses "tool_name" + "tool_input",
+    // Cursor uses "toolName" or "tool_name" depending on version.
     let tool_name = parsed
-        .get("tool_name")
+        .get("toolName")
+        .or_else(|| parsed.get("tool_name"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
     // Only intercept Bash/shell tool calls
-    if !matches!(tool_name, "Bash" | "bash" | "shell" | "terminal" | "run_terminal_command") {
+    if !matches!(tool_name, "Bash" | "bash" | "shell" | "terminal"
+        | "run_terminal_command" | "run_shell_command") {
         // Pass through non-bash tools unchanged
         return Ok(input.to_string());
     }
 
+    // Claude Code puts command in toolCall.command, Gemini in tool_input.command
     let command = parsed
-        .get("tool_input")
+        .get("toolCall")
+        .or_else(|| parsed.get("tool_input"))
         .and_then(|v| v.get("command"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
@@ -98,13 +104,22 @@ pub fn process_hook(input: &str) -> Result<String> {
         command
     );
 
-    // Build the modified payload
-    let mut output = parsed.clone();
-    if let Some(tool_input) = output.get_mut("tool_input") {
-        if let Some(cmd) = tool_input.get_mut("command") {
-            *cmd = serde_json::Value::String(rewritten);
+    // Build the output in the format the tool expects.
+    // Claude Code expects: { "decision": "approve", "updatedInput": { "command": "..." } }
+    // Gemini expects: { "hookSpecificOutput": { "tool_input": { "command": "..." } } }
+    // For maximum compatibility, output both formats.
+    let output = serde_json::json!({
+        "decision": "approve",
+        "reason": "sqz: command output will be compressed for token savings",
+        "updatedInput": {
+            "command": rewritten
+        },
+        "hookSpecificOutput": {
+            "tool_input": {
+                "command": rewritten
+            }
         }
-    }
+    });
 
     serde_json::to_string(&output)
         .map_err(|e| crate::error::SqzError::Other(format!("hook: JSON serialize error: {e}")))
@@ -113,25 +128,20 @@ pub fn process_hook(input: &str) -> Result<String> {
 /// Generate hook configuration files for all supported AI tools.
 pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
     vec![
-        // Claude Code
+        // Claude Code — goes in .claude/settings.local.json (flat array format)
         ToolHookConfig {
             tool_name: "Claude Code".to_string(),
-            config_path: PathBuf::from(".claude/hooks/sqz.json"),
+            config_path: PathBuf::from(".claude/settings.local.json"),
             config_content: format!(
                 r#"{{
-  "hooks": {{
-    "PreToolUse": [
-      {{
-        "matcher": "Bash",
-        "hooks": [
-          {{
-            "type": "command",
-            "command": "{sqz_path} hook claude"
-          }}
-        ]
-      }}
-    ]
-  }}
+  "hooks": [
+    {{
+      "matcher": "Bash",
+      "event": "PreToolUse",
+      "type": "command",
+      "command": "{sqz_path} hook claude"
+    }}
+  ]
 }}"#
             ),
             scope: HookScope::Project,
@@ -196,6 +206,29 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
           {{
             "type": "command",
             "command": "{sqz_path} hook cline"
+          }}
+        ]
+      }}
+    ]
+  }}
+}}"#
+            ),
+            scope: HookScope::Project,
+        },
+        // Gemini CLI — goes in .gemini/settings.json (BeforeTool event)
+        ToolHookConfig {
+            tool_name: "Gemini CLI".to_string(),
+            config_path: PathBuf::from(".gemini/settings.json"),
+            config_content: format!(
+                r#"{{
+  "hooks": {{
+    "BeforeTool": [
+      {{
+        "matcher": "run_shell_command",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "{sqz_path} hook gemini"
           }}
         ]
       }}
@@ -283,10 +316,11 @@ mod tests {
 
     #[test]
     fn test_process_hook_rewrites_bash_command() {
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":"git status"}}"#;
+        let input = r#"{"toolName":"Bash","toolCall":{"command":"git status"}}"#;
         let result = process_hook(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        let cmd = parsed["tool_input"]["command"].as_str().unwrap();
+        assert_eq!(parsed["decision"].as_str().unwrap(), "approve");
+        let cmd = parsed["updatedInput"]["command"].as_str().unwrap();
         assert!(cmd.contains("sqz compress"), "should pipe through sqz: {cmd}");
         assert!(cmd.contains("git status"), "should preserve original command: {cmd}");
         assert!(cmd.contains("SQZ_CMD=git"), "should set SQZ_CMD: {cmd}");
@@ -294,37 +328,48 @@ mod tests {
 
     #[test]
     fn test_process_hook_passes_through_non_bash() {
-        let input = r#"{"tool_name":"Read","tool_input":{"path":"file.txt"}}"#;
+        let input = r#"{"toolName":"Read","toolCall":{"path":"file.txt"}}"#;
         let result = process_hook(input).unwrap();
         assert_eq!(result, input, "non-bash tools should pass through unchanged");
     }
 
     #[test]
     fn test_process_hook_skips_sqz_commands() {
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":"sqz stats"}}"#;
+        let input = r#"{"toolName":"Bash","toolCall":{"command":"sqz stats"}}"#;
         let result = process_hook(input).unwrap();
         assert_eq!(result, input, "sqz commands should not be double-wrapped");
     }
 
     #[test]
     fn test_process_hook_skips_interactive() {
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":"vim file.txt"}}"#;
+        let input = r#"{"toolName":"Bash","toolCall":{"command":"vim file.txt"}}"#;
         let result = process_hook(input).unwrap();
         assert_eq!(result, input, "interactive commands should pass through");
     }
 
     #[test]
     fn test_process_hook_skips_watch_mode() {
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":"npm run dev --watch"}}"#;
+        let input = r#"{"toolName":"Bash","toolCall":{"command":"npm run dev --watch"}}"#;
         let result = process_hook(input).unwrap();
         assert_eq!(result, input, "watch mode should pass through");
     }
 
     #[test]
     fn test_process_hook_empty_command() {
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":""}}"#;
+        let input = r#"{"toolName":"Bash","toolCall":{"command":""}}"#;
         let result = process_hook(input).unwrap();
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_process_hook_gemini_format() {
+        // Gemini CLI uses tool_name + tool_input
+        let input = r#"{"tool_name":"run_shell_command","tool_input":{"command":"git log"}}"#;
+        let result = process_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["decision"].as_str().unwrap(), "approve");
+        let cmd = parsed["hookSpecificOutput"]["tool_input"]["command"].as_str().unwrap();
+        assert!(cmd.contains("sqz compress"), "should pipe through sqz: {cmd}");
     }
 
     #[test]
@@ -389,7 +434,7 @@ mod tests {
         // First install
         install_tool_hooks(dir.path(), "sqz");
         // Write a custom file to one of the paths
-        let custom_path = dir.path().join(".claude/hooks/sqz.json");
+        let custom_path = dir.path().join(".claude/settings.local.json");
         std::fs::write(&custom_path, "custom content").unwrap();
         // Second install should not overwrite
         install_tool_hooks(dir.path(), "sqz");
