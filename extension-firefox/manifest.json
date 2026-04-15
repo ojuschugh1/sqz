@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "sqz \u2014 Context Compression",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Compresses LLM context in ChatGPT, Claude.ai, Gemini, Grok, and Perplexity. All processing is local \u2014 zero external network requests.",
   "permissions": [
     "storage"
