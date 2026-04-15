@@ -135,6 +135,10 @@ impl CliProxy {
         // even if the content is a dedup hit (the file is still "known").
         self.track_file(cmd, output);
 
+        // Advance the turn counter for compaction-aware dedup.
+        // Each intercept_output call represents one LLM interaction turn.
+        self.engine.cache_manager().advance_turn();
+
         // Step 1: L1 in-memory dedup check (fast path)
         let fast_hash = content_hash(output);
         if self.l1_cache.borrow().contains(&fast_hash) {

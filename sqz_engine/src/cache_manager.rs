@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -31,12 +32,33 @@ pub enum CacheResult {
     Fresh { output: CompressedContent },
 }
 
+/// Tracks when a dedup ref was last sent, so we can detect staleness.
+#[derive(Debug, Clone)]
+struct RefEntry {
+    /// The turn number when this ref was last sent to the LLM.
+    last_sent_turn: u64,
+}
+
 /// SHA-256 content-hash deduplication cache backed by [`SessionStore`],
-/// with delta encoding for near-duplicate content.
+/// with delta encoding for near-duplicate content and compaction awareness.
+///
+/// The turn-counter heuristic: each call to `get_or_compress` increments a
+/// monotonic turn counter. When a dedup ref was last sent more than
+/// `max_ref_age_turns` turns ago, the ref is considered stale (the original
+/// content may have been compacted out of the LLM's context window) and the
+/// full compressed content is re-sent instead.
 pub struct CacheManager {
     store: SessionStore,
     max_size_bytes: u64,
     delta_encoder: DeltaEncoder,
+    /// Monotonic turn counter — incremented on each get_or_compress call.
+    turn_counter: std::cell::Cell<u64>,
+    /// Maps content hash → turn when the dedup ref was last sent.
+    ref_tracker: std::cell::RefCell<HashMap<String, RefEntry>>,
+    /// Maximum age (in turns) before a dedup ref is considered stale.
+    /// After this many turns, the original content may have been compacted
+    /// out of the LLM's context window, so we re-send the full content.
+    max_ref_age_turns: u64,
 }
 
 impl CacheManager {
@@ -45,6 +67,21 @@ impl CacheManager {
             store,
             max_size_bytes,
             delta_encoder: DeltaEncoder::new(),
+            turn_counter: std::cell::Cell::new(0),
+            ref_tracker: std::cell::RefCell::new(HashMap::new()),
+            max_ref_age_turns: 20,
+        }
+    }
+
+    /// Create a CacheManager with a custom ref staleness threshold.
+    pub fn with_ref_age(store: SessionStore, max_size_bytes: u64, max_ref_age_turns: u64) -> Self {
+        Self {
+            store,
+            max_size_bytes,
+            delta_encoder: DeltaEncoder::new(),
+            turn_counter: std::cell::Cell::new(0),
+            ref_tracker: std::cell::RefCell::new(HashMap::new()),
+            max_ref_age_turns,
         }
     }
 
@@ -55,12 +92,59 @@ impl CacheManager {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Look up `content` in the cache.
+    /// Advance the turn counter. Call this once per LLM interaction turn.
+    pub fn advance_turn(&self) {
+        self.turn_counter.set(self.turn_counter.get() + 1);
+    }
+
+    /// Get the current turn number.
+    pub fn current_turn(&self) -> u64 {
+        self.turn_counter.get()
+    }
+
+    /// Notify the cache that a context compaction has occurred.
     ///
-    /// - On exact dedup: return `CacheResult::Dedup` with a compact reference token.
+    /// This marks ALL existing dedup refs as stale, forcing the next read
+    /// of any cached content to re-send the full compressed version instead
+    /// of a dangling `§ref:...§` token.
+    ///
+    /// Call this when:
+    /// - The harness signals a compaction event (PreCompact hook)
+    /// - A session is resumed after being idle
+    /// - The turn counter exceeds a threshold
+    pub fn notify_compaction(&self) {
+        self.ref_tracker.borrow_mut().clear();
+    }
+
+    /// Check if a dedup ref for the given hash is still fresh (likely still
+    /// in the LLM's context window).
+    fn is_ref_fresh(&self, hash: &str) -> bool {
+        let tracker = self.ref_tracker.borrow();
+        if let Some(entry) = tracker.get(hash) {
+            let age = self.turn_counter.get().saturating_sub(entry.last_sent_turn);
+            age < self.max_ref_age_turns
+        } else {
+            false
+        }
+    }
+
+    /// Record that a dedup ref was sent for the given hash at the current turn.
+    fn record_ref_sent(&self, hash: &str) {
+        self.ref_tracker.borrow_mut().insert(
+            hash.to_string(),
+            RefEntry {
+                last_sent_turn: self.turn_counter.get(),
+            },
+        );
+    }
+
+    /// Look up `content` in the cache with compaction awareness.
+    ///
+    /// - On exact dedup with fresh ref: return `CacheResult::Dedup` (~13 tokens).
+    /// - On exact dedup with stale ref: re-compress and return `CacheResult::Fresh`
+    ///   (the original content may have been compacted out of the LLM's context).
     /// - On near-duplicate: return `CacheResult::Delta` with a compact diff.
-    /// - On fresh: compress via `pipeline`, persist to store, return
-    ///   `CacheResult::Fresh`.
+    /// - On cache miss: compress via `pipeline`, persist, return `CacheResult::Fresh`.
     pub fn get_or_compress(
         &self,
         _path: &Path,
@@ -69,14 +153,31 @@ impl CacheManager {
     ) -> Result<CacheResult> {
         let hash = Self::sha256_hex(content);
 
-        // Exact match — return dedup reference
+        // Exact match — check if the ref is still fresh
         if self.store.get_cache_entry(&hash)?.is_some() {
-            let hash_prefix = &hash[..16];
-            let inline_ref = format!("§ref:{hash_prefix}§");
-            return Ok(CacheResult::Dedup {
-                inline_ref,
-                token_cost: 13,
-            });
+            if self.is_ref_fresh(&hash) {
+                // Ref is fresh — the LLM likely still has the original in context
+                let hash_prefix = &hash[..16];
+                let inline_ref = format!("§ref:{hash_prefix}§");
+                // Update the sent timestamp
+                self.record_ref_sent(&hash);
+                return Ok(CacheResult::Dedup {
+                    inline_ref,
+                    token_cost: 13,
+                });
+            } else {
+                // Ref is stale — re-send the full compressed content.
+                // The original may have been compacted out of the LLM's context.
+                let text = String::from_utf8_lossy(content).into_owned();
+                let ctx = SessionContext {
+                    session_id: "cache".to_string(),
+                };
+                let preset = Preset::default();
+                let compressed = pipeline.compress(&text, &ctx, &preset)?;
+                // Record that we re-sent this content
+                self.record_ref_sent(&hash);
+                return Ok(CacheResult::Fresh { output: compressed });
+            }
         }
 
         // Near-duplicate check: compare against recent cache entries
@@ -89,6 +190,7 @@ impl CacheManager {
             let preset = Preset::default();
             let compressed = pipeline.compress(&text, &ctx, &preset)?;
             self.store.save_cache_entry(&hash, &compressed)?;
+            self.record_ref_sent(&hash);
 
             let token_cost = (delta_result.delta_text.len() / 4) as u32;
             return Ok(CacheResult::Delta {
@@ -104,6 +206,8 @@ impl CacheManager {
         let preset = Preset::default();
         let compressed = pipeline.compress(&text, &ctx, &preset)?;
         self.store.save_cache_entry(&hash, &compressed)?;
+        // Record that this content was sent at the current turn
+        self.record_ref_sent(&hash);
 
         Ok(CacheResult::Fresh { output: compressed })
     }
@@ -138,12 +242,19 @@ impl CacheManager {
 
     /// Check if `content` is already in the persistent cache (dedup lookup only).
     ///
-    /// Returns `Some(inline_ref)` if cached, `None` if fresh.
+    /// Returns `Some(inline_ref)` if cached AND the ref is still fresh,
+    /// `None` if the content is not cached or the ref is stale.
     pub fn check_dedup(&self, content: &[u8]) -> Result<Option<String>> {
         let hash = Self::sha256_hex(content);
         if self.store.get_cache_entry(&hash)?.is_some() {
-            let hash_prefix = &hash[..16];
-            Ok(Some(format!("§ref:{hash_prefix}§")))
+            if self.is_ref_fresh(&hash) {
+                let hash_prefix = &hash[..16];
+                self.record_ref_sent(&hash);
+                Ok(Some(format!("§ref:{hash_prefix}§")))
+            } else {
+                // Cache hit but ref is stale — don't return a dangling ref
+                Ok(None)
+            }
         } else {
             Ok(None)
         }
@@ -151,6 +262,8 @@ impl CacheManager {
 
     /// Store a compressed result in the persistent cache, keyed by the
     /// SHA-256 hash of the original content.
+    ///
+    /// Also records the ref as sent at the current turn for compaction tracking.
     pub fn store_compressed(
         &self,
         original_content: &[u8],
@@ -158,6 +271,7 @@ impl CacheManager {
     ) -> Result<()> {
         let hash = Self::sha256_hex(original_content);
         self.store.save_cache_entry(&hash, compressed)?;
+        self.record_ref_sent(&hash);
         Ok(())
     }
 
@@ -401,6 +515,131 @@ mod tests {
             .unwrap();
     }
 
+    // ── Compaction awareness tests ────────────────────────────────────────
+
+    #[test]
+    fn stale_ref_returns_fresh_instead_of_dedup() {
+        let (store, _dir) = in_memory_store();
+        // Set max_ref_age to 3 turns so refs go stale quickly
+        let cm = CacheManager::with_ref_age(store, u64::MAX, 3);
+        let pipeline = make_pipeline();
+        let content = b"hello world";
+        let path = Path::new("file.txt");
+
+        // First read — miss, records ref at turn 0
+        cm.get_or_compress(path, content, &pipeline).unwrap();
+
+        // Second read at turn 0 — ref is fresh (age 0 < 3)
+        let result = cm.get_or_compress(path, content, &pipeline).unwrap();
+        assert!(matches!(result, CacheResult::Dedup { .. }), "ref should be fresh at turn 0");
+
+        // Advance past the staleness threshold
+        for _ in 0..4 {
+            cm.advance_turn();
+        }
+
+        // Third read at turn 4 — ref is stale (age 4 >= 3), should re-send full content
+        let result = cm.get_or_compress(path, content, &pipeline).unwrap();
+        assert!(matches!(result, CacheResult::Fresh { .. }),
+            "stale ref should return Fresh, not Dedup");
+    }
+
+    #[test]
+    fn notify_compaction_invalidates_all_refs() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        let path = Path::new("file.txt");
+
+        // Populate cache
+        cm.get_or_compress(path, b"content A", &pipeline).unwrap();
+        cm.get_or_compress(path, b"content B", &pipeline).unwrap();
+
+        // Both should be dedup hits
+        assert!(matches!(
+            cm.get_or_compress(path, b"content A", &pipeline).unwrap(),
+            CacheResult::Dedup { .. }
+        ));
+        assert!(matches!(
+            cm.get_or_compress(path, b"content B", &pipeline).unwrap(),
+            CacheResult::Dedup { .. }
+        ));
+
+        // Simulate compaction
+        cm.notify_compaction();
+
+        // After compaction, refs are stale — should return Fresh
+        assert!(matches!(
+            cm.get_or_compress(path, b"content A", &pipeline).unwrap(),
+            CacheResult::Fresh { .. }
+        ));
+        assert!(matches!(
+            cm.get_or_compress(path, b"content B", &pipeline).unwrap(),
+            CacheResult::Fresh { .. }
+        ));
+    }
+
+    #[test]
+    fn ref_refreshed_after_resend() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::with_ref_age(store, u64::MAX, 3);
+        let pipeline = make_pipeline();
+        let content = b"hello world";
+        let path = Path::new("file.txt");
+
+        // First read — miss
+        cm.get_or_compress(path, content, &pipeline).unwrap();
+
+        // Advance past staleness
+        for _ in 0..4 {
+            cm.advance_turn();
+        }
+
+        // Read at turn 4 — stale, returns Fresh (re-sends content)
+        let result = cm.get_or_compress(path, content, &pipeline).unwrap();
+        assert!(matches!(result, CacheResult::Fresh { .. }));
+
+        // Immediately read again — ref was refreshed by the re-send, should be Dedup
+        let result = cm.get_or_compress(path, content, &pipeline).unwrap();
+        assert!(matches!(result, CacheResult::Dedup { .. }),
+            "ref should be fresh after re-send");
+    }
+
+    #[test]
+    fn check_dedup_returns_none_for_stale_ref() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::with_ref_age(store, u64::MAX, 2);
+        let pipeline = make_pipeline();
+        let content = b"test content";
+        let path = Path::new("file.txt");
+
+        // Populate cache
+        cm.get_or_compress(path, content, &pipeline).unwrap();
+
+        // check_dedup should return Some (ref is fresh)
+        assert!(cm.check_dedup(content).unwrap().is_some());
+
+        // Advance past staleness
+        for _ in 0..3 {
+            cm.advance_turn();
+        }
+
+        // check_dedup should return None (ref is stale)
+        assert!(cm.check_dedup(content).unwrap().is_none(),
+            "stale ref should not be returned by check_dedup");
+    }
+
+    #[test]
+    fn advance_turn_increments_counter() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        assert_eq!(cm.current_turn(), 0);
+        cm.advance_turn();
+        assert_eq!(cm.current_turn(), 1);
+        cm.advance_turn();
+        assert_eq!(cm.current_turn(), 2);
+    }
+
     // ── Property-based tests ──────────────────────────────────────────────────
 
     use proptest::prelude::*;
@@ -570,7 +809,10 @@ mod tests {
         /// **Validates: Requirements 18.4**
         ///
         /// Cache entries written in one CacheManager instance SHALL survive a
-        /// store close/reopen and produce cache hits in a new instance.
+        /// store close/reopen. After a process restart, the ref tracker is
+        /// empty so the first read returns Fresh (re-sends content since we
+        /// can't know if the LLM still has it in context). The second read
+        /// in the same session returns Dedup.
         #[test]
         fn prop_cache_persistence_across_sessions(
             content in proptest::collection::vec(any::<u8>(), 1..=500usize),
@@ -593,7 +835,7 @@ mod tests {
                     "first read should be a miss"
                 );
             }
-            // Store is dropped here — connection closed.
+            // Store is dropped here — connection closed, ref tracker lost.
 
             // Session 2: reopen the same database file.
             {
@@ -601,19 +843,29 @@ mod tests {
                 let cm = CacheManager::new(store, u64::MAX);
                 let pipeline = make_pipeline();
 
-                // Same content should now be a hit.
-                let r = cm.get_or_compress(path, &content, &pipeline).unwrap();
-                match r {
+                // First read in new session: cache entry exists in SQLite but
+                // ref tracker is empty (process restarted). Returns Fresh to
+                // re-send content since we can't know if the LLM still has it.
+                let r1 = cm.get_or_compress(path, &content, &pipeline).unwrap();
+                prop_assert!(
+                    matches!(r1, CacheResult::Fresh { .. }),
+                    "first read after restart should re-send (ref tracker empty)"
+                );
+
+                // Second read in same session: ref was recorded by the first
+                // read, so now it's a Dedup hit.
+                let r2 = cm.get_or_compress(path, &content, &pipeline).unwrap();
+                match r2 {
                     CacheResult::Dedup { token_cost, .. } => {
                         prop_assert_eq!(
                             token_cost, 13,
-                            "persisted cache hit should report 13 tokens"
+                            "second read in same session should be dedup hit"
                         );
                     }
                     CacheResult::Fresh { .. } | CacheResult::Delta { .. } => {
                         prop_assert!(
                             false,
-                            "cache entry should persist across store reopen"
+                            "second read should be a dedup hit after re-send"
                         );
                     }
                 }
