@@ -56,7 +56,7 @@ function sqzEstimateTokens(text) {
   return Math.ceil(text.length / 4);
 }
 
-const TOKEN_THRESHOLD = 500;
+const TOKEN_THRESHOLD = 100;
 
 function shouldShowPreview(tokenCount) {
   return tokenCount > TOKEN_THRESHOLD;
@@ -93,19 +93,19 @@ assertEqual(sqzEstimateTokens('a'.repeat(2004)), 501, '2004 chars → 501 tokens
 section('2. Preview threshold (Requirement 5.3)');
 
 assert(!shouldShowPreview(0), 'no preview for 0 tokens');
-assert(!shouldShowPreview(499), 'no preview for 499 tokens');
-assert(!shouldShowPreview(500), 'no preview for exactly 500 tokens');
-assert(shouldShowPreview(501), 'preview for 501 tokens');
+assert(!shouldShowPreview(99), 'no preview for 99 tokens');
+assert(!shouldShowPreview(100), 'no preview for exactly 100 tokens');
+assert(shouldShowPreview(101), 'preview for 101 tokens');
 assert(shouldShowPreview(1000), 'preview for 1000 tokens');
 assert(shouldShowPreview(10000), 'preview for 10000 tokens');
 
-// Boundary: text that produces exactly 500 tokens (2000 chars)
-const exactly500 = 'a'.repeat(2000);
-assert(!shouldShowPreview(sqzEstimateTokens(exactly500)), 'no preview for 2000-char input (500 tokens)');
+// Boundary: text that produces exactly 100 tokens (400 chars)
+const exactly100 = 'a'.repeat(400);
+assert(!shouldShowPreview(sqzEstimateTokens(exactly100)), 'no preview for 400-char input (100 tokens)');
 
-// Text that produces 501 tokens (2001 chars)
-const over500 = 'a'.repeat(2001);
-assert(shouldShowPreview(sqzEstimateTokens(over500)), 'preview for 2001-char input (501 tokens)');
+// Text that produces 101 tokens (401 chars)
+const over100 = 'a'.repeat(401);
+assert(shouldShowPreview(sqzEstimateTokens(over100)), 'preview for 401-char input (101 tokens)');
 
 // ---------------------------------------------------------------------------
 // 3. WASM module loading simulation (Requirement 5.1)
@@ -207,15 +207,15 @@ section('5. common.js structure');
 const commonSrc = fs.readFileSync(path.join(contentDir, 'common.js'), 'utf8');
 
 assert(commonSrc.includes('sqzEstimateTokens'), 'common.js exports sqzEstimateTokens');
-assert(commonSrc.includes('sqzLoadWasm'), 'common.js exports sqzLoadWasm');
+assert(commonSrc.includes('sqzCompressViaBackground'), 'common.js exports sqzCompressViaBackground');
 assert(commonSrc.includes('sqzCompress'), 'common.js exports sqzCompress');
 assert(commonSrc.includes('sqzShowPreview'), 'common.js exports sqzShowPreview');
 assert(commonSrc.includes('sqzAttachInterceptor'), 'common.js exports sqzAttachInterceptor');
 assert(commonSrc.includes('TOKEN_THRESHOLD'), 'common.js defines TOKEN_THRESHOLD');
-assert(commonSrc.includes('500'), 'common.js threshold is 500');
+assert(commonSrc.includes('100'), 'common.js threshold is 100');
 assert(!commonSrc.includes('fetch('), 'common.js makes no fetch() calls (Req 5.4)');
 assert(!commonSrc.includes('XMLHttpRequest'), 'common.js makes no XHR calls (Req 5.4)');
-assert(commonSrc.includes('pass-through'), 'common.js has fallback pass-through (Req 5.5)');
+assert(commonSrc.includes('sqzCompressJS'), 'common.js has JS fallback compressor (Req 5.5)');
 
 // ---------------------------------------------------------------------------
 // 6. manifest.json structure (Requirement 5.1)

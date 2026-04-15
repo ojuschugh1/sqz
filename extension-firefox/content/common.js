@@ -439,7 +439,7 @@ async function sqzCompress(text) {
 // ---------------------------------------------------------------------------
 
 const PREVIEW_BANNER_ID = 'sqz-preview-banner';
-const TOKEN_THRESHOLD = 500;
+const TOKEN_THRESHOLD = 100;
 
 function sqzShowPreview(originalTokens, compressedTokens, onAccept, onDismiss) {
   sqzRemovePreview();

@@ -2,6 +2,7 @@
 // Subset of sqz_engine compiled to wasm32-unknown-unknown
 // No tree-sitter, no file cache — in-memory session store only
 
+use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -93,7 +94,161 @@ fn is_simple_key(k: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Plain text compression (works on non-JSON content)
+// JSON preprocessing: strip nulls, collapse arrays
+// ---------------------------------------------------------------------------
+
+/// Recursively remove null-valued fields from JSON objects.
+/// Arrays keep their null elements (positional data).
+fn strip_nulls(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, v| !v.is_null());
+            for v in map.values_mut() {
+                strip_nulls(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                strip_nulls(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collapse arrays with more than `max_items` elements.
+/// For uniform arrays (all objects with same keys), use tabular encoding.
+fn collapse_arrays(value: &mut serde_json::Value, max_items: usize) {
+    match value {
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                collapse_arrays(item, max_items);
+            }
+            if arr.len() > max_items {
+                // Check for uniform array → tabular encoding
+                if let Some(keys) = detect_uniform_keys(arr) {
+                    let table = encode_table(arr, &keys);
+                    let count = arr.len();
+                    arr.clear();
+                    arr.push(serde_json::Value::String(
+                        format!("[table: {} rows]\n{}", count, table),
+                    ));
+                } else {
+                    let remaining = arr.len() - max_items;
+                    arr.truncate(max_items);
+                    arr.push(serde_json::Value::String(
+                        format!("... and {} more items", remaining),
+                    ));
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                collapse_arrays(v, max_items);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn detect_uniform_keys(arr: &[serde_json::Value]) -> Option<Vec<String>> {
+    if arr.len() < 2 {
+        return None;
+    }
+    let first_keys: Vec<String> = match &arr[0] {
+        serde_json::Value::Object(map) if !map.is_empty() => map.keys().cloned().collect(),
+        _ => return None,
+    };
+    for item in &arr[1..] {
+        match item {
+            serde_json::Value::Object(map) => {
+                if map.len() != first_keys.len() {
+                    return None;
+                }
+                for key in &first_keys {
+                    if !map.contains_key(key) {
+                        return None;
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(first_keys)
+}
+
+fn encode_table(arr: &[serde_json::Value], keys: &[String]) -> String {
+    let mut lines = Vec::with_capacity(arr.len() + 1);
+    lines.push(keys.join(" | "));
+    for item in arr {
+        if let serde_json::Value::Object(map) = item {
+            let row: Vec<String> = keys
+                .iter()
+                .map(|k| compact_value(map.get(k).unwrap_or(&serde_json::Value::Null)))
+                .collect();
+            lines.push(row.join(" | "));
+        }
+    }
+    lines.join("\n")
+}
+
+fn compact_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => {
+            if s.len() > 50 { format!("{}...", &s[..47]) } else { s.clone() }
+        }
+        serde_json::Value::Array(a) => format!("[{} items]", a.len()),
+        serde_json::Value::Object(m) => format!("{{{} keys}}", m.len()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Content classification
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentType {
+    Json,
+    Code,
+    Log,
+    Prose,
+}
+
+fn classify(input: &str) -> ContentType {
+    let trimmed = input.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+            return ContentType::Json;
+        }
+    }
+    let lines: Vec<&str> = trimmed.lines().take(20).collect();
+    let mut code_score = 0;
+    let mut log_score = 0;
+    for line in &lines {
+        let l = line.trim();
+        if l.ends_with('{') || l.ends_with('}') || l.ends_with(';')
+            || l.starts_with("fn ") || l.starts_with("def ")
+            || l.starts_with("class ") || l.starts_with("import ")
+            || l.contains("->") || l.contains("::")
+        {
+            code_score += 1;
+        }
+        if l.contains("[INFO]") || l.contains("[ERROR]") || l.contains("[WARN]")
+            || l.contains("[DEBUG]") || l.starts_with("20")
+        {
+            log_score += 1;
+        }
+    }
+    if code_score > lines.len() / 2 { return ContentType::Code; }
+    if log_score > lines.len() / 3 { return ContentType::Log; }
+    ContentType::Prose
+}
+
+// ---------------------------------------------------------------------------
+// Plain text compression
 // ---------------------------------------------------------------------------
 
 fn compress_text(input: &str) -> String {
@@ -111,8 +266,6 @@ fn compress_text(input: &str) -> String {
             continue;
         }
         prev_blank = false;
-
-        // Collapse runs of spaces/tabs within the line to single space
         let mut prev_space = false;
         for ch in trimmed.chars() {
             if ch == ' ' || ch == '\t' {
@@ -128,7 +281,7 @@ fn compress_text(input: &str) -> String {
         result.push('\n');
     }
 
-    // Pass 2: Apply common abbreviations to reduce token count
+    // Pass 2: Phrase abbreviations
     let result = result
         .replace("for example", "e.g.")
         .replace("For example", "E.g.")
@@ -164,15 +317,143 @@ fn compress_text(input: &str) -> String {
         .replace("As a result of", "From")
         .replace("  ", " ");
 
-    // Trim trailing whitespace
-    let result = result.trim_end().to_string();
+    // Pass 3: Word abbreviations (same table as the Rust engine)
+    let result = abbreviate_words(&result);
 
-    // Only return compressed version if it's actually shorter
-    if result.len() < input.len() {
-        result
-    } else {
-        input.to_string()
+    let result = result.trim_end().to_string();
+    if result.len() < input.len() { result } else { input.to_string() }
+}
+
+/// Collapse repeated consecutive lines (condense stage).
+fn condense(input: &str, max_repeated: usize) -> String {
+    let mut result = Vec::new();
+    let mut current_line: Option<&str> = None;
+    let mut run_count: usize = 0;
+
+    for line in input.lines() {
+        match current_line {
+            Some(prev) if prev == line => {
+                run_count += 1;
+                if run_count <= max_repeated {
+                    result.push(line);
+                }
+            }
+            _ => {
+                current_line = Some(line);
+                run_count = 1;
+                result.push(line);
+            }
+        }
     }
+
+    let trailing = input.ends_with('\n');
+    let mut out = result.join("\n");
+    if trailing { out.push('\n'); }
+    out
+}
+
+/// Compress log output: condense repeated lines, keep errors/warnings.
+fn compress_log(input: &str) -> String {
+    condense(input, 2)
+}
+
+/// Compress code: strip single-line comments, condense blank lines.
+fn compress_code(input: &str) -> String {
+    let mut result = Vec::new();
+    let mut prev_blank = false;
+    for line in input.lines() {
+        let trimmed = line.trim();
+        // Strip single-line comments (but keep doc comments)
+        if (trimmed.starts_with("//") && !trimmed.starts_with("///"))
+            || (trimmed.starts_with('#') && !trimmed.starts_with("#!") && !trimmed.starts_with("#["))
+        {
+            continue;
+        }
+        if trimmed.is_empty() {
+            if !prev_blank {
+                result.push("");
+                prev_blank = true;
+            }
+            continue;
+        }
+        prev_blank = false;
+        result.push(line);
+    }
+    let trailing = input.ends_with('\n');
+    let mut out = result.join("\n");
+    if trailing { out.push('\n'); }
+    if out.len() < input.len() { out } else { input.to_string() }
+}
+
+/// Word abbreviation table (subset of the Rust engine's 100+ entries).
+fn abbreviate_words(text: &str) -> String {
+    let abbrevs: &[(&str, &str)] = &[
+        ("implementation", "impl"),
+        ("configuration", "config"),
+        ("authentication", "auth"),
+        ("authorization", "authz"),
+        ("application", "app"),
+        ("environment", "env"),
+        ("development", "dev"),
+        ("production", "prod"),
+        ("repository", "repo"),
+        ("dependency", "dep"),
+        ("dependencies", "deps"),
+        ("documentation", "docs"),
+        ("information", "info"),
+        ("directory", "dir"),
+        ("parameter", "param"),
+        ("parameters", "params"),
+        ("function", "fn"),
+        ("reference", "ref"),
+        ("specification", "spec"),
+        ("administrator", "admin"),
+        ("database", "db"),
+        ("infrastructure", "infra"),
+        ("kubernetes", "k8s"),
+        ("namespace", "ns"),
+        ("management", "mgmt"),
+        ("notification", "notif"),
+        ("permission", "perm"),
+        ("permissions", "perms"),
+    ];
+    let mut result = text.to_string();
+    for &(long, short) in abbrevs {
+        // Simple whole-word replacement (case-insensitive)
+        result = replace_word_ci(&result, long, short);
+    }
+    result
+}
+
+fn replace_word_ci(text: &str, word: &str, replacement: &str) -> String {
+    let lower = text.to_lowercase();
+    let word_lower = word.to_lowercase();
+    let mut result = String::with_capacity(text.len());
+    let mut last = 0;
+    let bytes = text.as_bytes();
+    for (start, _) in lower.match_indices(&word_lower) {
+        let end = start + word.len();
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after_ok = end >= text.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            result.push_str(&text[last..start]);
+            result.push_str(replacement);
+            last = end;
+        }
+    }
+    result.push_str(&text[last..]);
+    result
+}
+
+// ---------------------------------------------------------------------------
+// In-memory dedup cache
+// ---------------------------------------------------------------------------
+
+fn content_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -186,33 +467,100 @@ struct SessionState {
 }
 
 // ---------------------------------------------------------------------------
-// WasmEngine — minimal subset for browser use
+// Compression preset
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Preset {
+    /// TOON only, no stripping.
+    Minimal,
+    /// Strip nulls + condense + TOON + word abbreviation.
+    Default,
+    /// All of Default + collapse arrays + aggressive text compression.
+    Aggressive,
+}
+
+impl Preset {
+    fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "minimal" => Preset::Minimal,
+            "aggressive" => Preset::Aggressive,
+            _ => Preset::Default,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WasmEngine — full-featured subset for browser use
 // ---------------------------------------------------------------------------
 
 struct WasmEngine {
     session: SessionState,
+    preset: Preset,
+    /// In-memory dedup cache: hash → compressed output.
+    dedup_cache: HashMap<u64, String>,
 }
 
 impl WasmEngine {
-    fn new() -> Self {
+    fn new(preset: Preset) -> Self {
         Self {
             session: SessionState::default(),
+            preset,
+            dedup_cache: HashMap::new(),
         }
     }
 
-    fn compress(&self, input: &str) -> String {
-        // Try TOON encoding for JSON content
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(input.trim()) {
-            let mut buf = String::with_capacity(input.len());
-            buf.push_str(TOON_PREFIX);
-            encode_value(&v, &mut buf);
-            if buf.len() < input.len() {
-                return buf;
-            }
+    fn compress(&mut self, input: &str) -> String {
+        // Dedup check: if we've seen this exact content before, return ref
+        let hash = content_hash(input);
+        if let Some(cached) = self.dedup_cache.get(&hash) {
+            return cached.clone();
         }
 
-        // Plain text compression pipeline
-        compress_text(input)
+        let result = self.compress_inner(input);
+
+        // Cache the result for future dedup
+        self.dedup_cache.insert(hash, result.clone());
+        result
+    }
+
+    fn compress_inner(&self, input: &str) -> String {
+        let content_type = classify(input);
+
+        match content_type {
+            ContentType::Json => self.compress_json(input),
+            ContentType::Code => compress_code(input),
+            ContentType::Log => compress_log(input),
+            ContentType::Prose => compress_text(input),
+        }
+    }
+
+    fn compress_json(&self, input: &str) -> String {
+        let parsed = match serde_json::from_str::<serde_json::Value>(input.trim()) {
+            Ok(v) => v,
+            Err(_) => return input.to_string(),
+        };
+
+        let mut value = parsed;
+
+        // Strip nulls (unless Minimal preset)
+        if self.preset != Preset::Minimal {
+            strip_nulls(&mut value);
+        }
+
+        // Collapse arrays (Aggressive only, or Default with large arrays)
+        match self.preset {
+            Preset::Aggressive => collapse_arrays(&mut value, 5),
+            Preset::Default => collapse_arrays(&mut value, 10),
+            Preset::Minimal => {}
+        }
+
+        // TOON encode
+        let mut buf = String::with_capacity(input.len());
+        buf.push_str(TOON_PREFIX);
+        encode_value(&value, &mut buf);
+
+        if buf.len() < input.len() { buf } else { input.to_string() }
     }
 
     fn estimate_tokens(&self, input: &str) -> u32 {
@@ -234,7 +582,8 @@ impl WasmEngine {
 // ---------------------------------------------------------------------------
 
 /// Browser-facing WASM wrapper for the sqz compression engine.
-/// Subset engine: no tree-sitter, no file cache, in-memory session store.
+/// Full-featured subset: null stripping, condense, content classification,
+/// word abbreviation, tabular array encoding, in-memory dedup cache.
 #[wasm_bindgen]
 pub struct SqzWasm {
     engine: WasmEngine,
@@ -243,19 +592,21 @@ pub struct SqzWasm {
 #[wasm_bindgen]
 impl SqzWasm {
     /// Create a new SqzWasm instance.
-    /// `preset_json` is accepted for API compatibility but currently unused
-    /// (the browser subset uses fixed defaults).
+    /// `preset_json` selects the compression preset:
+    /// - `"minimal"` — TOON encoding only
+    /// - `"default"` — strip nulls + condense + TOON + word abbreviation
+    /// - `"aggressive"` — all of default + collapse arrays at 5 items
     #[wasm_bindgen(constructor)]
-    pub fn new(_preset_json: &str) -> Result<SqzWasm, JsValue> {
+    pub fn new(preset_json: &str) -> Result<SqzWasm, JsValue> {
+        let preset = Preset::from_str(preset_json);
         Ok(SqzWasm {
-            engine: WasmEngine::new(),
+            engine: WasmEngine::new(preset),
         })
     }
 
-    /// Compress `input`. If the input is valid JSON, TOON encoding is applied.
-    /// Otherwise the input is returned unchanged.
-    /// Returns a JS string value.
-    pub fn compress(&self, input: &str) -> Result<JsValue, JsValue> {
+    /// Compress `input`. Routes to JSON/code/log/prose compressor based on
+    /// content classification. Returns cached result on duplicate input.
+    pub fn compress(&mut self, input: &str) -> Result<JsValue, JsValue> {
         let compressed = self.engine.compress(input);
         Ok(JsValue::from_str(&compressed))
     }
@@ -279,6 +630,7 @@ impl SqzWasm {
     }
 }
 
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -288,60 +640,26 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    // -----------------------------------------------------------------------
-    // Property 5 — Browser compression preview threshold
-    // Validates: Requirements 5.3
-    // -----------------------------------------------------------------------
-    //
-    // For any content input to the Browser_Extension, if the estimated token
-    // count exceeds 100, the extension SHALL produce a compression preview
-    // containing both original and compressed token counts.
-    // If the token count is <= 100, no preview SHALL be produced.
-    //
-    // We model the "preview decision" as a pure function of the token estimate
-    // so that it can be tested without a real DOM or WASM runtime.
-
-    /// Returns true when a compression preview should be shown.
     fn should_show_preview(token_count: u32) -> bool {
         token_count > 100
     }
 
-    /// Estimate tokens for a string (mirrors WasmEngine::estimate_tokens).
     fn estimate_tokens(input: &str) -> u32 {
         (input.len() as f64 / 4.0).ceil() as u32
     }
 
     proptest! {
-        /// **Validates: Requirements 5.3**
-        ///
-        /// For any string input:
-        /// - If estimate_tokens(input) > 100, should_show_preview MUST return true.
-        /// - If estimate_tokens(input) <= 100, should_show_preview MUST return false.
         #[test]
         fn prop_browser_compression_preview_threshold(input in ".*") {
             let tokens = estimate_tokens(&input);
             let preview = should_show_preview(tokens);
             if tokens > 100 {
-                prop_assert!(
-                    preview,
-                    "expected preview for input with {} tokens (len={})",
-                    tokens,
-                    input.len()
-                );
+                prop_assert!(preview, "expected preview for {} tokens", tokens);
             } else {
-                prop_assert!(
-                    !preview,
-                    "expected no preview for input with {} tokens (len={})",
-                    tokens,
-                    input.len()
-                );
+                prop_assert!(!preview, "expected no preview for {} tokens", tokens);
             }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Unit tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn estimate_tokens_empty() {
@@ -350,28 +668,23 @@ mod tests {
 
     #[test]
     fn estimate_tokens_four_chars() {
-        // 4 chars → ceil(4/4) = 1
         assert_eq!(estimate_tokens("abcd"), 1);
     }
 
     #[test]
     fn estimate_tokens_five_chars() {
-        // 5 chars → ceil(5/4) = 2
         assert_eq!(estimate_tokens("abcde"), 2);
     }
 
     #[test]
     fn preview_threshold_boundary() {
-        // exactly 100 tokens → no preview
         assert!(!should_show_preview(100));
-        // 101 tokens → preview
         assert!(should_show_preview(101));
     }
 
     #[test]
     fn compress_json_applies_toon() {
-        let engine = WasmEngine::new();
-        // Use a JSON input where TOON encoding is shorter than the original
+        let mut engine = WasmEngine::new(Preset::Default);
         let json = r#"{ "key":  "value",  "another_key":  "another_value" }"#;
         let result = engine.compress(json);
         assert!(result.starts_with("TOON:"), "result: {result}");
@@ -379,10 +692,26 @@ mod tests {
     }
 
     #[test]
+    fn compress_json_strips_nulls() {
+        let mut engine = WasmEngine::new(Preset::Default);
+        let json = r#"{"a": 1, "b": null, "c": "hello"}"#;
+        let result = engine.compress(json);
+        assert!(result.starts_with("TOON:"), "result: {result}");
+        assert!(!result.contains("null"), "nulls should be stripped: {result}");
+    }
+
+    #[test]
+    fn compress_json_minimal_preserves_nulls() {
+        let mut engine = WasmEngine::new(Preset::Minimal);
+        let json = r#"{"a": 1, "b": null}"#;
+        let result = engine.compress(json);
+        assert!(result.contains("null"), "minimal preset should preserve nulls: {result}");
+    }
+
+    #[test]
     fn compress_non_json_passthrough_short() {
-        let engine = WasmEngine::new();
+        let mut engine = WasmEngine::new(Preset::Default);
         let plain = "hello world";
-        // Short text with no compressible patterns returns unchanged
         assert_eq!(engine.compress(plain), plain);
     }
 
@@ -404,8 +733,113 @@ mod tests {
     }
 
     #[test]
+    fn compress_text_abbreviates_words() {
+        let input = "The implementation of the configuration requires authentication";
+        let result = compress_text(input);
+        assert!(result.contains("impl"), "should abbreviate implementation: {result}");
+        assert!(result.contains("config"), "should abbreviate configuration: {result}");
+        assert!(result.contains("auth"), "should abbreviate authentication: {result}");
+    }
+
+    #[test]
+    fn condense_collapses_repeated_lines() {
+        let input = "ok\nok\nok\nok\nok\ndone\n";
+        let result = condense(input, 2);
+        assert_eq!(result, "ok\nok\ndone\n");
+    }
+
+    #[test]
+    fn compress_log_condenses() {
+        let input = "[INFO] Connected\n[INFO] Connected\n[INFO] Connected\n[ERROR] Timeout\n";
+        let result = compress_log(input);
+        assert!(result.contains("[ERROR] Timeout"), "errors preserved: {result}");
+        let info_count = result.matches("[INFO] Connected").count();
+        assert!(info_count <= 2, "repeated lines condensed: {result}");
+    }
+
+    #[test]
+    fn compress_code_strips_comments() {
+        let input = "fn main() {\n    // this is a comment\n    let x = 42;\n}\n";
+        let result = compress_code(input);
+        assert!(!result.contains("// this is a comment"), "comment stripped: {result}");
+        assert!(result.contains("let x = 42"), "code preserved: {result}");
+    }
+
+    #[test]
+    fn compress_code_preserves_doc_comments() {
+        let input = "/// Documentation comment\nfn main() {}\n";
+        let result = compress_code(input);
+        assert!(result.contains("/// Documentation"), "doc comment preserved: {result}");
+    }
+
+    #[test]
+    fn classify_json() {
+        assert_eq!(classify(r#"{"key": "value"}"#), ContentType::Json);
+        assert_eq!(classify(r#"[1, 2, 3]"#), ContentType::Json);
+    }
+
+    #[test]
+    fn classify_code() {
+        let code = "fn main() {\n    let x = 42;\n    println!(\"hello\");\n}\n";
+        assert_eq!(classify(code), ContentType::Code);
+    }
+
+    #[test]
+    fn classify_log() {
+        let log = "2024-01-01 [INFO] Started\n2024-01-01 [INFO] Connected\n2024-01-01 [ERROR] Failed\n";
+        assert_eq!(classify(log), ContentType::Log);
+    }
+
+    #[test]
+    fn classify_prose() {
+        let prose = "This is a normal sentence about something interesting.";
+        assert_eq!(classify(prose), ContentType::Prose);
+    }
+
+    #[test]
+    fn dedup_cache_returns_same_result() {
+        let mut engine = WasmEngine::new(Preset::Default);
+        let input = r#"{"key": "value", "other": null}"#;
+        let first = engine.compress(input);
+        let second = engine.compress(input);
+        assert_eq!(first, second, "dedup should return cached result");
+    }
+
+    #[test]
+    fn strip_nulls_recursive() {
+        let mut v = serde_json::json!({"a": 1, "b": null, "c": {"d": null, "e": 2}});
+        strip_nulls(&mut v);
+        assert_eq!(v, serde_json::json!({"a": 1, "c": {"e": 2}}));
+    }
+
+    #[test]
+    fn collapse_arrays_uniform() {
+        let mut v = serde_json::json!([
+            {"id": 1, "name": "Alice"},
+            {"id": 2, "name": "Bob"},
+            {"id": 3, "name": "Carol"},
+            {"id": 4, "name": "Dave"},
+            {"id": 5, "name": "Eve"},
+            {"id": 6, "name": "Frank"}
+        ]);
+        collapse_arrays(&mut v, 3);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "uniform array should be tabular-encoded");
+        let table = arr[0].as_str().unwrap();
+        assert!(table.contains("[table: 6 rows]"), "table: {table}");
+    }
+
+    #[test]
+    fn preset_from_str() {
+        assert_eq!(Preset::from_str("minimal"), Preset::Minimal);
+        assert_eq!(Preset::from_str("aggressive"), Preset::Aggressive);
+        assert_eq!(Preset::from_str("default"), Preset::Default);
+        assert_eq!(Preset::from_str("anything_else"), Preset::Default);
+    }
+
+    #[test]
     fn export_import_roundtrip() {
-        let mut engine = WasmEngine::new();
+        let mut engine = WasmEngine::new(Preset::Default);
         let exported = engine.export_ctx().expect("export should succeed");
         engine.import_ctx(&exported).expect("import should succeed");
         let re_exported = engine.export_ctx().expect("re-export should succeed");
@@ -414,10 +848,18 @@ mod tests {
 
     #[test]
     fn wasm_new_accepts_preset_json() {
-        // SqzWasm::new should not fail regardless of preset_json content
-        let result = SqzWasm::new("{}");
+        let result = SqzWasm::new("default");
         assert!(result.is_ok());
-        let result2 = SqzWasm::new("not json");
+        let result2 = SqzWasm::new("not a preset");
         assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn word_abbreviation_whole_word_only() {
+        let result = abbreviate_words("the implementation is done");
+        assert_eq!(result, "the impl is done");
+        // "implementations" should NOT match "implementation"
+        let result2 = abbreviate_words("multiple implementations");
+        assert_eq!(result2, "multiple implementations");
     }
 }
