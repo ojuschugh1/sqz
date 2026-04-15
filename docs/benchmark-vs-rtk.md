@@ -25,6 +25,8 @@ sqz wins because of two features rtk doesn't have:
 - **Dedup cache**: identical content on 2nd/3rd read returns a 13-token reference
 - **Predictive pre-cache**: when auth.rs was read, sqz parsed its imports and pre-cached db.rs
 
+**Note:** These dedup savings apply when files are read through Bash commands (`cat`, `head`, etc.) intercepted by the PreToolUse hook. Claude Code's built-in Read tool bypasses shell hooks — neither sqz nor rtk can compress its output. PostToolUse hooks can view but not modify tool output ([confirmed limitation](https://github.com/anthropics/claude-code/issues/4544)). The MCP server (`sqz-mcp`) provides compressed file reading as an alternative tool that Claude can use instead of the built-in Read.
+
 ## Scenario 2: Test-Fix-Test Cycle
 
 Run `cargo test` (15 tests, 2 failing), fix the code, run `cargo test` again (all passing).

@@ -67,7 +67,18 @@ pub fn process_hook(input: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Only intercept Bash/shell tool calls
+    // Only intercept Bash/shell tool calls.
+    // NOTE: Claude Code's built-in tools (Read, Grep, Glob, Write) bypass
+    // shell hooks entirely. PostToolUse hooks can view but NOT modify their
+    // output (confirmed: github.com/anthropics/claude-code/issues/4544).
+    // The only way to compress built-in tool output is via the MCP server
+    // (sqz-mcp), which provides compressed alternatives to these tools.
+    //
+    // NOTE: We cannot intercept Read/Grep/Glob output via PostToolUse hooks.
+    // Claude Code's PostToolUse hooks can view but NOT modify tool output
+    // (confirmed: github.com/anthropics/claude-code/issues/4544).
+    // The tool output enters the context unchanged. We can only compress
+    // Bash command output by rewriting the command via PreToolUse.
     if !matches!(tool_name, "Bash" | "bash" | "shell" | "terminal"
         | "run_terminal_command" | "run_shell_command") {
         // Pass through non-bash tools unchanged
@@ -128,6 +139,8 @@ pub fn process_hook(input: &str) -> Result<String> {
 pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
     vec![
         // Claude Code — goes in .claude/settings.local.json (nested format)
+        // Includes PreToolUse for Bash compression AND SessionStart compact
+        // for re-injecting context after compaction.
         ToolHookConfig {
             tool_name: "Claude Code".to_string(),
             config_path: PathBuf::from(".claude/settings.local.json"),
@@ -141,6 +154,17 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
           {{
             "type": "command",
             "command": "{sqz_path} hook claude"
+          }}
+        ]
+      }}
+    ],
+    "SessionStart": [
+      {{
+        "matcher": "compact",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "{sqz_path} resume"
           }}
         ]
       }}
