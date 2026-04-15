@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "execute_command",
+        "command": "/Users/ojchug/pc/cil/target/debug/sqz hook cline"
+      }
+    ]
+  }
+}

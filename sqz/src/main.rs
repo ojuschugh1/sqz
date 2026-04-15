@@ -136,6 +136,14 @@ enum Command {
         /// Session ID to resume. If omitted, uses the most recent session.
         session_id: Option<String>,
     },
+
+    /// Process a PreToolUse hook invocation from an AI coding tool.
+    /// Reads the tool call JSON from stdin, rewrites bash commands to pipe
+    /// through sqz, and outputs the modified JSON.
+    Hook {
+        /// The AI tool sending the hook: claude, cursor, windsurf, cline.
+        tool: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -186,6 +194,7 @@ fn main() {
         Some(Command::Gain { days }) => cmd_gain(days),
         Some(Command::Discover { days }) => cmd_discover(days),
         Some(Command::Resume { session_id }) => cmd_resume(session_id),
+        Some(Command::Hook { tool }) => cmd_hook(&tool),
     }
 }
 
@@ -223,6 +232,16 @@ fn cmd_init() {
         } else {
             println!("[sqz] default preset already exists at {}", preset_path.display());
         }
+    }
+
+    // Install AI tool hooks (Claude Code, Cursor, Windsurf, Cline)
+    let sqz_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "sqz".to_string());
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let installed_tools = sqz_engine::install_tool_hooks(&project_dir, &sqz_path);
+    if !installed_tools.is_empty() {
+        println!("[sqz] AI tool hooks installed for: {}", installed_tools.join(", "));
     }
 
     println!("[sqz] init complete. Restart your shell or source the RC file.");
@@ -792,6 +811,30 @@ fn cmd_resume(session_id: Option<String>) {
 
     println!("{}", guide.text);
     eprintln!("[sqz] session guide: {} tokens from session '{}'", guide.token_count, sid);
+}
+
+// ── Hook command ──────────────────────────────────────────────────────────
+
+/// `sqz hook <tool>` — process a PreToolUse hook invocation.
+/// Reads JSON from stdin, rewrites bash commands to pipe through sqz.
+fn cmd_hook(_tool: &str) {
+    use std::io::Read;
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("[sqz] hook: stdin read error: {e}");
+        // On error, output empty JSON to let the tool proceed unmodified
+        println!("{{}}");
+        return;
+    }
+
+    match sqz_engine::process_hook(&input) {
+        Ok(output) => print!("{output}"),
+        Err(e) => {
+            eprintln!("[sqz] hook: processing error: {e}");
+            // On error, pass through the original input unchanged
+            print!("{input}");
+        }
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

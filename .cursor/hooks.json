@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "terminal",
+        "command": "/Users/ojchug/pc/cil/target/debug/sqz hook cursor"
+      }
+    ]
+  }
+}

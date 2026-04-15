@@ -16,10 +16,13 @@ pub mod entropy_truncator;
 pub mod file_reader;
 pub mod image_compressor;
 pub mod litm_positioner;
+pub mod mdl_selector;
 pub mod ngram_abbreviator;
 pub mod rle_compressor;
 pub mod simhash;
+pub mod textrank;
 pub mod token_pruner;
+pub mod tool_hooks;
 pub mod tool_selector;
 pub mod engine;
 pub mod hook_manager;
@@ -66,6 +69,9 @@ pub use litm_positioner::{ContextSection, LitmPositioner, LitmStrategy, SectionT
 pub use ngram_abbreviator::{NgramAbbreviator, AbbreviatorConfig, AbbreviationResult};
 pub use rle_compressor::{rle_compress, sliding_window_dedup, RleResult, SlidingWindowResult};
 pub use simhash::{simhash, SimHashFingerprint};
+pub use textrank::{textrank_compress, TextRankConfig, TextRankResult};
+pub use mdl_selector::{select_stages, profile_content, ContentProfile, MdlSelection};
+pub use tool_hooks::{process_hook, generate_hook_configs, install_tool_hooks, ToolHookConfig, HookScope};
 pub use token_pruner::{TokenPruner, PrunerConfig, PruneResult};
 pub use tool_selector::{ToolDefinition, ToolSelector};
 pub use budget_tracker::{
