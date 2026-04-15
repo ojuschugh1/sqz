@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  Single Rust binary · Zero telemetry · 753 tests · 81 property-based correctness proofs
+  Single Rust binary · Zero telemetry · 805 tests · 83 property-based correctness proofs
 </p>
 
 <p align="center">
@@ -134,13 +134,32 @@ Then:
 sqz init
 ```
 
-That's it. Shell hooks installed, default presets created, ready to go.
+That's it. Shell hooks installed, AI tool hooks configured, default presets created, ready to go.
+
+`sqz init` automatically installs:
+- **Shell hooks** (Bash/Zsh/Fish/Nushell/PowerShell) — `sqz_run` and `sqz_sudo` wrappers
+- **PreToolUse hooks** for Claude Code, Cursor, Windsurf, and Cline — transparent command interception that pipes all bash output through sqz without any manual prefixing
+
+After init, every terminal command your AI tool runs is automatically compressed. No workflow changes needed.
 
 ## How It Works
 
 sqz operates at four integration levels simultaneously:
 
-### 1. Shell Hook (CLI Proxy)
+### 1. Transparent Interception (PreToolUse Hooks)
+
+The most effective integration. sqz installs a PreToolUse hook that intercepts bash commands before execution and rewrites them to pipe output through `sqz compress`. The AI tool never knows it happened — it just gets compressed output.
+
+```
+Without sqz:  Claude → git status → raw output (300 tokens)
+With sqz:     Claude → git status → [hook rewrites] → compressed output (45 tokens)
+```
+
+Supported tools: Claude Code, Cursor, Windsurf, Cline. The hook skips interactive commands (vim, ssh, python REPL) and commands already piped through sqz.
+
+You can also manually invoke the hook: `sqz hook claude`, `sqz hook cursor`.
+
+### 2. Shell Hook (CLI Proxy)
 
 Intercepts command output from 100+ CLI tools (git, cargo, npm, docker, kubectl, aws, etc.) and compresses it before the LLM sees it. Includes session-level n-gram abbreviation for recurring phrases and word abbreviation for common long words.
 
@@ -201,6 +220,9 @@ Native [VS Code](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.
 - **Terse mode** — system prompt injection for concise LLM responses (3 levels)
 - **Predictive budget warnings** — alerts at 70% and 85% thresholds
 - **Compression quality metrics** — Shannon entropy-based efficiency measurement with quality grades (Excellent/Good/Fair/Poor) and headroom reporting
+- **TextRank extractive compression** — graph-based sentence ranking (PageRank algorithm) for prose content, keeps the most important sentences
+- **MDL stage selection** — Minimum Description Length principle selects the optimal compression stages per content type, skipping stages where overhead exceeds savings
+- **Transparent interception** — PreToolUse hooks for Claude Code, Cursor, Windsurf, Cline automatically pipe all bash output through sqz
 
 ### Cost & Analytics
 - **Real-time USD tracking** — per-tool breakdown with cache discount impact
@@ -219,26 +241,33 @@ Native [VS Code](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.
 
 ## Platforms
 
-sqz integrates with AI coding tools across 3 levels:
+sqz integrates with AI coding tools across 4 levels:
 
 ### Level 1 — MCP Config Only
 Continue · Zed
 
 ### Level 2 — Shell Hook + MCP
-Claude Code · Cursor · Copilot · Windsurf · Gemini CLI · Codex · OpenCode · Goose · Aider · Amp
+Copilot · Gemini CLI · Codex · OpenCode · Goose · Aider · Amp
 
-### Level 3 — Native / Deep
-[VS Code](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz) · JetBrains · Chrome (ChatGPT, Claude.ai, Gemini, Grok, Perplexity)
+### Level 3 — PreToolUse Hook (Transparent Interception)
+Claude Code · Cursor · Windsurf · Cline — `sqz init` installs hooks that automatically pipe all bash output through sqz. No manual prefixing needed.
+
+### Level 4 — Native / Deep
+[VS Code](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz) · [JetBrains](https://plugins.jetbrains.com/plugin/31240-sqz--context-intelligence/) · Chrome (ChatGPT, Claude.ai, Gemini, Grok, Perplexity) · [Firefox](https://addons.mozilla.org/en-US/firefox/addon/sqz-context-compression/)
 
 See [docs/integrations/](docs/integrations/) for platform-specific setup guides.
 
 ## CLI Commands
 
 ```sh
-sqz init              # Install shell hooks + default presets
+sqz init              # Install shell hooks + AI tool hooks + default presets
+sqz hook claude       # Process a PreToolUse hook for Claude Code
+sqz hook cursor       # Process a PreToolUse hook for Cursor
 sqz compress <text>   # Compress text (or pipe from stdin)
 sqz compress --verify # Compress with confidence score
 sqz compress --mode safe|aggressive  # Force compression mode
+sqz discover          # Find missed savings opportunities
+sqz resume            # Resume previous session with context guide
 sqz stats             # Cumulative compression report
 sqz gain              # ASCII chart of daily token savings
 sqz gain --days 30    # Last 30 days
@@ -296,7 +325,7 @@ complexity_threshold = 0.4
                           │
        ┌──────────────────┴──────────────────┐
        │         sqz_engine (Rust core)       │
-       │         50 modules · ~30K lines      │
+       │         53 modules · ~30K lines      │
        │                                      │
        │  Compression Pipeline (16 stages)    │
        │  TOON Encoder (lossless JSON)        │
@@ -339,7 +368,7 @@ complexity_threshold = 0.4
 ```sh
 git clone https://github.com/ojuschugh1/sqz.git
 cd sqz
-cargo test --workspace    # 753 tests
+cargo test --workspace    # 805 tests
 cargo build --release     # optimized binary
 ```
 
@@ -368,7 +397,7 @@ Prefer the primary type names below; the second name in each row is a `type` ali
 ### Project Structure
 
 ```
-sqz_engine/     Core Rust library (50 modules, all compression logic)
+sqz_engine/     Core Rust library (53 modules, all compression logic)
 sqz/            CLI binary (shell hooks, commands)
 sqz-mcp/        MCP server binary (stdio/SSE transport)
 sqz-wasm/       WASM target for browser extension
@@ -380,7 +409,7 @@ docs/           Integration guides and documentation
 
 ### Testing
 
-The test suite includes 753 tests with 81 property-based correctness properties validated via proptest:
+The test suite includes 805 tests with 83 property-based correctness properties validated via proptest:
 
 - TOON round-trip fidelity
 - Compression preserves semantically significant content
