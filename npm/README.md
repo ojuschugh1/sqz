@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  Single Rust binary · Zero telemetry · 586 tests · 60 property-based correctness proofs
+  Single Rust binary · Zero telemetry · 753 tests · 81 property-based correctness proofs
 </p>
 
 <p align="center">
@@ -310,7 +310,7 @@ complexity_threshold = 0.4
 ```sh
 git clone https://github.com/ojuschugh1/sqz.git
 cd sqz
-cargo test --workspace    # 586 tests
+cargo test --workspace    # 753 tests
 cargo build --release     # optimized binary
 ```
 
@@ -349,7 +349,7 @@ docs/           Integration guides and documentation
 
 ### Testing
 
-The test suite includes 586 tests with 60 property-based correctness properties validated via proptest:
+The test suite includes 753 tests with 81 property-based correctness properties validated via proptest:
 
 - TOON round-trip fidelity
 - Compression preserves semantically significant content

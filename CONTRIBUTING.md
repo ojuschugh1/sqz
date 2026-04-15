@@ -10,7 +10,7 @@ cd sqz
 cargo test --workspace
 ```
 
-If all 586 tests pass, you're ready.
+If all 753 tests pass, you're ready.
 
 ## Development Workflow
 

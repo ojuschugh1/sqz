@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  Single Rust binary · Zero telemetry · 586 tests · 60 property-based correctness proofs
+  Single Rust binary · Zero telemetry · 753 tests · 81 property-based correctness proofs
 </p>
 
 <p align="center">
@@ -49,7 +49,11 @@ AI coding tools waste tokens. Every file read sends the full content — even if
 
 ## The Solution
 
-sqz sits between your AI tool and the LLM, compressing everything before it reaches the model. The real win isn't just compression — it's deduplication. When the same file gets read 5 times in a session, sqz sends it once and returns a 13-token reference for every subsequent read.
+sqz sits between your AI tool and the LLM, compressing everything before it reaches the model. Two layers work together:
+
+**Noise reduction** — a multi-stage compression pipeline strips nulls from JSON, collapses repeated log lines, folds unchanged diff context, encodes JSON arrays as tables, abbreviates common words, and applies run-length encoding to repetitive output. This is the core — it cleans up noisy tool output before it hits the context window.
+
+**Deduplication** — a compaction-aware SHA-256 cache returns a 13-token reference for repeated content. When a file changes by a few lines, delta encoding sends only the diff. A turn-counter heuristic detects when refs may have gone stale (the original content was compacted out of the LLM's context) and automatically re-sends the full compressed content instead of a dangling reference.
 
 ```
 Without sqz:                              With sqz:
@@ -73,8 +77,10 @@ sqz saves tokens in two ways: compression (removing noise from content) and dedu
 |---|---:|---|
 | Repeated file reads (5x) | **86%** | Dedup cache: 13-token ref after first read |
 | JSON API responses with nulls | **7–56%** | Strip nulls + TOON encoding (varies by null density) |
-| Repeated log lines | **58%** | Condense stage collapses duplicates |
-| Large JSON arrays | **77%** | Array sampling + collapse |
+| Repeated log lines | **58%** | Condense + RLE collapses duplicates |
+| Large JSON arrays | **45%** | Tabular encoding for uniform arrays, collapse for mixed |
+| Git diffs | **11%** | Fold unchanged context lines |
+| Prose / documentation | **2–20%** | Token pruning + word abbreviation + entropy truncation |
 
 ### Where sqz intentionally preserves content
 
@@ -97,9 +103,9 @@ For a full session-level comparison with rtk, see [docs/benchmark-vs-rtk.md](doc
 | repeated_logs | 148 | 62 | **58.1%** |
 | json_api | 64 | 59 | **7.8%** |
 | git_diff | 61 | 54 | **11.5%** |
-| large_json_array | 259 | 60 | **76.8%** |
+| large_json_array | 259 | 142 | **45.2%** |
 | stack_trace (safe mode) | 82 | 82 | **0.0%** |
-| prose_docs | 124 | 124 | **0.0%** |
+| prose_docs | 124 | 121 | **2.4%** |
 
 ### Track your savings
 
@@ -136,7 +142,7 @@ sqz operates at four integration levels simultaneously:
 
 ### 1. Shell Hook (CLI Proxy)
 
-Intercepts command output from 100+ CLI tools (git, cargo, npm, docker, kubectl, aws, etc.) and compresses it before the LLM sees it.
+Intercepts command output from 100+ CLI tools (git, cargo, npm, docker, kubectl, aws, etc.) and compresses it before the LLM sees it. Includes session-level n-gram abbreviation for recurring phrases and word abbreviation for common long words.
 
 ```sh
 # Before: git log sends ~800 tokens of raw output
@@ -145,7 +151,7 @@ Intercepts command output from 100+ CLI tools (git, cargo, npm, docker, kubectl,
 
 ### 2. MCP Server
 
-A compiled Rust binary (not Node.js) that serves as an MCP server with intelligent tool selection, preset hot-reload, and an 8-stage compression pipeline.
+A compiled Rust binary (not Node.js) that serves as an MCP server with intelligent tool selection (TF-IDF + cosine similarity), preset hot-reload, and the full compression pipeline.
 
 ```json
 {
@@ -160,7 +166,7 @@ A compiled Rust binary (not Node.js) that serves as an MCP server with intellige
 
 ### 3. Browser Extension
 
-Chrome and Firefox extensions for ChatGPT, Claude.ai, Gemini, Grok, and Perplexity. Compresses pasted content client-side via a lightweight WASM engine (TOON encoding + whitespace normalization + phrase substitution). The full 8-stage pipeline runs in the CLI/MCP — the browser uses a fast subset optimized for paste-time latency. Zero network requests.
+Chrome and Firefox extensions for ChatGPT, Claude.ai, Gemini, Grok, and Perplexity. Compresses pasted content client-side via a lightweight WASM engine (TOON encoding + whitespace normalization + phrase substitution). The full pipeline runs in the CLI/MCP — the browser uses a fast subset optimized for paste-time latency. Zero network requests.
 
 ### 4. IDE Extensions
 
@@ -168,25 +174,33 @@ Native [VS Code](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.
 
 ## Features
 
-### Compression Engine
-- **8-stage pipeline** — keep_fields, strip_fields, condense, strip_nulls, flatten, truncate_strings, collapse_arrays, custom_transforms
-- **TOON encoding** — lossless JSON compression producing compact ASCII-safe output (reduction varies by structure, 4-30% typical)
+### Compression Pipeline
+- **10 registered stages** — ansi_strip, keep_fields, strip_fields, condense, git_diff_fold, strip_nulls, flatten, truncate_strings, collapse_arrays, custom_transforms
+- **6 post-stage processors** — RLE (run-length encoding), sliding window dedup, entropy-weighted truncation, self-information token pruning, dictionary compression, TOON encoding
+- **Word abbreviation** — 100+ common long words abbreviated at the output layer (implementation→impl, configuration→config, authentication→auth, etc.)
+- **Tabular encoding** — uniform JSON arrays (objects with identical keys) encoded as compact header + rows instead of repeated objects
+- **TOON encoding** — lossless JSON compression producing compact ASCII-safe output (reduction varies by structure, 4–30% typical)
 - **Tree-sitter AST** — structural code extraction for 4 languages natively (Rust, Python, JavaScript, Bash) + 14 via regex fallback (TypeScript, Go, Java, C, C++, Ruby, JSON, HTML, CSS, C#, Kotlin, Swift, TOML, YAML)
 - **Image compression** — screenshots → semantic DOM descriptions
 - **ANSI auto-strip** — removes color codes before compression
 
-### Caching & Memory
-- **SHA-256 file cache** — on a miss, content is compressed and stored; on a hit, the engine returns a compact inline reference (~13 tokens) instead of resending the full payload. LRU eviction, persisted across sessions. (Rust API: `CacheResult::Dedup` vs `Fresh`.)
-- **SQLite FTS5 session store** — cross-session memory with full-text search (`Session` in code; `SessionState` is a compatibility alias)
+### Caching & Deduplication
+- **SHA-256 content cache** — on a miss, content is compressed and stored; on a hit, the engine returns a compact inline reference (~13 tokens). LRU eviction, persisted across sessions.
+- **Compaction-aware dedup** — a turn-counter heuristic tracks when each ref was last sent. After 20 turns (configurable), refs are considered stale and the full compressed content is re-sent instead of a dangling reference. `notify_compaction()` explicitly invalidates all refs when the harness signals a context reset.
+- **Delta encoding** — near-duplicate content (similarity > 0.6) produces a compact line-level diff instead of re-sending the full file. SimHash fingerprinting enables O(1) candidate detection before falling back to LCS comparison.
+- **N-gram abbreviation** — session-level phrase frequency tracking replaces recurring multi-word phrases with short symbols + legend.
+- **SQLite FTS5 session store** — cross-session memory with full-text search
 - **Correction log** — immutable append-only log that survives compaction
 - **CTX format** — portable session graph across Claude, GPT, and Gemini
 
 ### Intelligence
+- **Confidence routing** — entropy analysis + pattern detection routes high-risk content (stack traces, secrets, migrations) to safe mode automatically
+- **TF-IDF + cosine tool selection** — exposes 3–5 relevant tools per task via TF-IDF weighted semantic matching (falls back to Jaccard for short queries)
 - **Prompt cache awareness** — preserves Anthropic 90% and OpenAI 50% cache boundaries
-- **Dynamic tool selection** — exposes 3-5 relevant tools per task via semantic matching
-- **Model routing** — routes simple tasks to cheaper local models
+- **Model routing** — routes simple tasks to cheaper local models based on complexity scoring
 - **Terse mode** — system prompt injection for concise LLM responses (3 levels)
 - **Predictive budget warnings** — alerts at 70% and 85% thresholds
+- **Compression quality metrics** — Shannon entropy-based efficiency measurement with quality grades (Excellent/Good/Fair/Poor) and headroom reporting
 
 ### Cost & Analytics
 - **Real-time USD tracking** — per-tool breakdown with cache discount impact
@@ -196,7 +210,7 @@ Native [VS Code](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.
 ### Extensibility
 - **TOML presets** — hot-reload within 2 seconds, community-driven ecosystem
 - **Plugin API** — Rust trait + WASM interface for custom compression strategies
-- **150 CLI patterns** — git, cargo, npm, docker, kubectl, aws, and more
+- **100+ CLI patterns** — git, cargo, npm, docker, kubectl, aws, and more
 
 ### Privacy
 - **Zero telemetry** — no data transmitted, no crash reports, no analytics
@@ -282,17 +296,28 @@ complexity_threshold = 0.4
                           │
        ┌──────────────────┴──────────────────┐
        │         sqz_engine (Rust core)       │
+       │         50 modules · ~30K lines      │
        │                                      │
-       │  Compression Pipeline (8 stages)     │
+       │  Compression Pipeline (16 stages)    │
        │  TOON Encoder (lossless JSON)        │
-       │  AST Parser (tree-sitter + regex, 18 langs)  │
-       │  Cache manager (SHA-256 file cache)        │
+       │  AST Parser (tree-sitter, 18 langs)  │
+       │  Cache Manager (SHA-256 + SimHash)   │
+       │  Delta Encoder (LCS + SimHash)       │
        │  Session Store (SQLite FTS5)         │
        │  Budget Tracker (multi-agent)        │
        │  Cost Calculator (real-time USD)     │
-       │  Tool Selector (semantic matching)   │
+       │  Tool Selector (TF-IDF + cosine)     │
+       │  Confidence Router (entropy-based)   │
        │  Prompt Cache Detector               │
        │  Model Router (complexity routing)   │
+       │  Token Pruner (self-information)     │
+       │  Entropy Truncator (rate-distortion) │
+       │  RLE Compressor + Sliding Window     │
+       │  Dict Compressor (JSON fields)       │
+       │  BPE Compressor (vocabulary)         │
+       │  SimHash (LSH fingerprinting)        │
+       │  Compression Quality (Shannon bound) │
+       │  N-gram Abbreviator (session-level)  │
        │  Correction Log (append-only)        │
        │  Plugin API (Rust + WASM)            │
        └─────────────────────────────────────┘
@@ -314,7 +339,7 @@ complexity_threshold = 0.4
 ```sh
 git clone https://github.com/ojuschugh1/sqz.git
 cd sqz
-cargo test --workspace    # 586 tests
+cargo test --workspace    # 753 tests
 cargo build --release     # optimized binary
 ```
 
@@ -334,14 +359,16 @@ Prefer the primary type names below; the second name in each row is a `type` ali
 | `EditHistory` | `CorrectionLog` |
 | `PresetHeader` | `PresetMeta` |
 
-**File cache:** `CacheManager` returns `CacheResult::Dedup` (compact inline reference) or `CacheResult::Fresh` (newly compressed payload).
+**File cache:** `CacheManager` returns `CacheResult::Dedup` (compact inline reference, ~13 tokens), `CacheResult::Delta` (near-duplicate diff), or `CacheResult::Fresh` (newly compressed payload). Stale refs (older than 20 turns) automatically return `Fresh` to avoid dangling references after context compaction.
+
+**Defensive API:** `SqzEngine::compress_or_passthrough()` guarantees any input produces a `CompressedContent` output — never returns an error. On internal failure, returns the original input unchanged.
 
 **Sandbox:** `SandboxResult` uses `status_code`, `was_truncated`, and `was_indexed` (stdout-only data enters the context window).
 
 ### Project Structure
 
 ```
-sqz_engine/     Core Rust library (all compression logic)
+sqz_engine/     Core Rust library (50 modules, all compression logic)
 sqz/            CLI binary (shell hooks, commands)
 sqz-mcp/        MCP server binary (stdio/SSE transport)
 sqz-wasm/       WASM target for browser extension
@@ -353,18 +380,25 @@ docs/           Integration guides and documentation
 
 ### Testing
 
-The test suite includes 586 tests with 60 property-based correctness properties validated via proptest:
+The test suite includes 753 tests with 81 property-based correctness properties validated via proptest:
 
 - TOON round-trip fidelity
 - Compression preserves semantically significant content
 - ASCII-safe output across all inputs
-- File cache — deduplication, hits, and invalidation
+- File cache — deduplication, staleness detection, and invalidation
+- Compaction-aware ref tracking (stale refs re-send content)
+- Delta encoding similarity bounds
+- SimHash hamming distance symmetry and bounds
 - Budget token count invariants
 - Pin/unpin compaction round-trips
 - CTX format round-trip serialization
 - Plugin priority ordering
-- Tool selection cardinality bounds
+- Tool selection cardinality bounds (TF-IDF + Jaccard)
 - Cross-tokenizer determinism
+- RLE and sliding window dedup bounds
+- Entropy truncation segment accounting
+- BPE merge savings non-negativity
+- Zipf's law vocabulary pruning preservation
 
 ## Contributing
 
