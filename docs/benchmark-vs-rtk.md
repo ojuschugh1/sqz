@@ -108,16 +108,20 @@ Aggregate of all scenarios above, plus 10 additional `ls` calls, 5 `grep` calls,
 - **Test runner formatting**: rtk's per-command formatters for `pytest`, `rspec`, `go test`, `vitest`, `playwright` are more mature. sqz has a generic test failure extractor that works across runners but isn't as polished per-runner.
 - **CLI breadth**: rtk has dedicated formatters for `gh pr`, `aws` subcommands, `prisma`, `ruff`, `golangci-lint`, `rubocop`. sqz covers the top 10 command families; rtk covers 30+.
 - **Community**: rtk has more users, more contributors, more battle-tested edge cases.
-- **Hook integrations**: rtk has tested, documented hook scripts for 10 AI tools. sqz has configs but fewer tool-specific hooks.
+- **Hook integrations**: rtk has tested, documented hook scripts for 10 AI tools. sqz has verified hook configs for Claude Code, Cursor, Windsurf, Gemini CLI, and Cline — covering the most popular tools.
 
 ## Where sqz Wins
 
-- **Session-level dedup**: The single biggest differentiator. rtk compresses each command output independently. sqz maintains a dedup cache across the entire session. Repeated file reads, identical API responses, and re-run commands return a 13-token reference instead of re-compressing. This is where the 46% gap over rtk comes from.
+- **Session-level dedup**: The single biggest differentiator. rtk compresses each command output independently. sqz maintains a compaction-aware dedup cache across the entire session. Repeated file reads, identical API responses, and re-run commands return a 13-token reference instead of re-compressing. A turn-counter heuristic detects when refs may have gone stale (content compacted out of the LLM's context) and automatically re-sends the full compressed content. This is where the 46% gap over rtk comes from.
+- **Delta encoding**: When a file changes by a few lines, sqz sends only the diff (SimHash fingerprinting for O(1) candidate detection, then LCS for the actual diff). rtk re-compresses the entire file.
 - **Predictive pre-caching**: When sqz reads a file, it parses imports and pre-caches dependencies. When the LLM reads those files next, it's an instant dedup hit. rtk has no concept of file relationships.
 - **Cross-command context refs**: When an error message references a file that's already in the dedup cache, sqz annotates it with `[in context]` so the LLM knows it doesn't need to re-read the file. rtk treats each command as isolated.
+- **16-stage compression pipeline**: Beyond the basic formatters, sqz applies RLE, sliding window dedup, entropy-weighted truncation, self-information token pruning, dictionary compression, tabular array encoding, word abbreviation, and n-gram abbreviation. rtk has per-command formatters but no general-purpose compression pipeline.
+- **TextRank extractive compression**: For long prose content, sqz uses graph-based sentence ranking (PageRank algorithm) to keep the most important sentences and drop the rest. rtk has no prose compression.
 - **Session continuity**: `sqz resume` generates a session guide from the previous session's state. When the LLM restarts, it gets a 200-token summary instead of losing all context. rtk is stateless across sessions.
 - **TOON encoding**: Lossless JSON compression format (4-30% reduction) with proven round-trip fidelity. rtk strips fields but doesn't have a compact encoding.
-- **Browser extension**: sqz has a WASM-powered Chrome extension for ChatGPT/Claude.ai/Gemini/Grok/Perplexity. rtk has nothing for browser-based AI.
+- **Compression quality metrics**: Shannon entropy-based efficiency measurement tells you how close sqz is to the theoretical compression optimum. rtk has no quality metrics.
+- **Browser extension**: sqz has a WASM-powered Chrome/Firefox extension for ChatGPT/Claude.ai/Gemini/Grok/Perplexity with content classification, null stripping, condense, and in-memory dedup. rtk has nothing for browser-based AI.
 - **IDE extensions**: sqz has VS Code and JetBrains plugins. rtk doesn't.
 - **Zero telemetry**: sqz collects nothing. rtk collects anonymous daily metrics by default.
 
@@ -127,7 +131,7 @@ rtk compresses commands. sqz compresses sessions.
 
 rtk treats each command output as an isolated compression problem. It's excellent at that — mature formatters, broad CLI coverage, fast.
 
-sqz maintains state across the entire session: what files have been read, what their dependencies are, what content is already in the context window. This session awareness is what produces the 46% improvement over rtk in realistic workflows where the same content appears multiple times.
+sqz maintains state across the entire session: what files have been read, what their dependencies are, what content is already in the context window, and whether refs have gone stale due to compaction. This session awareness — combined with a 16-stage compression pipeline, delta encoding, SimHash fingerprinting, TextRank extractive compression, and compaction-aware dedup — is what produces the 46% improvement over rtk in realistic workflows where the same content appears multiple times.
 
 For a single `git status` call, both tools produce similar output. Over a 30-minute coding session with iterative file reads, test-fix cycles, and repeated API calls, the gap compounds.
 

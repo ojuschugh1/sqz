@@ -6,12 +6,11 @@
 /// happened — it just sees smaller output.
 ///
 /// Supported hook formats:
-/// - Claude Code: ~/.claude/hooks/hooks.json (PreToolUse matcher)
-/// - Cursor: .cursor/hooks.json
-/// - Copilot: .github/copilot-hooks.json
-/// - Windsurf: .windsurfrules (PreToolUse)
-/// - Gemini CLI: .gemini/settings.json (BeforeTool)
-/// - Cline: .cline/hooks.json
+/// - Claude Code: .claude/settings.local.json (nested PreToolUse, matcher: "Bash")
+/// - Cursor: .cursor/hooks.json (nested PreToolUse, matcher: "Bash")
+/// - Windsurf: .windsurf/hooks.json (nested PreToolUse, matcher: "Bash")
+/// - Gemini CLI: .gemini/settings.json (nested BeforeTool, matcher: "run_shell_command")
+/// - Cline: .cline/hooks.json (nested PreToolUse, matcher: "Bash")
 
 use std::path::{Path, PathBuf};
 
@@ -128,20 +127,25 @@ pub fn process_hook(input: &str) -> Result<String> {
 /// Generate hook configuration files for all supported AI tools.
 pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
     vec![
-        // Claude Code — goes in .claude/settings.local.json (flat array format)
+        // Claude Code — goes in .claude/settings.local.json (nested format)
         ToolHookConfig {
             tool_name: "Claude Code".to_string(),
             config_path: PathBuf::from(".claude/settings.local.json"),
             config_content: format!(
                 r#"{{
-  "hooks": [
-    {{
-      "matcher": "Bash",
-      "event": "PreToolUse",
-      "type": "command",
-      "command": "{sqz_path} hook claude"
-    }}
-  ]
+  "hooks": {{
+    "PreToolUse": [
+      {{
+        "matcher": "Bash",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "{sqz_path} hook claude"
+          }}
+        ]
+      }}
+    ]
+  }}
 }}"#
             ),
             scope: HookScope::Project,
