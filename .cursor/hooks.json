@@ -1,9 +1,14 @@
 {
   "hooks": {
-    "preToolUse": [
+    "PreToolUse": [
       {
-        "matcher": "terminal",
-        "command": "/Users/ojchug/pc/cil/target/debug/sqz hook cursor"
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sqz hook cursor"
+          }
+        ]
       }
     ]
   }

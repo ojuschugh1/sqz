@@ -143,10 +143,15 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
             config_content: format!(
                 r#"{{
   "hooks": {{
-    "preToolUse": [
+    "PreToolUse": [
       {{
-        "matcher": "terminal",
-        "command": "{sqz_path} hook cursor"
+        "matcher": "Bash",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "{sqz_path} hook cursor"
+          }}
+        ]
       }}
     ]
   }}
@@ -161,10 +166,15 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
             config_content: format!(
                 r#"{{
   "hooks": {{
-    "preToolUse": [
+    "PreToolUse": [
       {{
-        "matcher": "terminal",
-        "command": "{sqz_path} hook windsurf"
+        "matcher": "Bash",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "{sqz_path} hook windsurf"
+          }}
+        ]
       }}
     ]
   }}
@@ -179,10 +189,15 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
             config_content: format!(
                 r#"{{
   "hooks": {{
-    "preToolUse": [
+    "PreToolUse": [
       {{
-        "matcher": "execute_command",
-        "command": "{sqz_path} hook cline"
+        "matcher": "Bash",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "{sqz_path} hook cline"
+          }}
+        ]
       }}
     ]
   }}
