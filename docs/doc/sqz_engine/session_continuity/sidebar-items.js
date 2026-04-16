@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SnapshotEventType"],"struct":["SessionContinuityManager","SessionGuide","Snapshot","SnapshotEvent"]};

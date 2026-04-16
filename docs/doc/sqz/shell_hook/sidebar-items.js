@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BASH_HOOK","FISH_HOOK","NUSHELL_HOOK","POWERSHELL_HOOK","ZSH_HOOK"],"enum":["ShellHook"],"fn":["home_dir","install_hook_to_file","powershell_profile_path","uninstall_hook_from_file"],"struct":["HookError"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["IndexResult","IndexedChunk","UrlIndexer"],"trait":["ContentFetcher"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["AstParser","ClassDefinition","CodeSummary","FunctionSignature","ImportDecl","TypeDeclaration"]};

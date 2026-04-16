@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ChangeKind"],"fn":["ast_diff","encode_delta"],"struct":["AstChange","AstDelta"]};

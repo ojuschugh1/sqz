@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PluginSource"],"struct":["PluginLoader","PluginManifest"],"trait":["SqzPlugin"]};

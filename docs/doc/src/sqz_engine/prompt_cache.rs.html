@@ -1,0 +1,423 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `sqz_engine/src/prompt_cache.rs`."><title>prompt_cache.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-b7b9f40b.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="sqz_engine" data-themes="" data-resource-suffix="" data-rustdoc-version="1.95.0-nightly (c7f5f3e0d 2026-02-07)" data-channel="nightly" data-search-js="search-fb33671b.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-f9617a14.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-12f88f4f.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">sqz_engine/</div>prompt_cache.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="kw">use </span><span class="kw">crate</span>::types::Provider;
+<a href=#2 id=2 data-nosnippet>2</a>
+<a href=#3 id=3 data-nosnippet>3</a><span class="doccomment">/// A detected prompt cache boundary in a message sequence.
+<a href=#4 id=4 data-nosnippet>4</a></span><span class="attr">#[derive(Debug, Clone, PartialEq)]
+<a href=#5 id=5 data-nosnippet>5</a></span><span class="kw">pub struct </span>CacheBoundary {
+<a href=#6 id=6 data-nosnippet>6</a>    <span class="doccomment">/// Byte offset in the concatenated content string where the boundary falls.
+<a href=#7 id=7 data-nosnippet>7</a>    /// Content before this offset is cached; content at/after is not.
+<a href=#8 id=8 data-nosnippet>8</a>    </span><span class="kw">pub </span>offset: usize,
+<a href=#9 id=9 data-nosnippet>9</a>    <span class="doccomment">/// The provider that owns this cache boundary.
+<a href=#10 id=10 data-nosnippet>10</a>    </span><span class="kw">pub </span>provider: Provider,
+<a href=#11 id=11 data-nosnippet>11</a>    <span class="doccomment">/// The cache discount fraction (0.9 for Anthropic, 0.5 for OpenAI).
+<a href=#12 id=12 data-nosnippet>12</a>    </span><span class="kw">pub </span>discount: f64,
+<a href=#13 id=13 data-nosnippet>13</a>}
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a><span class="doccomment">/// A single message in a conversation, used for cache boundary detection.
+<a href=#16 id=16 data-nosnippet>16</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#17 id=17 data-nosnippet>17</a></span><span class="kw">pub struct </span>Message {
+<a href=#18 id=18 data-nosnippet>18</a>    <span class="kw">pub </span>role: String,
+<a href=#19 id=19 data-nosnippet>19</a>    <span class="kw">pub </span>content: String,
+<a href=#20 id=20 data-nosnippet>20</a>    <span class="doccomment">/// Anthropic-style cache control marker.
+<a href=#21 id=21 data-nosnippet>21</a>    /// When `Some("ephemeral")`, this message has a cache_control marker.
+<a href=#22 id=22 data-nosnippet>22</a>    </span><span class="kw">pub </span>cache_control: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#23 id=23 data-nosnippet>23</a>}
+<a href=#24 id=24 data-nosnippet>24</a>
+<a href=#25 id=25 data-nosnippet>25</a><span class="doccomment">/// Detects prompt cache boundaries for Anthropic and OpenAI API formats.
+<a href=#26 id=26 data-nosnippet>26</a>///
+<a href=#27 id=27 data-nosnippet>27</a>/// - **Anthropic**: uses `cache_control: {"type": "ephemeral"}` markers on
+<a href=#28 id=28 data-nosnippet>28</a>///   individual messages. The boundary is placed after the last marked message.
+<a href=#29 id=29 data-nosnippet>29</a>/// - **OpenAI**: automatically caches the first 1024 tokens of a prompt.
+<a href=#30 id=30 data-nosnippet>30</a>///   Detected heuristically: if total content length &gt; 4096 chars (≈1024 tokens),
+<a href=#31 id=31 data-nosnippet>31</a>///   the boundary is at char position 4096.
+<a href=#32 id=32 data-nosnippet>32</a>/// - **Google**: no cache boundary concept; always returns `None`.
+<a href=#33 id=33 data-nosnippet>33</a></span><span class="kw">pub struct </span>PromptCacheDetector;
+<a href=#34 id=34 data-nosnippet>34</a>
+<a href=#35 id=35 data-nosnippet>35</a><span class="kw">impl </span>PromptCacheDetector {
+<a href=#36 id=36 data-nosnippet>36</a>    <span class="doccomment">/// Detect a cache boundary in the given message sequence for the specified
+<a href=#37 id=37 data-nosnippet>37</a>    /// provider. Returns `None` if no boundary is detected.
+<a href=#38 id=38 data-nosnippet>38</a>    </span><span class="kw">pub fn </span>detect_boundary(
+<a href=#39 id=39 data-nosnippet>39</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#40 id=40 data-nosnippet>40</a>        messages: <span class="kw-2">&amp;</span>[Message],
+<a href=#41 id=41 data-nosnippet>41</a>        provider: Provider,
+<a href=#42 id=42 data-nosnippet>42</a>    ) -&gt; <span class="prelude-ty">Option</span>&lt;CacheBoundary&gt; {
+<a href=#43 id=43 data-nosnippet>43</a>        <span class="kw">match </span>provider {
+<a href=#44 id=44 data-nosnippet>44</a>            Provider::Anthropic =&gt; <span class="self">self</span>.detect_anthropic(messages),
+<a href=#45 id=45 data-nosnippet>45</a>            Provider::OpenAI =&gt; <span class="self">self</span>.detect_openai(messages),
+<a href=#46 id=46 data-nosnippet>46</a>            Provider::Google =&gt; <span class="prelude-val">None</span>,
+<a href=#47 id=47 data-nosnippet>47</a>        }
+<a href=#48 id=48 data-nosnippet>48</a>    }
+<a href=#49 id=49 data-nosnippet>49</a>
+<a href=#50 id=50 data-nosnippet>50</a>    <span class="doccomment">/// Split `content` at the given boundary offset.
+<a href=#51 id=51 data-nosnippet>51</a>    ///
+<a href=#52 id=52 data-nosnippet>52</a>    /// Returns `(before, after)` where `before` is byte-identical to the
+<a href=#53 id=53 data-nosnippet>53</a>    /// original content up to `boundary.offset`, and `after` is the remainder.
+<a href=#54 id=54 data-nosnippet>54</a>    ///
+<a href=#55 id=55 data-nosnippet>55</a>    /// If `boundary.offset &gt;= content.len()`, `after` will be empty.
+<a href=#56 id=56 data-nosnippet>56</a>    </span><span class="kw">pub fn </span>split_at_boundary(<span class="kw-2">&amp;</span><span class="self">self</span>, content: <span class="kw-2">&amp;</span>str, boundary: <span class="kw-2">&amp;</span>CacheBoundary) -&gt; (String, String) {
+<a href=#57 id=57 data-nosnippet>57</a>        <span class="kw">let </span>offset = boundary.offset.min(content.len());
+<a href=#58 id=58 data-nosnippet>58</a>        <span class="kw">let </span>before = content[..offset].to_owned();
+<a href=#59 id=59 data-nosnippet>59</a>        <span class="kw">let </span>after = content[offset..].to_owned();
+<a href=#60 id=60 data-nosnippet>60</a>        (before, after)
+<a href=#61 id=61 data-nosnippet>61</a>    }
+<a href=#62 id=62 data-nosnippet>62</a>
+<a href=#63 id=63 data-nosnippet>63</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#64 id=64 data-nosnippet>64</a>    // Private helpers
+<a href=#65 id=65 data-nosnippet>65</a>    // -----------------------------------------------------------------------
+<a href=#66 id=66 data-nosnippet>66</a>
+<a href=#67 id=67 data-nosnippet>67</a>    </span><span class="kw">fn </span>detect_anthropic(<span class="kw-2">&amp;</span><span class="self">self</span>, messages: <span class="kw-2">&amp;</span>[Message]) -&gt; <span class="prelude-ty">Option</span>&lt;CacheBoundary&gt; {
+<a href=#68 id=68 data-nosnippet>68</a>        <span class="comment">// Find the last message that carries a cache_control marker.
+<a href=#69 id=69 data-nosnippet>69</a>        // The boundary offset is the byte position after that message's content.
+<a href=#70 id=70 data-nosnippet>70</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>offset: usize = <span class="number">0</span>;
+<a href=#71 id=71 data-nosnippet>71</a>        <span class="kw">let </span><span class="kw-2">mut </span>boundary_offset: <span class="prelude-ty">Option</span>&lt;usize&gt; = <span class="prelude-val">None</span>;
+<a href=#72 id=72 data-nosnippet>72</a>
+<a href=#73 id=73 data-nosnippet>73</a>        <span class="kw">for </span>msg <span class="kw">in </span>messages {
+<a href=#74 id=74 data-nosnippet>74</a>            offset += msg.content.len();
+<a href=#75 id=75 data-nosnippet>75</a>            <span class="kw">if </span>msg.cache_control.as_deref() == <span class="prelude-val">Some</span>(<span class="string">"ephemeral"</span>) {
+<a href=#76 id=76 data-nosnippet>76</a>                boundary_offset = <span class="prelude-val">Some</span>(offset);
+<a href=#77 id=77 data-nosnippet>77</a>            }
+<a href=#78 id=78 data-nosnippet>78</a>        }
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a>        boundary_offset.map(|off| CacheBoundary {
+<a href=#81 id=81 data-nosnippet>81</a>            offset: off,
+<a href=#82 id=82 data-nosnippet>82</a>            provider: Provider::Anthropic,
+<a href=#83 id=83 data-nosnippet>83</a>            discount: <span class="number">0.9</span>,
+<a href=#84 id=84 data-nosnippet>84</a>        })
+<a href=#85 id=85 data-nosnippet>85</a>    }
+<a href=#86 id=86 data-nosnippet>86</a>
+<a href=#87 id=87 data-nosnippet>87</a>    <span class="kw">fn </span>detect_openai(<span class="kw-2">&amp;</span><span class="self">self</span>, messages: <span class="kw-2">&amp;</span>[Message]) -&gt; <span class="prelude-ty">Option</span>&lt;CacheBoundary&gt; {
+<a href=#88 id=88 data-nosnippet>88</a>        <span class="comment">// OpenAI automatically caches the first 1024 tokens.
+<a href=#89 id=89 data-nosnippet>89</a>        // Heuristic: if total content length &gt; 4096 chars, the boundary is at
+<a href=#90 id=90 data-nosnippet>90</a>        // char position 4096 (≈1024 tokens at ~4 chars/token).
+<a href=#91 id=91 data-nosnippet>91</a>        </span><span class="kw">const </span>OPENAI_CACHE_CHAR_THRESHOLD: usize = <span class="number">4096</span>;
+<a href=#92 id=92 data-nosnippet>92</a>
+<a href=#93 id=93 data-nosnippet>93</a>        <span class="kw">let </span>total_len: usize = messages.iter().map(|m| m.content.len()).sum();
+<a href=#94 id=94 data-nosnippet>94</a>        <span class="kw">if </span>total_len &gt; OPENAI_CACHE_CHAR_THRESHOLD {
+<a href=#95 id=95 data-nosnippet>95</a>            <span class="prelude-val">Some</span>(CacheBoundary {
+<a href=#96 id=96 data-nosnippet>96</a>                offset: OPENAI_CACHE_CHAR_THRESHOLD,
+<a href=#97 id=97 data-nosnippet>97</a>                provider: Provider::OpenAI,
+<a href=#98 id=98 data-nosnippet>98</a>                discount: <span class="number">0.5</span>,
+<a href=#99 id=99 data-nosnippet>99</a>            })
+<a href=#100 id=100 data-nosnippet>100</a>        } <span class="kw">else </span>{
+<a href=#101 id=101 data-nosnippet>101</a>            <span class="prelude-val">None
+<a href=#102 id=102 data-nosnippet>102</a>        </span>}
+<a href=#103 id=103 data-nosnippet>103</a>    }
+<a href=#104 id=104 data-nosnippet>104</a>}
+<a href=#105 id=105 data-nosnippet>105</a>
+<a href=#106 id=106 data-nosnippet>106</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#107 id=107 data-nosnippet>107</a>// Tests
+<a href=#108 id=108 data-nosnippet>108</a>// ---------------------------------------------------------------------------
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a></span><span class="attr">#[cfg(test)]
+<a href=#111 id=111 data-nosnippet>111</a></span><span class="kw">mod </span>tests {
+<a href=#112 id=112 data-nosnippet>112</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#113 id=113 data-nosnippet>113</a>
+<a href=#114 id=114 data-nosnippet>114</a>    <span class="kw">fn </span>msg(role: <span class="kw-2">&amp;</span>str, content: <span class="kw-2">&amp;</span>str) -&gt; Message {
+<a href=#115 id=115 data-nosnippet>115</a>        Message {
+<a href=#116 id=116 data-nosnippet>116</a>            role: role.to_owned(),
+<a href=#117 id=117 data-nosnippet>117</a>            content: content.to_owned(),
+<a href=#118 id=118 data-nosnippet>118</a>            cache_control: <span class="prelude-val">None</span>,
+<a href=#119 id=119 data-nosnippet>119</a>        }
+<a href=#120 id=120 data-nosnippet>120</a>    }
+<a href=#121 id=121 data-nosnippet>121</a>
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="kw">fn </span>cached_msg(role: <span class="kw-2">&amp;</span>str, content: <span class="kw-2">&amp;</span>str) -&gt; Message {
+<a href=#123 id=123 data-nosnippet>123</a>        Message {
+<a href=#124 id=124 data-nosnippet>124</a>            role: role.to_owned(),
+<a href=#125 id=125 data-nosnippet>125</a>            content: content.to_owned(),
+<a href=#126 id=126 data-nosnippet>126</a>            cache_control: <span class="prelude-val">Some</span>(<span class="string">"ephemeral"</span>.to_owned()),
+<a href=#127 id=127 data-nosnippet>127</a>        }
+<a href=#128 id=128 data-nosnippet>128</a>    }
+<a href=#129 id=129 data-nosnippet>129</a>
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#131 id=131 data-nosnippet>131</a>    // Anthropic tests
+<a href=#132 id=132 data-nosnippet>132</a>    // -----------------------------------------------------------------------
+<a href=#133 id=133 data-nosnippet>133</a>
+<a href=#134 id=134 data-nosnippet>134</a>    </span><span class="attr">#[test]
+<a href=#135 id=135 data-nosnippet>135</a>    </span><span class="kw">fn </span>anthropic_no_cache_control_returns_none() {
+<a href=#136 id=136 data-nosnippet>136</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#137 id=137 data-nosnippet>137</a>        <span class="kw">let </span>messages = <span class="macro">vec!</span>[msg(<span class="string">"user"</span>, <span class="string">"hello"</span>), msg(<span class="string">"assistant"</span>, <span class="string">"world"</span>)];
+<a href=#138 id=138 data-nosnippet>138</a>        <span class="macro">assert!</span>(detector.detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::Anthropic).is_none());
+<a href=#139 id=139 data-nosnippet>139</a>    }
+<a href=#140 id=140 data-nosnippet>140</a>
+<a href=#141 id=141 data-nosnippet>141</a>    <span class="attr">#[test]
+<a href=#142 id=142 data-nosnippet>142</a>    </span><span class="kw">fn </span>anthropic_single_cached_message() {
+<a href=#143 id=143 data-nosnippet>143</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#144 id=144 data-nosnippet>144</a>        <span class="kw">let </span>messages = <span class="macro">vec!</span>[cached_msg(<span class="string">"user"</span>, <span class="string">"hello world"</span>)];
+<a href=#145 id=145 data-nosnippet>145</a>        <span class="kw">let </span>boundary = detector
+<a href=#146 id=146 data-nosnippet>146</a>            .detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::Anthropic)
+<a href=#147 id=147 data-nosnippet>147</a>            .unwrap();
+<a href=#148 id=148 data-nosnippet>148</a>        <span class="macro">assert_eq!</span>(boundary.offset, <span class="string">"hello world"</span>.len());
+<a href=#149 id=149 data-nosnippet>149</a>        <span class="macro">assert_eq!</span>(boundary.discount, <span class="number">0.9</span>);
+<a href=#150 id=150 data-nosnippet>150</a>        <span class="macro">assert_eq!</span>(boundary.provider, Provider::Anthropic);
+<a href=#151 id=151 data-nosnippet>151</a>    }
+<a href=#152 id=152 data-nosnippet>152</a>
+<a href=#153 id=153 data-nosnippet>153</a>    <span class="attr">#[test]
+<a href=#154 id=154 data-nosnippet>154</a>    </span><span class="kw">fn </span>anthropic_boundary_after_last_cached_message() {
+<a href=#155 id=155 data-nosnippet>155</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#156 id=156 data-nosnippet>156</a>        <span class="comment">// Two cached messages; boundary should be after the second one.
+<a href=#157 id=157 data-nosnippet>157</a>        </span><span class="kw">let </span>messages = <span class="macro">vec!</span>[
+<a href=#158 id=158 data-nosnippet>158</a>            cached_msg(<span class="string">"user"</span>, <span class="string">"first"</span>),   <span class="comment">// offset 5
+<a href=#159 id=159 data-nosnippet>159</a>            </span>msg(<span class="string">"assistant"</span>, <span class="string">"middle"</span>),    <span class="comment">// offset 5+6=11
+<a href=#160 id=160 data-nosnippet>160</a>            </span>cached_msg(<span class="string">"user"</span>, <span class="string">"second"</span>),  <span class="comment">// offset 11+6=17
+<a href=#161 id=161 data-nosnippet>161</a>            </span>msg(<span class="string">"assistant"</span>, <span class="string">"tail"</span>),      <span class="comment">// offset 17+4=21
+<a href=#162 id=162 data-nosnippet>162</a>        </span>];
+<a href=#163 id=163 data-nosnippet>163</a>        <span class="kw">let </span>boundary = detector
+<a href=#164 id=164 data-nosnippet>164</a>            .detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::Anthropic)
+<a href=#165 id=165 data-nosnippet>165</a>            .unwrap();
+<a href=#166 id=166 data-nosnippet>166</a>        <span class="comment">// "first" (5) + "middle" (6) + "second" (6) = 17
+<a href=#167 id=167 data-nosnippet>167</a>        </span><span class="macro">assert_eq!</span>(boundary.offset, <span class="number">17</span>);
+<a href=#168 id=168 data-nosnippet>168</a>    }
+<a href=#169 id=169 data-nosnippet>169</a>
+<a href=#170 id=170 data-nosnippet>170</a>    <span class="attr">#[test]
+<a href=#171 id=171 data-nosnippet>171</a>    </span><span class="kw">fn </span>anthropic_only_first_message_cached() {
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#173 id=173 data-nosnippet>173</a>        <span class="kw">let </span>messages = <span class="macro">vec!</span>[
+<a href=#174 id=174 data-nosnippet>174</a>            cached_msg(<span class="string">"system"</span>, <span class="string">"sys"</span>),  <span class="comment">// offset 3
+<a href=#175 id=175 data-nosnippet>175</a>            </span>msg(<span class="string">"user"</span>, <span class="string">"query"</span>),         <span class="comment">// offset 3+5=8
+<a href=#176 id=176 data-nosnippet>176</a>        </span>];
+<a href=#177 id=177 data-nosnippet>177</a>        <span class="kw">let </span>boundary = detector
+<a href=#178 id=178 data-nosnippet>178</a>            .detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::Anthropic)
+<a href=#179 id=179 data-nosnippet>179</a>            .unwrap();
+<a href=#180 id=180 data-nosnippet>180</a>        <span class="macro">assert_eq!</span>(boundary.offset, <span class="number">3</span>);
+<a href=#181 id=181 data-nosnippet>181</a>    }
+<a href=#182 id=182 data-nosnippet>182</a>
+<a href=#183 id=183 data-nosnippet>183</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#184 id=184 data-nosnippet>184</a>    // OpenAI tests
+<a href=#185 id=185 data-nosnippet>185</a>    // -----------------------------------------------------------------------
+<a href=#186 id=186 data-nosnippet>186</a>
+<a href=#187 id=187 data-nosnippet>187</a>    </span><span class="attr">#[test]
+<a href=#188 id=188 data-nosnippet>188</a>    </span><span class="kw">fn </span>openai_short_content_returns_none() {
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#190 id=190 data-nosnippet>190</a>        <span class="kw">let </span>messages = <span class="macro">vec!</span>[msg(<span class="string">"user"</span>, <span class="string">"short"</span>)];
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="macro">assert!</span>(detector.detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::OpenAI).is_none());
+<a href=#192 id=192 data-nosnippet>192</a>    }
+<a href=#193 id=193 data-nosnippet>193</a>
+<a href=#194 id=194 data-nosnippet>194</a>    <span class="attr">#[test]
+<a href=#195 id=195 data-nosnippet>195</a>    </span><span class="kw">fn </span>openai_long_content_returns_boundary_at_4096() {
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="kw">let </span>long_content = <span class="string">"x"</span>.repeat(<span class="number">5000</span>);
+<a href=#198 id=198 data-nosnippet>198</a>        <span class="kw">let </span>messages = <span class="macro">vec!</span>[msg(<span class="string">"user"</span>, <span class="kw-2">&amp;</span>long_content)];
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="kw">let </span>boundary = detector
+<a href=#200 id=200 data-nosnippet>200</a>            .detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::OpenAI)
+<a href=#201 id=201 data-nosnippet>201</a>            .unwrap();
+<a href=#202 id=202 data-nosnippet>202</a>        <span class="macro">assert_eq!</span>(boundary.offset, <span class="number">4096</span>);
+<a href=#203 id=203 data-nosnippet>203</a>        <span class="macro">assert_eq!</span>(boundary.discount, <span class="number">0.5</span>);
+<a href=#204 id=204 data-nosnippet>204</a>        <span class="macro">assert_eq!</span>(boundary.provider, Provider::OpenAI);
+<a href=#205 id=205 data-nosnippet>205</a>    }
+<a href=#206 id=206 data-nosnippet>206</a>
+<a href=#207 id=207 data-nosnippet>207</a>    <span class="attr">#[test]
+<a href=#208 id=208 data-nosnippet>208</a>    </span><span class="kw">fn </span>openai_exactly_at_threshold_returns_none() {
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#210 id=210 data-nosnippet>210</a>        <span class="kw">let </span>content = <span class="string">"x"</span>.repeat(<span class="number">4096</span>);
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="kw">let </span>messages = <span class="macro">vec!</span>[msg(<span class="string">"user"</span>, <span class="kw-2">&amp;</span>content)];
+<a href=#212 id=212 data-nosnippet>212</a>        <span class="comment">// total_len == 4096, not &gt; 4096, so no boundary
+<a href=#213 id=213 data-nosnippet>213</a>        </span><span class="macro">assert!</span>(detector.detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::OpenAI).is_none());
+<a href=#214 id=214 data-nosnippet>214</a>    }
+<a href=#215 id=215 data-nosnippet>215</a>
+<a href=#216 id=216 data-nosnippet>216</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#217 id=217 data-nosnippet>217</a>    // Google tests
+<a href=#218 id=218 data-nosnippet>218</a>    // -----------------------------------------------------------------------
+<a href=#219 id=219 data-nosnippet>219</a>
+<a href=#220 id=220 data-nosnippet>220</a>    </span><span class="attr">#[test]
+<a href=#221 id=221 data-nosnippet>221</a>    </span><span class="kw">fn </span>google_always_returns_none() {
+<a href=#222 id=222 data-nosnippet>222</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#223 id=223 data-nosnippet>223</a>        <span class="kw">let </span>messages = <span class="macro">vec!</span>[cached_msg(<span class="string">"user"</span>, <span class="string">"x"</span>.repeat(<span class="number">10000</span>).as_str())];
+<a href=#224 id=224 data-nosnippet>224</a>        <span class="macro">assert!</span>(detector.detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::Google).is_none());
+<a href=#225 id=225 data-nosnippet>225</a>    }
+<a href=#226 id=226 data-nosnippet>226</a>
+<a href=#227 id=227 data-nosnippet>227</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#228 id=228 data-nosnippet>228</a>    // split_at_boundary tests
+<a href=#229 id=229 data-nosnippet>229</a>    // -----------------------------------------------------------------------
+<a href=#230 id=230 data-nosnippet>230</a>
+<a href=#231 id=231 data-nosnippet>231</a>    </span><span class="attr">#[test]
+<a href=#232 id=232 data-nosnippet>232</a>    </span><span class="kw">fn </span>split_at_boundary_basic() {
+<a href=#233 id=233 data-nosnippet>233</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#234 id=234 data-nosnippet>234</a>        <span class="kw">let </span>content = <span class="string">"hello world"</span>;
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="kw">let </span>boundary = CacheBoundary {
+<a href=#236 id=236 data-nosnippet>236</a>            offset: <span class="number">5</span>,
+<a href=#237 id=237 data-nosnippet>237</a>            provider: Provider::Anthropic,
+<a href=#238 id=238 data-nosnippet>238</a>            discount: <span class="number">0.9</span>,
+<a href=#239 id=239 data-nosnippet>239</a>        };
+<a href=#240 id=240 data-nosnippet>240</a>        <span class="kw">let </span>(before, after) = detector.split_at_boundary(content, <span class="kw-2">&amp;</span>boundary);
+<a href=#241 id=241 data-nosnippet>241</a>        <span class="macro">assert_eq!</span>(before, <span class="string">"hello"</span>);
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="macro">assert_eq!</span>(after, <span class="string">" world"</span>);
+<a href=#243 id=243 data-nosnippet>243</a>    }
+<a href=#244 id=244 data-nosnippet>244</a>
+<a href=#245 id=245 data-nosnippet>245</a>    <span class="attr">#[test]
+<a href=#246 id=246 data-nosnippet>246</a>    </span><span class="kw">fn </span>split_at_boundary_offset_zero() {
+<a href=#247 id=247 data-nosnippet>247</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#248 id=248 data-nosnippet>248</a>        <span class="kw">let </span>content = <span class="string">"hello"</span>;
+<a href=#249 id=249 data-nosnippet>249</a>        <span class="kw">let </span>boundary = CacheBoundary {
+<a href=#250 id=250 data-nosnippet>250</a>            offset: <span class="number">0</span>,
+<a href=#251 id=251 data-nosnippet>251</a>            provider: Provider::Anthropic,
+<a href=#252 id=252 data-nosnippet>252</a>            discount: <span class="number">0.9</span>,
+<a href=#253 id=253 data-nosnippet>253</a>        };
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="kw">let </span>(before, after) = detector.split_at_boundary(content, <span class="kw-2">&amp;</span>boundary);
+<a href=#255 id=255 data-nosnippet>255</a>        <span class="macro">assert_eq!</span>(before, <span class="string">""</span>);
+<a href=#256 id=256 data-nosnippet>256</a>        <span class="macro">assert_eq!</span>(after, <span class="string">"hello"</span>);
+<a href=#257 id=257 data-nosnippet>257</a>    }
+<a href=#258 id=258 data-nosnippet>258</a>
+<a href=#259 id=259 data-nosnippet>259</a>    <span class="attr">#[test]
+<a href=#260 id=260 data-nosnippet>260</a>    </span><span class="kw">fn </span>split_at_boundary_offset_beyond_end() {
+<a href=#261 id=261 data-nosnippet>261</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#262 id=262 data-nosnippet>262</a>        <span class="kw">let </span>content = <span class="string">"hello"</span>;
+<a href=#263 id=263 data-nosnippet>263</a>        <span class="kw">let </span>boundary = CacheBoundary {
+<a href=#264 id=264 data-nosnippet>264</a>            offset: <span class="number">100</span>,
+<a href=#265 id=265 data-nosnippet>265</a>            provider: Provider::Anthropic,
+<a href=#266 id=266 data-nosnippet>266</a>            discount: <span class="number">0.9</span>,
+<a href=#267 id=267 data-nosnippet>267</a>        };
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="kw">let </span>(before, after) = detector.split_at_boundary(content, <span class="kw-2">&amp;</span>boundary);
+<a href=#269 id=269 data-nosnippet>269</a>        <span class="macro">assert_eq!</span>(before, <span class="string">"hello"</span>);
+<a href=#270 id=270 data-nosnippet>270</a>        <span class="macro">assert_eq!</span>(after, <span class="string">""</span>);
+<a href=#271 id=271 data-nosnippet>271</a>    }
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a>    <span class="attr">#[test]
+<a href=#274 id=274 data-nosnippet>274</a>    </span><span class="kw">fn </span>split_before_is_byte_identical() {
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="kw">let </span>content = <span class="string">"abcdefghij"</span>;
+<a href=#277 id=277 data-nosnippet>277</a>        <span class="kw">let </span>boundary = CacheBoundary {
+<a href=#278 id=278 data-nosnippet>278</a>            offset: <span class="number">5</span>,
+<a href=#279 id=279 data-nosnippet>279</a>            provider: Provider::OpenAI,
+<a href=#280 id=280 data-nosnippet>280</a>            discount: <span class="number">0.5</span>,
+<a href=#281 id=281 data-nosnippet>281</a>        };
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw">let </span>(before, <span class="kw">_</span>) = detector.split_at_boundary(content, <span class="kw-2">&amp;</span>boundary);
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="comment">// before must be byte-identical to the original prefix
+<a href=#284 id=284 data-nosnippet>284</a>        </span><span class="macro">assert_eq!</span>(before.as_bytes(), <span class="kw-2">&amp;</span>content.as_bytes()[..<span class="number">5</span>]);
+<a href=#285 id=285 data-nosnippet>285</a>    }
+<a href=#286 id=286 data-nosnippet>286</a>
+<a href=#287 id=287 data-nosnippet>287</a>    <span class="comment">// -----------------------------------------------------------------------
+<a href=#288 id=288 data-nosnippet>288</a>    // Property tests
+<a href=#289 id=289 data-nosnippet>289</a>    // ---------------------------------------------------------------------------
+<a href=#290 id=290 data-nosnippet>290</a>
+<a href=#291 id=291 data-nosnippet>291</a>    </span><span class="kw">use </span>proptest::prelude::<span class="kw-2">*</span>;
+<a href=#292 id=292 data-nosnippet>292</a>
+<a href=#293 id=293 data-nosnippet>293</a>    <span class="doccomment">/// Strategy: generate a list of messages where at least one has a
+<a href=#294 id=294 data-nosnippet>294</a>    /// cache_control marker (Anthropic format).
+<a href=#295 id=295 data-nosnippet>295</a>    </span><span class="kw">fn </span>anthropic_messages_with_boundary() -&gt; <span class="kw">impl </span>Strategy&lt;Value = Vec&lt;Message&gt;&gt; {
+<a href=#296 id=296 data-nosnippet>296</a>        <span class="comment">// Generate 1-8 messages; at least one will be marked as cached.
+<a href=#297 id=297 data-nosnippet>297</a>        </span>(<span class="number">1usize</span>..=<span class="number">8usize</span>).prop_flat_map(|n| {
+<a href=#298 id=298 data-nosnippet>298</a>            <span class="comment">// For each message, generate content and whether it's cached.
+<a href=#299 id=299 data-nosnippet>299</a>            </span><span class="kw">let </span>msg_strategy = (
+<a href=#300 id=300 data-nosnippet>300</a>                <span class="macro">prop_oneof!</span>[Just(<span class="string">"user"</span>), Just(<span class="string">"assistant"</span>), Just(<span class="string">"system"</span>)],
+<a href=#301 id=301 data-nosnippet>301</a>                <span class="string">"[a-z]{1,50}"</span>,
+<a href=#302 id=302 data-nosnippet>302</a>                any::&lt;bool&gt;(),
+<a href=#303 id=303 data-nosnippet>303</a>            );
+<a href=#304 id=304 data-nosnippet>304</a>            prop::collection::vec(msg_strategy, n).prop_filter(
+<a href=#305 id=305 data-nosnippet>305</a>                <span class="string">"at least one cached message"</span>,
+<a href=#306 id=306 data-nosnippet>306</a>                |msgs| msgs.iter().any(|(<span class="kw">_</span>, <span class="kw">_</span>, cached)| <span class="kw-2">*</span>cached),
+<a href=#307 id=307 data-nosnippet>307</a>            )
+<a href=#308 id=308 data-nosnippet>308</a>        })
+<a href=#309 id=309 data-nosnippet>309</a>        .prop_map(|msgs| {
+<a href=#310 id=310 data-nosnippet>310</a>            msgs.into_iter()
+<a href=#311 id=311 data-nosnippet>311</a>                .map(|(role, content, cached)| Message {
+<a href=#312 id=312 data-nosnippet>312</a>                    role: role.to_owned(),
+<a href=#313 id=313 data-nosnippet>313</a>                    content,
+<a href=#314 id=314 data-nosnippet>314</a>                    cache_control: <span class="kw">if </span>cached {
+<a href=#315 id=315 data-nosnippet>315</a>                        <span class="prelude-val">Some</span>(<span class="string">"ephemeral"</span>.to_owned())
+<a href=#316 id=316 data-nosnippet>316</a>                    } <span class="kw">else </span>{
+<a href=#317 id=317 data-nosnippet>317</a>                        <span class="prelude-val">None
+<a href=#318 id=318 data-nosnippet>318</a>                    </span>},
+<a href=#319 id=319 data-nosnippet>319</a>                })
+<a href=#320 id=320 data-nosnippet>320</a>                .collect()
+<a href=#321 id=321 data-nosnippet>321</a>        })
+<a href=#322 id=322 data-nosnippet>322</a>    }
+<a href=#323 id=323 data-nosnippet>323</a>
+<a href=#324 id=324 data-nosnippet>324</a>    <span class="macro">proptest!</span> {
+<a href=#325 id=325 data-nosnippet>325</a>        <span class="doccomment">/// **Validates: Requirements 4.1, 4.2**
+<a href=#326 id=326 data-nosnippet>326</a>        ///
+<a href=#327 id=327 data-nosnippet>327</a>        /// Property 3: Prompt cache boundary preservation.
+<a href=#328 id=328 data-nosnippet>328</a>        ///
+<a href=#329 id=329 data-nosnippet>329</a>        /// For any message sequence containing a prompt cache boundary marker
+<a href=#330 id=330 data-nosnippet>330</a>        /// (Anthropic or OpenAI format), the Prompt_Cache_Detector SHALL
+<a href=#331 id=331 data-nosnippet>331</a>        /// identify the boundary, and content preceding the boundary SHALL be
+<a href=#332 id=332 data-nosnippet>332</a>        /// byte-identical to the original.
+<a href=#333 id=333 data-nosnippet>333</a>        </span><span class="attr">#[test]
+<a href=#334 id=334 data-nosnippet>334</a>        </span><span class="kw">fn </span>prop_prompt_cache_boundary_preservation(
+<a href=#335 id=335 data-nosnippet>335</a>            messages <span class="kw">in </span>anthropic_messages_with_boundary(),
+<a href=#336 id=336 data-nosnippet>336</a>        ) {
+<a href=#337 id=337 data-nosnippet>337</a>            <span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#338 id=338 data-nosnippet>338</a>
+<a href=#339 id=339 data-nosnippet>339</a>            <span class="comment">// 1. Boundary must be detected (at least one cached message exists).
+<a href=#340 id=340 data-nosnippet>340</a>            </span><span class="kw">let </span>boundary = detector.detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::Anthropic);
+<a href=#341 id=341 data-nosnippet>341</a>            <span class="macro">prop_assert!</span>(
+<a href=#342 id=342 data-nosnippet>342</a>                boundary.is_some(),
+<a href=#343 id=343 data-nosnippet>343</a>                <span class="string">"expected boundary to be detected for messages with cache_control markers"
+<a href=#344 id=344 data-nosnippet>344</a>            </span>);
+<a href=#345 id=345 data-nosnippet>345</a>            <span class="kw">let </span>boundary = boundary.unwrap();
+<a href=#346 id=346 data-nosnippet>346</a>
+<a href=#347 id=347 data-nosnippet>347</a>            <span class="comment">// 2. Discount must be 0.9 for Anthropic.
+<a href=#348 id=348 data-nosnippet>348</a>            </span><span class="macro">prop_assert_eq!</span>(boundary.discount, <span class="number">0.9</span>);
+<a href=#349 id=349 data-nosnippet>349</a>
+<a href=#350 id=350 data-nosnippet>350</a>            <span class="comment">// 3. Content before the boundary must be byte-identical to the original.
+<a href=#351 id=351 data-nosnippet>351</a>            //    Concatenate all message contents to form the "full content".
+<a href=#352 id=352 data-nosnippet>352</a>            </span><span class="kw">let </span>full_content: String = messages.iter().map(|m| m.content.as_str()).collect();
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="kw">let </span>(before, _after) = detector.split_at_boundary(<span class="kw-2">&amp;</span>full_content, <span class="kw-2">&amp;</span>boundary);
+<a href=#354 id=354 data-nosnippet>354</a>
+<a href=#355 id=355 data-nosnippet>355</a>            <span class="kw">let </span>expected_prefix = <span class="kw-2">&amp;</span>full_content[..boundary.offset.min(full_content.len())];
+<a href=#356 id=356 data-nosnippet>356</a>            <span class="macro">prop_assert_eq!</span>(
+<a href=#357 id=357 data-nosnippet>357</a>                before.as_bytes(),
+<a href=#358 id=358 data-nosnippet>358</a>                expected_prefix.as_bytes(),
+<a href=#359 id=359 data-nosnippet>359</a>                <span class="string">"content before boundary must be byte-identical to original prefix"
+<a href=#360 id=360 data-nosnippet>360</a>            </span>);
+<a href=#361 id=361 data-nosnippet>361</a>
+<a href=#362 id=362 data-nosnippet>362</a>            <span class="comment">// 4. The boundary offset must be at or after the last cached message's
+<a href=#363 id=363 data-nosnippet>363</a>            //    content end, and must not exceed the total content length.
+<a href=#364 id=364 data-nosnippet>364</a>            </span><span class="macro">prop_assert!</span>(
+<a href=#365 id=365 data-nosnippet>365</a>                boundary.offset &lt;= full_content.len(),
+<a href=#366 id=366 data-nosnippet>366</a>                <span class="string">"boundary offset {} exceeds content length {}"</span>,
+<a href=#367 id=367 data-nosnippet>367</a>                boundary.offset,
+<a href=#368 id=368 data-nosnippet>368</a>                full_content.len()
+<a href=#369 id=369 data-nosnippet>369</a>            );
+<a href=#370 id=370 data-nosnippet>370</a>
+<a href=#371 id=371 data-nosnippet>371</a>            <span class="comment">// 5. Verify the boundary is placed after the last cached message.
+<a href=#372 id=372 data-nosnippet>372</a>            </span><span class="kw">let </span><span class="kw-2">mut </span>cumulative = <span class="number">0usize</span>;
+<a href=#373 id=373 data-nosnippet>373</a>            <span class="kw">let </span><span class="kw-2">mut </span>last_cached_end = <span class="number">0usize</span>;
+<a href=#374 id=374 data-nosnippet>374</a>            <span class="kw">for </span>msg <span class="kw">in </span><span class="kw-2">&amp;</span>messages {
+<a href=#375 id=375 data-nosnippet>375</a>                cumulative += msg.content.len();
+<a href=#376 id=376 data-nosnippet>376</a>                <span class="kw">if </span>msg.cache_control.as_deref() == <span class="prelude-val">Some</span>(<span class="string">"ephemeral"</span>) {
+<a href=#377 id=377 data-nosnippet>377</a>                    last_cached_end = cumulative;
+<a href=#378 id=378 data-nosnippet>378</a>                }
+<a href=#379 id=379 data-nosnippet>379</a>            }
+<a href=#380 id=380 data-nosnippet>380</a>            <span class="macro">prop_assert_eq!</span>(
+<a href=#381 id=381 data-nosnippet>381</a>                boundary.offset,
+<a href=#382 id=382 data-nosnippet>382</a>                last_cached_end,
+<a href=#383 id=383 data-nosnippet>383</a>                <span class="string">"boundary offset should be after the last cached message"
+<a href=#384 id=384 data-nosnippet>384</a>            </span>);
+<a href=#385 id=385 data-nosnippet>385</a>        }
+<a href=#386 id=386 data-nosnippet>386</a>    }
+<a href=#387 id=387 data-nosnippet>387</a>
+<a href=#388 id=388 data-nosnippet>388</a>    <span class="macro">proptest!</span> {
+<a href=#389 id=389 data-nosnippet>389</a>        <span class="doccomment">/// Property 3 (OpenAI variant): For any message sequence whose total
+<a href=#390 id=390 data-nosnippet>390</a>        /// content length exceeds 4096 chars, the detector SHALL identify a
+<a href=#391 id=391 data-nosnippet>391</a>        /// boundary at offset 4096, and content before that offset SHALL be
+<a href=#392 id=392 data-nosnippet>392</a>        /// byte-identical to the original.
+<a href=#393 id=393 data-nosnippet>393</a>        </span><span class="attr">#[test]
+<a href=#394 id=394 data-nosnippet>394</a>        </span><span class="kw">fn </span>prop_openai_cache_boundary_preservation(
+<a href=#395 id=395 data-nosnippet>395</a>            <span class="comment">// Generate content that is definitely &gt; 4096 chars total
+<a href=#396 id=396 data-nosnippet>396</a>            </span>extra <span class="kw">in </span><span class="number">1usize</span>..=<span class="number">1000usize</span>,
+<a href=#397 id=397 data-nosnippet>397</a>            content <span class="kw">in </span><span class="string">"[a-z]{4097,5000}"</span>,
+<a href=#398 id=398 data-nosnippet>398</a>        ) {
+<a href=#399 id=399 data-nosnippet>399</a>            <span class="kw">let _ </span>= extra; <span class="comment">// suppress unused warning
+<a href=#400 id=400 data-nosnippet>400</a>            </span><span class="kw">let </span>detector = PromptCacheDetector;
+<a href=#401 id=401 data-nosnippet>401</a>            <span class="kw">let </span>messages = <span class="macro">vec!</span>[Message {
+<a href=#402 id=402 data-nosnippet>402</a>                role: <span class="string">"user"</span>.to_owned(),
+<a href=#403 id=403 data-nosnippet>403</a>                content: content.clone(),
+<a href=#404 id=404 data-nosnippet>404</a>                cache_control: <span class="prelude-val">None</span>,
+<a href=#405 id=405 data-nosnippet>405</a>            }];
+<a href=#406 id=406 data-nosnippet>406</a>
+<a href=#407 id=407 data-nosnippet>407</a>            <span class="kw">let </span>boundary = detector.detect_boundary(<span class="kw-2">&amp;</span>messages, Provider::OpenAI);
+<a href=#408 id=408 data-nosnippet>408</a>            <span class="macro">prop_assert!</span>(boundary.is_some(), <span class="string">"expected OpenAI boundary for long content"</span>);
+<a href=#409 id=409 data-nosnippet>409</a>            <span class="kw">let </span>boundary = boundary.unwrap();
+<a href=#410 id=410 data-nosnippet>410</a>
+<a href=#411 id=411 data-nosnippet>411</a>            <span class="macro">prop_assert_eq!</span>(boundary.offset, <span class="number">4096</span>);
+<a href=#412 id=412 data-nosnippet>412</a>            <span class="macro">prop_assert_eq!</span>(boundary.discount, <span class="number">0.5</span>);
+<a href=#413 id=413 data-nosnippet>413</a>
+<a href=#414 id=414 data-nosnippet>414</a>            <span class="kw">let </span>(before, <span class="kw">_</span>) = detector.split_at_boundary(<span class="kw-2">&amp;</span>content, <span class="kw-2">&amp;</span>boundary);
+<a href=#415 id=415 data-nosnippet>415</a>            <span class="macro">prop_assert_eq!</span>(
+<a href=#416 id=416 data-nosnippet>416</a>                before.as_bytes(),
+<a href=#417 id=417 data-nosnippet>417</a>                <span class="kw-2">&amp;</span>content.as_bytes()[..<span class="number">4096</span>],
+<a href=#418 id=418 data-nosnippet>418</a>                <span class="string">"content before OpenAI boundary must be byte-identical"
+<a href=#419 id=419 data-nosnippet>419</a>            </span>);
+<a href=#420 id=420 data-nosnippet>420</a>        }
+<a href=#421 id=421 data-nosnippet>421</a>    }
+<a href=#422 id=422 data-nosnippet>422</a>}
+</code></pre></div></section></main></body></html>

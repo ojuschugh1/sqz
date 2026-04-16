@@ -1,0 +1,1008 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `sqz_engine/src/sandbox_executor.rs`."><title>sandbox_executor.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-b7b9f40b.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="sqz_engine" data-themes="" data-resource-suffix="" data-rustdoc-version="1.95.0-nightly (c7f5f3e0d 2026-02-07)" data-channel="nightly" data-search-js="search-fb33671b.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-f9617a14.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-12f88f4f.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">sqz_engine/</div>sandbox_executor.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="kw">use </span>std::collections::HashMap;
+<a href=#2 id=2 data-nosnippet>2</a><span class="kw">use </span>std::io::Write;
+<a href=#3 id=3 data-nosnippet>3</a><span class="kw">use </span>std::process::{Command, Stdio};
+<a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>std::time::Duration;
+<a href=#5 id=5 data-nosnippet>5</a>
+<a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span>rusqlite::{params, Connection};
+<a href=#7 id=7 data-nosnippet>7</a>
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span><span class="kw">crate</span>::error::{<span class="prelude-ty">Result</span>, SqzError};
+<a href=#9 id=9 data-nosnippet>9</a>
+<a href=#10 id=10 data-nosnippet>10</a><span class="doccomment">/// Environment variable names for credential passthrough.
+<a href=#11 id=11 data-nosnippet>11</a>/// These are inherited from the parent process so that sandbox code
+<a href=#12 id=12 data-nosnippet>12</a>/// can use authenticated CLIs (gh, aws, gcloud, kubectl, docker)
+<a href=#13 id=13 data-nosnippet>13</a>/// without exposing credentials to the conversation context.
+<a href=#14 id=14 data-nosnippet>14</a></span><span class="kw">const </span>CREDENTIAL_ENV_PREFIXES: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str] = <span class="kw-2">&amp;</span>[
+<a href=#15 id=15 data-nosnippet>15</a>    <span class="comment">// AWS
+<a href=#16 id=16 data-nosnippet>16</a>    </span><span class="string">"AWS_"</span>,
+<a href=#17 id=17 data-nosnippet>17</a>    <span class="comment">// Google Cloud
+<a href=#18 id=18 data-nosnippet>18</a>    </span><span class="string">"GCLOUD_"</span>,
+<a href=#19 id=19 data-nosnippet>19</a>    <span class="string">"GOOGLE_"</span>,
+<a href=#20 id=20 data-nosnippet>20</a>    <span class="string">"CLOUDSDK_"</span>,
+<a href=#21 id=21 data-nosnippet>21</a>    <span class="comment">// GitHub CLI
+<a href=#22 id=22 data-nosnippet>22</a>    </span><span class="string">"GH_"</span>,
+<a href=#23 id=23 data-nosnippet>23</a>    <span class="string">"GITHUB_"</span>,
+<a href=#24 id=24 data-nosnippet>24</a>    <span class="comment">// Kubernetes
+<a href=#25 id=25 data-nosnippet>25</a>    </span><span class="string">"KUBECONFIG"</span>,
+<a href=#26 id=26 data-nosnippet>26</a>    <span class="comment">// Docker
+<a href=#27 id=27 data-nosnippet>27</a>    </span><span class="string">"DOCKER_"</span>,
+<a href=#28 id=28 data-nosnippet>28</a>    <span class="comment">// General
+<a href=#29 id=29 data-nosnippet>29</a>    </span><span class="string">"HOME"</span>,
+<a href=#30 id=30 data-nosnippet>30</a>    <span class="string">"PATH"</span>,
+<a href=#31 id=31 data-nosnippet>31</a>    <span class="string">"USER"</span>,
+<a href=#32 id=32 data-nosnippet>32</a>    <span class="string">"LANG"</span>,
+<a href=#33 id=33 data-nosnippet>33</a>    <span class="string">"TERM"</span>,
+<a href=#34 id=34 data-nosnippet>34</a>    <span class="string">"SHELL"</span>,
+<a href=#35 id=35 data-nosnippet>35</a>    <span class="string">"TMPDIR"</span>,
+<a href=#36 id=36 data-nosnippet>36</a>    <span class="string">"XDG_"</span>,
+<a href=#37 id=37 data-nosnippet>37</a>];
+<a href=#38 id=38 data-nosnippet>38</a>
+<a href=#39 id=39 data-nosnippet>39</a><span class="doccomment">/// A detected runtime with its binary path.
+<a href=#40 id=40 data-nosnippet>40</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#41 id=41 data-nosnippet>41</a></span><span class="kw">pub struct </span>RuntimeInfo {
+<a href=#42 id=42 data-nosnippet>42</a>    <span class="kw">pub </span>name: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#43 id=43 data-nosnippet>43</a>    <span class="kw">pub </span>binary: String,
+<a href=#44 id=44 data-nosnippet>44</a>    <span class="kw">pub </span>language: <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str,
+<a href=#45 id=45 data-nosnippet>45</a>}
+<a href=#46 id=46 data-nosnippet>46</a>
+<a href=#47 id=47 data-nosnippet>47</a><span class="doccomment">/// Output captured from a single sandbox subprocess run.
+<a href=#48 id=48 data-nosnippet>48</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#49 id=49 data-nosnippet>49</a></span><span class="kw">pub struct </span>SandboxResult {
+<a href=#50 id=50 data-nosnippet>50</a>    <span class="doccomment">/// Text written to stdout — the only data that enters the context window.
+<a href=#51 id=51 data-nosnippet>51</a>    </span><span class="kw">pub </span>stdout: String,
+<a href=#52 id=52 data-nosnippet>52</a>    <span class="doccomment">/// Process exit status code.
+<a href=#53 id=53 data-nosnippet>53</a>    </span><span class="kw">pub </span>status_code: i32,
+<a href=#54 id=54 data-nosnippet>54</a>    <span class="doccomment">/// Set when stdout was cut short due to the `max_output_bytes` limit.
+<a href=#55 id=55 data-nosnippet>55</a>    </span><span class="kw">pub </span>was_truncated: bool,
+<a href=#56 id=56 data-nosnippet>56</a>    <span class="doccomment">/// Set when stdout was routed through FTS5 intent filtering.
+<a href=#57 id=57 data-nosnippet>57</a>    </span><span class="kw">pub </span>was_indexed: bool,
+<a href=#58 id=58 data-nosnippet>58</a>}
+<a href=#59 id=59 data-nosnippet>59</a>
+<a href=#60 id=60 data-nosnippet>60</a><span class="doccomment">/// Default threshold in bytes above which intent-driven filtering kicks in.
+<a href=#61 id=61 data-nosnippet>61</a></span><span class="kw">const </span>DEFAULT_FILTER_THRESHOLD: usize = <span class="number">5 </span>* <span class="number">1024</span>; <span class="comment">// 5 KB
+<a href=#62 id=62 data-nosnippet>62</a>
+<a href=#63 id=63 data-nosnippet>63</a></span><span class="doccomment">/// Result of intent-driven output filtering via FTS5 BM25 search.
+<a href=#64 id=64 data-nosnippet>64</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#65 id=65 data-nosnippet>65</a></span><span class="kw">pub struct </span>FilteredOutput {
+<a href=#66 id=66 data-nosnippet>66</a>    <span class="doccomment">/// BM25-matched sections from the original output.
+<a href=#67 id=67 data-nosnippet>67</a>    </span><span class="kw">pub </span>matched_sections: Vec&lt;String&gt;,
+<a href=#68 id=68 data-nosnippet>68</a>    <span class="doccomment">/// Vocabulary of searchable terms for follow-up queries.
+<a href=#69 id=69 data-nosnippet>69</a>    </span><span class="kw">pub </span>vocabulary: Vec&lt;String&gt;,
+<a href=#70 id=70 data-nosnippet>70</a>    <span class="doccomment">/// Total number of chunks the output was split into.
+<a href=#71 id=71 data-nosnippet>71</a>    </span><span class="kw">pub </span>total_chunks: usize,
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="doccomment">/// Number of chunks that matched the intent.
+<a href=#73 id=73 data-nosnippet>73</a>    </span><span class="kw">pub </span>matched_chunks: usize,
+<a href=#74 id=74 data-nosnippet>74</a>}
+<a href=#75 id=75 data-nosnippet>75</a>
+<a href=#76 id=76 data-nosnippet>76</a><span class="doccomment">/// Executes code in isolated subprocesses.
+<a href=#77 id=77 data-nosnippet>77</a>///
+<a href=#78 id=78 data-nosnippet>78</a>/// Only stdout enters the context window — stderr, file system side effects,
+<a href=#79 id=79 data-nosnippet>79</a>/// and environment variables never leak into the LLM context.
+<a href=#80 id=80 data-nosnippet>80</a></span><span class="kw">pub struct </span>SandboxExecutor {
+<a href=#81 id=81 data-nosnippet>81</a>    timeout: Duration,
+<a href=#82 id=82 data-nosnippet>82</a>    max_output_bytes: usize,
+<a href=#83 id=83 data-nosnippet>83</a>    filter_threshold: usize,
+<a href=#84 id=84 data-nosnippet>84</a>    runtimes: HashMap&lt;String, RuntimeInfo&gt;,
+<a href=#85 id=85 data-nosnippet>85</a>}
+<a href=#86 id=86 data-nosnippet>86</a>
+<a href=#87 id=87 data-nosnippet>87</a><span class="comment">// ── OutputFilter ──────────────────────────────────────────────────────────────
+<a href=#88 id=88 data-nosnippet>88</a>
+<a href=#89 id=89 data-nosnippet>89</a></span><span class="doccomment">/// Indexes large text output into an in-memory FTS5 table and returns
+<a href=#90 id=90 data-nosnippet>90</a>/// BM25-matched sections plus a vocabulary of searchable terms.
+<a href=#91 id=91 data-nosnippet>91</a></span><span class="kw">pub</span>(<span class="kw">crate</span>) <span class="kw">struct </span>OutputFilter;
+<a href=#92 id=92 data-nosnippet>92</a>
+<a href=#93 id=93 data-nosnippet>93</a><span class="kw">impl </span>OutputFilter {
+<a href=#94 id=94 data-nosnippet>94</a>    <span class="doccomment">/// Chunk `text` by double-newline paragraphs (or every ~512 bytes for
+<a href=#95 id=95 data-nosnippet>95</a>    /// long runs without blank lines), index into FTS5, and return the
+<a href=#96 id=96 data-nosnippet>96</a>    /// BM25-matched sections for `intent`.
+<a href=#97 id=97 data-nosnippet>97</a>    </span><span class="kw">pub fn </span>filter(text: <span class="kw-2">&amp;</span>str, intent: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;FilteredOutput&gt; {
+<a href=#98 id=98 data-nosnippet>98</a>        <span class="kw">let </span>chunks = <span class="self">Self</span>::chunk_output(text);
+<a href=#99 id=99 data-nosnippet>99</a>        <span class="kw">let </span>total_chunks = chunks.len();
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a>        <span class="kw">let </span>conn = Connection::open_in_memory()
+<a href=#102 id=102 data-nosnippet>102</a>            .map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"FTS5 in-memory open failed: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#103 id=103 data-nosnippet>103</a>
+<a href=#104 id=104 data-nosnippet>104</a>        conn.execute_batch(
+<a href=#105 id=105 data-nosnippet>105</a>            <span class="string">r#"
+<a href=#106 id=106 data-nosnippet>106</a>            CREATE VIRTUAL TABLE IF NOT EXISTS sandbox_fts USING fts5(
+<a href=#107 id=107 data-nosnippet>107</a>                chunk_id,
+<a href=#108 id=108 data-nosnippet>108</a>                body,
+<a href=#109 id=109 data-nosnippet>109</a>                tokenize='porter ascii'
+<a href=#110 id=110 data-nosnippet>110</a>            );
+<a href=#111 id=111 data-nosnippet>111</a>            "#</span>,
+<a href=#112 id=112 data-nosnippet>112</a>        )
+<a href=#113 id=113 data-nosnippet>113</a>        .map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"FTS5 schema creation failed: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#114 id=114 data-nosnippet>114</a>
+<a href=#115 id=115 data-nosnippet>115</a>        <span class="comment">// Insert chunks
+<a href=#116 id=116 data-nosnippet>116</a>        </span><span class="kw">for </span>(i, chunk) <span class="kw">in </span>chunks.iter().enumerate() {
+<a href=#117 id=117 data-nosnippet>117</a>            conn.execute(
+<a href=#118 id=118 data-nosnippet>118</a>                <span class="string">"INSERT INTO sandbox_fts(chunk_id, body) VALUES (?1, ?2)"</span>,
+<a href=#119 id=119 data-nosnippet>119</a>                <span class="macro">params!</span>[i.to_string(), chunk],
+<a href=#120 id=120 data-nosnippet>120</a>            )
+<a href=#121 id=121 data-nosnippet>121</a>            .map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"FTS5 insert failed: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#122 id=122 data-nosnippet>122</a>        }
+<a href=#123 id=123 data-nosnippet>123</a>
+<a href=#124 id=124 data-nosnippet>124</a>        <span class="comment">// BM25 search
+<a href=#125 id=125 data-nosnippet>125</a>        </span><span class="kw">let </span>matched_sections = <span class="self">Self</span>::bm25_search(<span class="kw-2">&amp;</span>conn, intent, <span class="kw-2">&amp;</span>chunks)<span class="question-mark">?</span>;
+<a href=#126 id=126 data-nosnippet>126</a>        <span class="kw">let </span>matched_chunks = matched_sections.len();
+<a href=#127 id=127 data-nosnippet>127</a>
+<a href=#128 id=128 data-nosnippet>128</a>        <span class="comment">// Extract vocabulary
+<a href=#129 id=129 data-nosnippet>129</a>        </span><span class="kw">let </span>vocabulary = <span class="self">Self</span>::extract_vocabulary(<span class="kw-2">&amp;</span>conn)<span class="question-mark">?</span>;
+<a href=#130 id=130 data-nosnippet>130</a>
+<a href=#131 id=131 data-nosnippet>131</a>        <span class="prelude-val">Ok</span>(FilteredOutput {
+<a href=#132 id=132 data-nosnippet>132</a>            matched_sections,
+<a href=#133 id=133 data-nosnippet>133</a>            vocabulary,
+<a href=#134 id=134 data-nosnippet>134</a>            total_chunks,
+<a href=#135 id=135 data-nosnippet>135</a>            matched_chunks,
+<a href=#136 id=136 data-nosnippet>136</a>        })
+<a href=#137 id=137 data-nosnippet>137</a>    }
+<a href=#138 id=138 data-nosnippet>138</a>
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="doccomment">/// Split output into chunks on double-newline boundaries. If a chunk
+<a href=#140 id=140 data-nosnippet>140</a>    /// exceeds 512 bytes, split it further on single newlines.
+<a href=#141 id=141 data-nosnippet>141</a>    </span><span class="kw">fn </span>chunk_output(text: <span class="kw-2">&amp;</span>str) -&gt; Vec&lt;String&gt; {
+<a href=#142 id=142 data-nosnippet>142</a>        <span class="kw">const </span>MAX_CHUNK_BYTES: usize = <span class="number">512</span>;
+<a href=#143 id=143 data-nosnippet>143</a>
+<a href=#144 id=144 data-nosnippet>144</a>        <span class="kw">let </span>paragraphs: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = text.split(<span class="string">"\n\n"</span>).collect();
+<a href=#145 id=145 data-nosnippet>145</a>        <span class="kw">let </span><span class="kw-2">mut </span>chunks = Vec::new();
+<a href=#146 id=146 data-nosnippet>146</a>
+<a href=#147 id=147 data-nosnippet>147</a>        <span class="kw">for </span>para <span class="kw">in </span>paragraphs {
+<a href=#148 id=148 data-nosnippet>148</a>            <span class="kw">let </span>trimmed = para.trim();
+<a href=#149 id=149 data-nosnippet>149</a>            <span class="kw">if </span>trimmed.is_empty() {
+<a href=#150 id=150 data-nosnippet>150</a>                <span class="kw">continue</span>;
+<a href=#151 id=151 data-nosnippet>151</a>            }
+<a href=#152 id=152 data-nosnippet>152</a>            <span class="kw">if </span>trimmed.len() &lt;= MAX_CHUNK_BYTES {
+<a href=#153 id=153 data-nosnippet>153</a>                chunks.push(trimmed.to_string());
+<a href=#154 id=154 data-nosnippet>154</a>            } <span class="kw">else </span>{
+<a href=#155 id=155 data-nosnippet>155</a>                <span class="comment">// Sub-split on single newlines
+<a href=#156 id=156 data-nosnippet>156</a>                </span><span class="kw">let </span><span class="kw-2">mut </span>current = String::new();
+<a href=#157 id=157 data-nosnippet>157</a>                <span class="kw">for </span>line <span class="kw">in </span>trimmed.lines() {
+<a href=#158 id=158 data-nosnippet>158</a>                    <span class="kw">if </span>!current.is_empty() &amp;&amp; current.len() + line.len() + <span class="number">1 </span>&gt; MAX_CHUNK_BYTES {
+<a href=#159 id=159 data-nosnippet>159</a>                        chunks.push(std::mem::take(<span class="kw-2">&amp;mut </span>current));
+<a href=#160 id=160 data-nosnippet>160</a>                    }
+<a href=#161 id=161 data-nosnippet>161</a>                    <span class="kw">if </span>!current.is_empty() {
+<a href=#162 id=162 data-nosnippet>162</a>                        current.push(<span class="string">'\n'</span>);
+<a href=#163 id=163 data-nosnippet>163</a>                    }
+<a href=#164 id=164 data-nosnippet>164</a>                    current.push_str(line);
+<a href=#165 id=165 data-nosnippet>165</a>                }
+<a href=#166 id=166 data-nosnippet>166</a>                <span class="kw">if </span>!current.is_empty() {
+<a href=#167 id=167 data-nosnippet>167</a>                    chunks.push(current);
+<a href=#168 id=168 data-nosnippet>168</a>                }
+<a href=#169 id=169 data-nosnippet>169</a>            }
+<a href=#170 id=170 data-nosnippet>170</a>        }
+<a href=#171 id=171 data-nosnippet>171</a>
+<a href=#172 id=172 data-nosnippet>172</a>        <span class="comment">// Guarantee at least one chunk even for empty-ish input
+<a href=#173 id=173 data-nosnippet>173</a>        </span><span class="kw">if </span>chunks.is_empty() &amp;&amp; !text.trim().is_empty() {
+<a href=#174 id=174 data-nosnippet>174</a>            chunks.push(text.trim().to_string());
+<a href=#175 id=175 data-nosnippet>175</a>        }
+<a href=#176 id=176 data-nosnippet>176</a>
+<a href=#177 id=177 data-nosnippet>177</a>        chunks
+<a href=#178 id=178 data-nosnippet>178</a>    }
+<a href=#179 id=179 data-nosnippet>179</a>
+<a href=#180 id=180 data-nosnippet>180</a>    <span class="doccomment">/// Query the FTS5 table with the intent and return matching chunk bodies
+<a href=#181 id=181 data-nosnippet>181</a>    /// ranked by BM25.
+<a href=#182 id=182 data-nosnippet>182</a>    </span><span class="kw">fn </span>bm25_search(conn: <span class="kw-2">&amp;</span>Connection, intent: <span class="kw-2">&amp;</span>str, _chunks: <span class="kw-2">&amp;</span>[String]) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;String&gt;&gt; {
+<a href=#183 id=183 data-nosnippet>183</a>        <span class="comment">// Sanitize intent for FTS5 query: keep alphanumeric and spaces
+<a href=#184 id=184 data-nosnippet>184</a>        </span><span class="kw">let </span>sanitized: String = intent
+<a href=#185 id=185 data-nosnippet>185</a>            .chars()
+<a href=#186 id=186 data-nosnippet>186</a>            .map(|c| <span class="kw">if </span>c.is_alphanumeric() || c.is_whitespace() { c } <span class="kw">else </span>{ <span class="string">' ' </span>})
+<a href=#187 id=187 data-nosnippet>187</a>            .collect();
+<a href=#188 id=188 data-nosnippet>188</a>        <span class="kw">let </span>terms: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = sanitized.split_whitespace().collect();
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="kw">if </span>terms.is_empty() {
+<a href=#190 id=190 data-nosnippet>190</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(Vec::new());
+<a href=#191 id=191 data-nosnippet>191</a>        }
+<a href=#192 id=192 data-nosnippet>192</a>
+<a href=#193 id=193 data-nosnippet>193</a>        <span class="comment">// Build an OR query so partial matches still return results
+<a href=#194 id=194 data-nosnippet>194</a>        </span><span class="kw">let </span>fts_query = terms.join(<span class="string">" OR "</span>);
+<a href=#195 id=195 data-nosnippet>195</a>
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="kw">let </span><span class="kw-2">mut </span>stmt = conn
+<a href=#197 id=197 data-nosnippet>197</a>            .prepare(
+<a href=#198 id=198 data-nosnippet>198</a>                <span class="string">r#"SELECT body FROM sandbox_fts
+<a href=#199 id=199 data-nosnippet>199</a>                   WHERE sandbox_fts MATCH ?1
+<a href=#200 id=200 data-nosnippet>200</a>                   ORDER BY rank
+<a href=#201 id=201 data-nosnippet>201</a>                   LIMIT 20"#</span>,
+<a href=#202 id=202 data-nosnippet>202</a>            )
+<a href=#203 id=203 data-nosnippet>203</a>            .map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"FTS5 query prepare failed: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#204 id=204 data-nosnippet>204</a>
+<a href=#205 id=205 data-nosnippet>205</a>        <span class="kw">let </span>rows = stmt
+<a href=#206 id=206 data-nosnippet>206</a>            .query_map(<span class="macro">params!</span>[fts_query], |row| row.get::&lt;<span class="kw">_</span>, String&gt;(<span class="number">0</span>))
+<a href=#207 id=207 data-nosnippet>207</a>            .map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"FTS5 query failed: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#208 id=208 data-nosnippet>208</a>
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">let </span><span class="kw-2">mut </span>results = Vec::new();
+<a href=#210 id=210 data-nosnippet>210</a>        <span class="kw">for </span>row <span class="kw">in </span>rows {
+<a href=#211 id=211 data-nosnippet>211</a>            results.push(
+<a href=#212 id=212 data-nosnippet>212</a>                row.map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"FTS5 row read failed: {e}"</span>)))<span class="question-mark">?</span>,
+<a href=#213 id=213 data-nosnippet>213</a>            );
+<a href=#214 id=214 data-nosnippet>214</a>        }
+<a href=#215 id=215 data-nosnippet>215</a>        <span class="prelude-val">Ok</span>(results)
+<a href=#216 id=216 data-nosnippet>216</a>    }
+<a href=#217 id=217 data-nosnippet>217</a>
+<a href=#218 id=218 data-nosnippet>218</a>    <span class="doccomment">/// Extract a vocabulary of distinct searchable terms from the indexed
+<a href=#219 id=219 data-nosnippet>219</a>    /// content. Uses the FTS5 `vocab` virtual table to pull out tokens.
+<a href=#220 id=220 data-nosnippet>220</a>    </span><span class="kw">fn </span>extract_vocabulary(conn: <span class="kw-2">&amp;</span>Connection) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;String&gt;&gt; {
+<a href=#221 id=221 data-nosnippet>221</a>        <span class="comment">// Create a vocab table over the FTS5 index using 'col' detail
+<a href=#222 id=222 data-nosnippet>222</a>        // which gives (term, col, doc, cnt) columns.
+<a href=#223 id=223 data-nosnippet>223</a>        </span>conn.execute_batch(
+<a href=#224 id=224 data-nosnippet>224</a>            <span class="string">"CREATE VIRTUAL TABLE IF NOT EXISTS sandbox_vocab USING fts5vocab(sandbox_fts, col);"</span>,
+<a href=#225 id=225 data-nosnippet>225</a>        )
+<a href=#226 id=226 data-nosnippet>226</a>        .map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"FTS5 vocab table creation failed: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a>        <span class="kw">let </span><span class="kw-2">mut </span>stmt = conn
+<a href=#229 id=229 data-nosnippet>229</a>            .prepare(
+<a href=#230 id=230 data-nosnippet>230</a>                <span class="string">r#"SELECT term FROM sandbox_vocab
+<a href=#231 id=231 data-nosnippet>231</a>                   WHERE col = 'body'
+<a href=#232 id=232 data-nosnippet>232</a>                   ORDER BY doc DESC
+<a href=#233 id=233 data-nosnippet>233</a>                   LIMIT 100"#</span>,
+<a href=#234 id=234 data-nosnippet>234</a>            )
+<a href=#235 id=235 data-nosnippet>235</a>            .map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"vocab query prepare failed: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#236 id=236 data-nosnippet>236</a>
+<a href=#237 id=237 data-nosnippet>237</a>        <span class="kw">let </span>rows = stmt
+<a href=#238 id=238 data-nosnippet>238</a>            .query_map([], |row| row.get::&lt;<span class="kw">_</span>, String&gt;(<span class="number">0</span>))
+<a href=#239 id=239 data-nosnippet>239</a>            .map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"vocab query failed: {e}"</span>)))<span class="question-mark">?</span>;
+<a href=#240 id=240 data-nosnippet>240</a>
+<a href=#241 id=241 data-nosnippet>241</a>        <span class="kw">let </span><span class="kw-2">mut </span>vocab = Vec::new();
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="kw">for </span>row <span class="kw">in </span>rows {
+<a href=#243 id=243 data-nosnippet>243</a>            vocab.push(
+<a href=#244 id=244 data-nosnippet>244</a>                row.map_err(|e| SqzError::Other(<span class="macro">format!</span>(<span class="string">"vocab row read failed: {e}"</span>)))<span class="question-mark">?</span>,
+<a href=#245 id=245 data-nosnippet>245</a>            );
+<a href=#246 id=246 data-nosnippet>246</a>        }
+<a href=#247 id=247 data-nosnippet>247</a>        <span class="prelude-val">Ok</span>(vocab)
+<a href=#248 id=248 data-nosnippet>248</a>    }
+<a href=#249 id=249 data-nosnippet>249</a>}
+<a href=#250 id=250 data-nosnippet>250</a>
+<a href=#251 id=251 data-nosnippet>251</a><span class="kw">impl </span>SandboxExecutor {
+<a href=#252 id=252 data-nosnippet>252</a>    <span class="doccomment">/// Default timeout: 30 seconds.
+<a href=#253 id=253 data-nosnippet>253</a>    </span><span class="kw">pub const </span>DEFAULT_TIMEOUT_SECS: u64 = <span class="number">30</span>;
+<a href=#254 id=254 data-nosnippet>254</a>    <span class="doccomment">/// Default max output: 1 MB.
+<a href=#255 id=255 data-nosnippet>255</a>    </span><span class="kw">pub const </span>DEFAULT_MAX_OUTPUT_BYTES: usize = <span class="number">1_048_576</span>;
+<a href=#256 id=256 data-nosnippet>256</a>
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="doccomment">/// Create a new executor, auto-detecting available runtimes.
+<a href=#258 id=258 data-nosnippet>258</a>    </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#259 id=259 data-nosnippet>259</a>        <span class="self">Self</span>::with_config(
+<a href=#260 id=260 data-nosnippet>260</a>            Duration::from_secs(<span class="self">Self</span>::DEFAULT_TIMEOUT_SECS),
+<a href=#261 id=261 data-nosnippet>261</a>            <span class="self">Self</span>::DEFAULT_MAX_OUTPUT_BYTES,
+<a href=#262 id=262 data-nosnippet>262</a>        )
+<a href=#263 id=263 data-nosnippet>263</a>    }
+<a href=#264 id=264 data-nosnippet>264</a>
+<a href=#265 id=265 data-nosnippet>265</a>    <span class="doccomment">/// Create with custom timeout and max output size.
+<a href=#266 id=266 data-nosnippet>266</a>    </span><span class="kw">pub fn </span>with_config(timeout: Duration, max_output_bytes: usize) -&gt; <span class="self">Self </span>{
+<a href=#267 id=267 data-nosnippet>267</a>        <span class="kw">let </span>runtimes = detect_runtimes();
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="self">Self </span>{
+<a href=#269 id=269 data-nosnippet>269</a>            timeout,
+<a href=#270 id=270 data-nosnippet>270</a>            max_output_bytes,
+<a href=#271 id=271 data-nosnippet>271</a>            filter_threshold: DEFAULT_FILTER_THRESHOLD,
+<a href=#272 id=272 data-nosnippet>272</a>            runtimes,
+<a href=#273 id=273 data-nosnippet>273</a>        }
+<a href=#274 id=274 data-nosnippet>274</a>    }
+<a href=#275 id=275 data-nosnippet>275</a>
+<a href=#276 id=276 data-nosnippet>276</a>    <span class="doccomment">/// Execute code in the given language runtime.
+<a href=#277 id=277 data-nosnippet>277</a>    ///
+<a href=#278 id=278 data-nosnippet>278</a>    /// Only stdout is captured and returned. Stderr is discarded.
+<a href=#279 id=279 data-nosnippet>279</a>    /// Credentials for gh, aws, gcloud, kubectl, docker are passed through
+<a href=#280 id=280 data-nosnippet>280</a>    /// via environment variable inheritance.
+<a href=#281 id=281 data-nosnippet>281</a>    </span><span class="kw">pub fn </span>execute(<span class="kw-2">&amp;</span><span class="self">self</span>, code: <span class="kw-2">&amp;</span>str, language: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;SandboxResult&gt; {
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw">let </span>lang = language.to_lowercase();
+<a href=#283 id=283 data-nosnippet>283</a>        <span class="kw">let </span>runtime = <span class="self">self
+<a href=#284 id=284 data-nosnippet>284</a>            </span>.runtimes
+<a href=#285 id=285 data-nosnippet>285</a>            .get(<span class="kw-2">&amp;</span>lang)
+<a href=#286 id=286 data-nosnippet>286</a>            .ok_or_else(|| SqzError::Other(<span class="macro">format!</span>(<span class="string">"unsupported or unavailable runtime: {lang}"</span>)))<span class="question-mark">?</span>;
+<a href=#287 id=287 data-nosnippet>287</a>
+<a href=#288 id=288 data-nosnippet>288</a>        <span class="kw">let </span>env = build_credential_env();
+<a href=#289 id=289 data-nosnippet>289</a>
+<a href=#290 id=290 data-nosnippet>290</a>        <span class="kw">let </span>result = <span class="kw">match </span>lang.as_str() {
+<a href=#291 id=291 data-nosnippet>291</a>            <span class="string">"go" </span>=&gt; <span class="self">self</span>.execute_go(code, runtime, <span class="kw-2">&amp;</span>env),
+<a href=#292 id=292 data-nosnippet>292</a>            <span class="string">"rust" </span>=&gt; <span class="self">self</span>.execute_rust(code, runtime, <span class="kw-2">&amp;</span>env),
+<a href=#293 id=293 data-nosnippet>293</a>            <span class="kw">_ </span>=&gt; <span class="self">self</span>.execute_interpreted(code, runtime, <span class="kw-2">&amp;</span>env),
+<a href=#294 id=294 data-nosnippet>294</a>        }<span class="question-mark">?</span>;
+<a href=#295 id=295 data-nosnippet>295</a>
+<a href=#296 id=296 data-nosnippet>296</a>        <span class="prelude-val">Ok</span>(result)
+<a href=#297 id=297 data-nosnippet>297</a>    }
+<a href=#298 id=298 data-nosnippet>298</a>
+<a href=#299 id=299 data-nosnippet>299</a>    <span class="doccomment">/// Execute code and, when stdout exceeds 5 KB and `intent` is provided,
+<a href=#300 id=300 data-nosnippet>300</a>    /// index the full output into an in-memory FTS5 table and return only
+<a href=#301 id=301 data-nosnippet>301</a>    /// BM25-matched sections plus a vocabulary of searchable terms.
+<a href=#302 id=302 data-nosnippet>302</a>    ///
+<a href=#303 id=303 data-nosnippet>303</a>    /// When the output is small or no intent is given, behaves identically
+<a href=#304 id=304 data-nosnippet>304</a>    /// to [`execute`] (returns full stdout, `filtered` is `None`).
+<a href=#305 id=305 data-nosnippet>305</a>    </span><span class="kw">pub fn </span>execute_with_intent(
+<a href=#306 id=306 data-nosnippet>306</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#307 id=307 data-nosnippet>307</a>        code: <span class="kw-2">&amp;</span>str,
+<a href=#308 id=308 data-nosnippet>308</a>        language: <span class="kw-2">&amp;</span>str,
+<a href=#309 id=309 data-nosnippet>309</a>        intent: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;,
+<a href=#310 id=310 data-nosnippet>310</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;(SandboxResult, <span class="prelude-ty">Option</span>&lt;FilteredOutput&gt;)&gt; {
+<a href=#311 id=311 data-nosnippet>311</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self</span>.execute(code, language)<span class="question-mark">?</span>;
+<a href=#312 id=312 data-nosnippet>312</a>
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="kw">let </span>should_filter = result.stdout.len() &gt; <span class="self">self</span>.filter_threshold
+<a href=#314 id=314 data-nosnippet>314</a>            &amp;&amp; intent.map_or(<span class="bool-val">false</span>, |i| !i.trim().is_empty());
+<a href=#315 id=315 data-nosnippet>315</a>
+<a href=#316 id=316 data-nosnippet>316</a>        <span class="kw">if </span>should_filter {
+<a href=#317 id=317 data-nosnippet>317</a>            <span class="kw">let </span>intent_str = intent.unwrap(); <span class="comment">// safe: checked above
+<a href=#318 id=318 data-nosnippet>318</a>            </span><span class="kw">let </span>filtered = OutputFilter::filter(<span class="kw-2">&amp;</span>result.stdout, intent_str)<span class="question-mark">?</span>;
+<a href=#319 id=319 data-nosnippet>319</a>            result.was_indexed = <span class="bool-val">true</span>;
+<a href=#320 id=320 data-nosnippet>320</a>            <span class="comment">// Replace stdout with only the matched sections so the LLM
+<a href=#321 id=321 data-nosnippet>321</a>            // context window receives the filtered view.
+<a href=#322 id=322 data-nosnippet>322</a>            </span>result.stdout = filtered.matched_sections.join(<span class="string">"\n\n"</span>);
+<a href=#323 id=323 data-nosnippet>323</a>            <span class="prelude-val">Ok</span>((result, <span class="prelude-val">Some</span>(filtered)))
+<a href=#324 id=324 data-nosnippet>324</a>        } <span class="kw">else </span>{
+<a href=#325 id=325 data-nosnippet>325</a>            <span class="prelude-val">Ok</span>((result, <span class="prelude-val">None</span>))
+<a href=#326 id=326 data-nosnippet>326</a>        }
+<a href=#327 id=327 data-nosnippet>327</a>    }
+<a href=#328 id=328 data-nosnippet>328</a>
+<a href=#329 id=329 data-nosnippet>329</a>    <span class="doccomment">/// Languages that this executor currently supports (only those detected on this system).
+<a href=#330 id=330 data-nosnippet>330</a>    </span><span class="kw">pub fn </span>available_languages(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Vec&lt;<span class="kw-2">&amp;</span>str&gt; {
+<a href=#331 id=331 data-nosnippet>331</a>        <span class="self">self</span>.runtimes.values().map(|r| r.language).collect()
+<a href=#332 id=332 data-nosnippet>332</a>    }
+<a href=#333 id=333 data-nosnippet>333</a>
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="doccomment">/// All languages the executor can potentially support.
+<a href=#335 id=335 data-nosnippet>335</a>    </span><span class="kw">pub fn </span>supported_languages(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str] {
+<a href=#336 id=336 data-nosnippet>336</a>        <span class="kw-2">&amp;</span>[<span class="string">"js"</span>, <span class="string">"ts"</span>, <span class="string">"python"</span>, <span class="string">"shell"</span>, <span class="string">"ruby"</span>, <span class="string">"go"</span>, <span class="string">"rust"</span>]
+<a href=#337 id=337 data-nosnippet>337</a>    }
+<a href=#338 id=338 data-nosnippet>338</a>
+<a href=#339 id=339 data-nosnippet>339</a>    <span class="doccomment">/// Check whether a specific language runtime is available.
+<a href=#340 id=340 data-nosnippet>340</a>    </span><span class="kw">pub fn </span>is_available(<span class="kw-2">&amp;</span><span class="self">self</span>, language: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#341 id=341 data-nosnippet>341</a>        <span class="self">self</span>.runtimes.contains_key(<span class="kw-2">&amp;</span>language.to_lowercase())
+<a href=#342 id=342 data-nosnippet>342</a>    }
+<a href=#343 id=343 data-nosnippet>343</a>
+<a href=#344 id=344 data-nosnippet>344</a>    <span class="doccomment">/// Current timeout setting.
+<a href=#345 id=345 data-nosnippet>345</a>    </span><span class="kw">pub fn </span>timeout(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Duration {
+<a href=#346 id=346 data-nosnippet>346</a>        <span class="self">self</span>.timeout
+<a href=#347 id=347 data-nosnippet>347</a>    }
+<a href=#348 id=348 data-nosnippet>348</a>
+<a href=#349 id=349 data-nosnippet>349</a>    <span class="doccomment">/// Current max output size in bytes.
+<a href=#350 id=350 data-nosnippet>350</a>    </span><span class="kw">pub fn </span>max_output_bytes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="self">self</span>.max_output_bytes
+<a href=#352 id=352 data-nosnippet>352</a>    }
+<a href=#353 id=353 data-nosnippet>353</a>
+<a href=#354 id=354 data-nosnippet>354</a>    <span class="comment">// ── Private helpers ───────────────────────────────────────────────────
+<a href=#355 id=355 data-nosnippet>355</a>
+<a href=#356 id=356 data-nosnippet>356</a>    </span><span class="doccomment">/// Execute an interpreted language (JS, TS, Python, Shell, Ruby) by
+<a href=#357 id=357 data-nosnippet>357</a>    /// writing code to a temp file and invoking the runtime binary.
+<a href=#358 id=358 data-nosnippet>358</a>    </span><span class="kw">fn </span>execute_interpreted(
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#360 id=360 data-nosnippet>360</a>        code: <span class="kw-2">&amp;</span>str,
+<a href=#361 id=361 data-nosnippet>361</a>        runtime: <span class="kw-2">&amp;</span>RuntimeInfo,
+<a href=#362 id=362 data-nosnippet>362</a>        env: <span class="kw-2">&amp;</span>HashMap&lt;String, String&gt;,
+<a href=#363 id=363 data-nosnippet>363</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;SandboxResult&gt; {
+<a href=#364 id=364 data-nosnippet>364</a>        <span class="kw">let </span>ext = <span class="kw">match </span>runtime.language {
+<a href=#365 id=365 data-nosnippet>365</a>            <span class="string">"js" </span>=&gt; <span class="string">"js"</span>,
+<a href=#366 id=366 data-nosnippet>366</a>            <span class="string">"ts" </span>=&gt; <span class="string">"ts"</span>,
+<a href=#367 id=367 data-nosnippet>367</a>            <span class="string">"python" </span>=&gt; <span class="string">"py"</span>,
+<a href=#368 id=368 data-nosnippet>368</a>            <span class="string">"shell" </span>=&gt; <span class="string">"sh"</span>,
+<a href=#369 id=369 data-nosnippet>369</a>            <span class="string">"ruby" </span>=&gt; <span class="string">"rb"</span>,
+<a href=#370 id=370 data-nosnippet>370</a>            <span class="kw">_ </span>=&gt; <span class="string">"tmp"</span>,
+<a href=#371 id=371 data-nosnippet>371</a>        };
+<a href=#372 id=372 data-nosnippet>372</a>
+<a href=#373 id=373 data-nosnippet>373</a>        <span class="kw">let </span>tmp_dir = tempfile::tempdir().map_err(|e| SqzError::Io(e))<span class="question-mark">?</span>;
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="kw">let </span>script_path = tmp_dir.path().join(<span class="macro">format!</span>(<span class="string">"sandbox_script.{ext}"</span>));
+<a href=#375 id=375 data-nosnippet>375</a>        {
+<a href=#376 id=376 data-nosnippet>376</a>            <span class="kw">let </span><span class="kw-2">mut </span>f = std::fs::File::create(<span class="kw-2">&amp;</span>script_path)<span class="question-mark">?</span>;
+<a href=#377 id=377 data-nosnippet>377</a>            f.write_all(code.as_bytes())<span class="question-mark">?</span>;
+<a href=#378 id=378 data-nosnippet>378</a>        }
+<a href=#379 id=379 data-nosnippet>379</a>
+<a href=#380 id=380 data-nosnippet>380</a>        <span class="kw">let </span><span class="kw-2">mut </span>cmd = Command::new(<span class="kw-2">&amp;</span>runtime.binary);
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>        <span class="comment">// Special case: TypeScript via npx needs `tsx` as the first argument
+<a href=#383 id=383 data-nosnippet>383</a>        </span><span class="kw">if </span>runtime.language == <span class="string">"ts" </span>&amp;&amp; runtime.name == <span class="string">"npx" </span>{
+<a href=#384 id=384 data-nosnippet>384</a>            cmd.arg(<span class="string">"tsx"</span>);
+<a href=#385 id=385 data-nosnippet>385</a>        }
+<a href=#386 id=386 data-nosnippet>386</a>
+<a href=#387 id=387 data-nosnippet>387</a>        cmd.arg(<span class="kw-2">&amp;</span>script_path)
+<a href=#388 id=388 data-nosnippet>388</a>            .stdout(Stdio::piped())
+<a href=#389 id=389 data-nosnippet>389</a>            .stderr(Stdio::null()) <span class="comment">// stderr never enters context
+<a href=#390 id=390 data-nosnippet>390</a>            </span>.envs(env);
+<a href=#391 id=391 data-nosnippet>391</a>
+<a href=#392 id=392 data-nosnippet>392</a>        <span class="self">self</span>.run_with_timeout(cmd, <span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"runtime={}"</span>, runtime.language))
+<a href=#393 id=393 data-nosnippet>393</a>    }
+<a href=#394 id=394 data-nosnippet>394</a>
+<a href=#395 id=395 data-nosnippet>395</a>    <span class="doccomment">/// Execute Go code: write to temp file, run with `go run`.
+<a href=#396 id=396 data-nosnippet>396</a>    </span><span class="kw">fn </span>execute_go(
+<a href=#397 id=397 data-nosnippet>397</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#398 id=398 data-nosnippet>398</a>        code: <span class="kw-2">&amp;</span>str,
+<a href=#399 id=399 data-nosnippet>399</a>        runtime: <span class="kw-2">&amp;</span>RuntimeInfo,
+<a href=#400 id=400 data-nosnippet>400</a>        env: <span class="kw-2">&amp;</span>HashMap&lt;String, String&gt;,
+<a href=#401 id=401 data-nosnippet>401</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;SandboxResult&gt; {
+<a href=#402 id=402 data-nosnippet>402</a>        <span class="kw">let </span>tmp_dir = tempfile::tempdir()<span class="question-mark">?</span>;
+<a href=#403 id=403 data-nosnippet>403</a>        <span class="kw">let </span>script_path = tmp_dir.path().join(<span class="string">"main.go"</span>);
+<a href=#404 id=404 data-nosnippet>404</a>        {
+<a href=#405 id=405 data-nosnippet>405</a>            <span class="kw">let </span><span class="kw-2">mut </span>f = std::fs::File::create(<span class="kw-2">&amp;</span>script_path)<span class="question-mark">?</span>;
+<a href=#406 id=406 data-nosnippet>406</a>            f.write_all(code.as_bytes())<span class="question-mark">?</span>;
+<a href=#407 id=407 data-nosnippet>407</a>        }
+<a href=#408 id=408 data-nosnippet>408</a>
+<a href=#409 id=409 data-nosnippet>409</a>        <span class="kw">let </span><span class="kw-2">mut </span>cmd = Command::new(<span class="kw-2">&amp;</span>runtime.binary);
+<a href=#410 id=410 data-nosnippet>410</a>        cmd.arg(<span class="string">"run"</span>)
+<a href=#411 id=411 data-nosnippet>411</a>            .arg(<span class="kw-2">&amp;</span>script_path)
+<a href=#412 id=412 data-nosnippet>412</a>            .stdout(Stdio::piped())
+<a href=#413 id=413 data-nosnippet>413</a>            .stderr(Stdio::null())
+<a href=#414 id=414 data-nosnippet>414</a>            .envs(env);
+<a href=#415 id=415 data-nosnippet>415</a>
+<a href=#416 id=416 data-nosnippet>416</a>        <span class="self">self</span>.run_with_timeout(cmd, <span class="string">"runtime=go"</span>)
+<a href=#417 id=417 data-nosnippet>417</a>    }
+<a href=#418 id=418 data-nosnippet>418</a>
+<a href=#419 id=419 data-nosnippet>419</a>    <span class="doccomment">/// Execute Rust code: write to temp file, compile with rustc, then run.
+<a href=#420 id=420 data-nosnippet>420</a>    </span><span class="kw">fn </span>execute_rust(
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#422 id=422 data-nosnippet>422</a>        code: <span class="kw-2">&amp;</span>str,
+<a href=#423 id=423 data-nosnippet>423</a>        runtime: <span class="kw-2">&amp;</span>RuntimeInfo,
+<a href=#424 id=424 data-nosnippet>424</a>        env: <span class="kw-2">&amp;</span>HashMap&lt;String, String&gt;,
+<a href=#425 id=425 data-nosnippet>425</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;SandboxResult&gt; {
+<a href=#426 id=426 data-nosnippet>426</a>        <span class="kw">let </span>tmp_dir = tempfile::tempdir()<span class="question-mark">?</span>;
+<a href=#427 id=427 data-nosnippet>427</a>        <span class="kw">let </span>src_path = tmp_dir.path().join(<span class="string">"sandbox.rs"</span>);
+<a href=#428 id=428 data-nosnippet>428</a>        <span class="kw">let </span>bin_path = tmp_dir.path().join(<span class="string">"sandbox_bin"</span>);
+<a href=#429 id=429 data-nosnippet>429</a>        {
+<a href=#430 id=430 data-nosnippet>430</a>            <span class="kw">let </span><span class="kw-2">mut </span>f = std::fs::File::create(<span class="kw-2">&amp;</span>src_path)<span class="question-mark">?</span>;
+<a href=#431 id=431 data-nosnippet>431</a>            f.write_all(code.as_bytes())<span class="question-mark">?</span>;
+<a href=#432 id=432 data-nosnippet>432</a>        }
+<a href=#433 id=433 data-nosnippet>433</a>
+<a href=#434 id=434 data-nosnippet>434</a>        <span class="comment">// Compile
+<a href=#435 id=435 data-nosnippet>435</a>        </span><span class="kw">let </span>compile = Command::new(<span class="kw-2">&amp;</span>runtime.binary)
+<a href=#436 id=436 data-nosnippet>436</a>            .arg(<span class="kw-2">&amp;</span>src_path)
+<a href=#437 id=437 data-nosnippet>437</a>            .arg(<span class="string">"-o"</span>)
+<a href=#438 id=438 data-nosnippet>438</a>            .arg(<span class="kw-2">&amp;</span>bin_path)
+<a href=#439 id=439 data-nosnippet>439</a>            .stdout(Stdio::null())
+<a href=#440 id=440 data-nosnippet>440</a>            .stderr(Stdio::null())
+<a href=#441 id=441 data-nosnippet>441</a>            .envs(env)
+<a href=#442 id=442 data-nosnippet>442</a>            .status();
+<a href=#443 id=443 data-nosnippet>443</a>
+<a href=#444 id=444 data-nosnippet>444</a>        <span class="kw">match </span>compile {
+<a href=#445 id=445 data-nosnippet>445</a>            <span class="prelude-val">Ok</span>(status) <span class="kw">if </span>status.success() =&gt; {}
+<a href=#446 id=446 data-nosnippet>446</a>            <span class="prelude-val">Ok</span>(status) =&gt; {
+<a href=#447 id=447 data-nosnippet>447</a>                <span class="kw">return </span><span class="prelude-val">Ok</span>(SandboxResult {
+<a href=#448 id=448 data-nosnippet>448</a>                    stdout: String::new(),
+<a href=#449 id=449 data-nosnippet>449</a>                    status_code: status.code().unwrap_or(<span class="number">1</span>),
+<a href=#450 id=450 data-nosnippet>450</a>                    was_truncated: <span class="bool-val">false</span>,
+<a href=#451 id=451 data-nosnippet>451</a>                    was_indexed: <span class="bool-val">false</span>,
+<a href=#452 id=452 data-nosnippet>452</a>                });
+<a href=#453 id=453 data-nosnippet>453</a>            }
+<a href=#454 id=454 data-nosnippet>454</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(SqzError::Io(e)),
+<a href=#455 id=455 data-nosnippet>455</a>        }
+<a href=#456 id=456 data-nosnippet>456</a>
+<a href=#457 id=457 data-nosnippet>457</a>        <span class="comment">// Run the compiled binary
+<a href=#458 id=458 data-nosnippet>458</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>cmd = Command::new(<span class="kw-2">&amp;</span>bin_path);
+<a href=#459 id=459 data-nosnippet>459</a>        cmd.stdout(Stdio::piped())
+<a href=#460 id=460 data-nosnippet>460</a>            .stderr(Stdio::null())
+<a href=#461 id=461 data-nosnippet>461</a>            .envs(env);
+<a href=#462 id=462 data-nosnippet>462</a>
+<a href=#463 id=463 data-nosnippet>463</a>        <span class="self">self</span>.run_with_timeout(cmd, <span class="string">"runtime=rust"</span>)
+<a href=#464 id=464 data-nosnippet>464</a>    }
+<a href=#465 id=465 data-nosnippet>465</a>
+<a href=#466 id=466 data-nosnippet>466</a>    <span class="doccomment">/// Spawn the command, enforce timeout, capture stdout, and truncate if needed.
+<a href=#467 id=467 data-nosnippet>467</a>    </span><span class="kw">fn </span>run_with_timeout(<span class="kw-2">&amp;</span><span class="self">self</span>, <span class="kw-2">mut </span>cmd: Command, context: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;SandboxResult&gt; {
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="kw">let </span><span class="kw-2">mut </span>child = cmd.spawn().map_err(SqzError::Io)<span class="question-mark">?</span>;
+<a href=#469 id=469 data-nosnippet>469</a>
+<a href=#470 id=470 data-nosnippet>470</a>        <span class="comment">// Wait with timeout
+<a href=#471 id=471 data-nosnippet>471</a>        </span><span class="kw">let </span>status = <span class="kw">match </span>wait_with_timeout(<span class="kw-2">&amp;mut </span>child, <span class="self">self</span>.timeout) {
+<a href=#472 id=472 data-nosnippet>472</a>            <span class="prelude-val">Ok</span>(status) =&gt; status,
+<a href=#473 id=473 data-nosnippet>473</a>            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
+<a href=#474 id=474 data-nosnippet>474</a>                <span class="comment">// Timeout — kill the process
+<a href=#475 id=475 data-nosnippet>475</a>                </span><span class="kw">let _ </span>= child.kill();
+<a href=#476 id=476 data-nosnippet>476</a>                <span class="kw">let _ </span>= child.wait();
+<a href=#477 id=477 data-nosnippet>477</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(SqzError::Other(<span class="macro">format!</span>(
+<a href=#478 id=478 data-nosnippet>478</a>                    <span class="string">"sandbox execution timed out after {}s ({})"</span>,
+<a href=#479 id=479 data-nosnippet>479</a>                    <span class="self">self</span>.timeout.as_secs(),
+<a href=#480 id=480 data-nosnippet>480</a>                    context
+<a href=#481 id=481 data-nosnippet>481</a>                )));
+<a href=#482 id=482 data-nosnippet>482</a>            }
+<a href=#483 id=483 data-nosnippet>483</a>        };
+<a href=#484 id=484 data-nosnippet>484</a>
+<a href=#485 id=485 data-nosnippet>485</a>        <span class="comment">// Read stdout
+<a href=#486 id=486 data-nosnippet>486</a>        </span><span class="kw">let </span>stdout_raw = <span class="kw">if let </span><span class="prelude-val">Some</span>(<span class="kw-2">mut </span>stdout) = child.stdout.take() {
+<a href=#487 id=487 data-nosnippet>487</a>            <span class="kw">use </span>std::io::Read;
+<a href=#488 id=488 data-nosnippet>488</a>            <span class="kw">let </span><span class="kw-2">mut </span>buf = Vec::new();
+<a href=#489 id=489 data-nosnippet>489</a>            <span class="kw">let _ </span>= stdout.read_to_end(<span class="kw-2">&amp;mut </span>buf);
+<a href=#490 id=490 data-nosnippet>490</a>            buf
+<a href=#491 id=491 data-nosnippet>491</a>        } <span class="kw">else </span>{
+<a href=#492 id=492 data-nosnippet>492</a>            Vec::new()
+<a href=#493 id=493 data-nosnippet>493</a>        };
+<a href=#494 id=494 data-nosnippet>494</a>
+<a href=#495 id=495 data-nosnippet>495</a>        <span class="comment">// Truncate if needed
+<a href=#496 id=496 data-nosnippet>496</a>        </span><span class="kw">let </span>truncated = stdout_raw.len() &gt; <span class="self">self</span>.max_output_bytes;
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="kw">let </span>stdout_bytes = <span class="kw">if </span>truncated {
+<a href=#498 id=498 data-nosnippet>498</a>            <span class="kw-2">&amp;</span>stdout_raw[..<span class="self">self</span>.max_output_bytes]
+<a href=#499 id=499 data-nosnippet>499</a>        } <span class="kw">else </span>{
+<a href=#500 id=500 data-nosnippet>500</a>            <span class="kw-2">&amp;</span>stdout_raw[..]
+<a href=#501 id=501 data-nosnippet>501</a>        };
+<a href=#502 id=502 data-nosnippet>502</a>
+<a href=#503 id=503 data-nosnippet>503</a>        <span class="kw">let </span>stdout = String::from_utf8_lossy(stdout_bytes).into_owned();
+<a href=#504 id=504 data-nosnippet>504</a>
+<a href=#505 id=505 data-nosnippet>505</a>        <span class="prelude-val">Ok</span>(SandboxResult {
+<a href=#506 id=506 data-nosnippet>506</a>            stdout,
+<a href=#507 id=507 data-nosnippet>507</a>            status_code: status.code().unwrap_or(-<span class="number">1</span>),
+<a href=#508 id=508 data-nosnippet>508</a>            was_truncated: truncated,
+<a href=#509 id=509 data-nosnippet>509</a>            was_indexed: <span class="bool-val">false</span>,
+<a href=#510 id=510 data-nosnippet>510</a>        })
+<a href=#511 id=511 data-nosnippet>511</a>    }
+<a href=#512 id=512 data-nosnippet>512</a>}
+<a href=#513 id=513 data-nosnippet>513</a>
+<a href=#514 id=514 data-nosnippet>514</a><span class="comment">// ── Free functions ────────────────────────────────────────────────────────────
+<a href=#515 id=515 data-nosnippet>515</a>
+<a href=#516 id=516 data-nosnippet>516</a></span><span class="doccomment">/// Wait for a child process with a timeout. Returns the exit status on success,
+<a href=#517 id=517 data-nosnippet>517</a>/// or an error if the timeout is exceeded.
+<a href=#518 id=518 data-nosnippet>518</a></span><span class="kw">fn </span>wait_with_timeout(
+<a href=#519 id=519 data-nosnippet>519</a>    child: <span class="kw-2">&amp;mut </span>std::process::Child,
+<a href=#520 id=520 data-nosnippet>520</a>    timeout: Duration,
+<a href=#521 id=521 data-nosnippet>521</a>) -&gt; std::result::Result&lt;std::process::ExitStatus, ()&gt; {
+<a href=#522 id=522 data-nosnippet>522</a>    <span class="kw">let </span>start = std::time::Instant::now();
+<a href=#523 id=523 data-nosnippet>523</a>    <span class="kw">let </span>poll_interval = Duration::from_millis(<span class="number">50</span>);
+<a href=#524 id=524 data-nosnippet>524</a>
+<a href=#525 id=525 data-nosnippet>525</a>    <span class="kw">loop </span>{
+<a href=#526 id=526 data-nosnippet>526</a>        <span class="kw">match </span>child.try_wait() {
+<a href=#527 id=527 data-nosnippet>527</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(status)) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(status),
+<a href=#528 id=528 data-nosnippet>528</a>            <span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>) =&gt; {
+<a href=#529 id=529 data-nosnippet>529</a>                <span class="kw">if </span>start.elapsed() &gt;= timeout {
+<a href=#530 id=530 data-nosnippet>530</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(());
+<a href=#531 id=531 data-nosnippet>531</a>                }
+<a href=#532 id=532 data-nosnippet>532</a>                std::thread::sleep(poll_interval);
+<a href=#533 id=533 data-nosnippet>533</a>            }
+<a href=#534 id=534 data-nosnippet>534</a>            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(()),
+<a href=#535 id=535 data-nosnippet>535</a>        }
+<a href=#536 id=536 data-nosnippet>536</a>    }
+<a href=#537 id=537 data-nosnippet>537</a>}
+<a href=#538 id=538 data-nosnippet>538</a>
+<a href=#539 id=539 data-nosnippet>539</a><span class="doccomment">/// Build an environment map containing only credential-related variables
+<a href=#540 id=540 data-nosnippet>540</a>/// from the current process environment.
+<a href=#541 id=541 data-nosnippet>541</a></span><span class="kw">fn </span>build_credential_env() -&gt; HashMap&lt;String, String&gt; {
+<a href=#542 id=542 data-nosnippet>542</a>    <span class="kw">let </span><span class="kw-2">mut </span>env = HashMap::new();
+<a href=#543 id=543 data-nosnippet>543</a>    <span class="kw">for </span>(key, value) <span class="kw">in </span>std::env::vars() {
+<a href=#544 id=544 data-nosnippet>544</a>        <span class="kw">if </span>CREDENTIAL_ENV_PREFIXES
+<a href=#545 id=545 data-nosnippet>545</a>            .iter()
+<a href=#546 id=546 data-nosnippet>546</a>            .any(|prefix| key.starts_with(prefix))
+<a href=#547 id=547 data-nosnippet>547</a>        {
+<a href=#548 id=548 data-nosnippet>548</a>            env.insert(key, value);
+<a href=#549 id=549 data-nosnippet>549</a>        }
+<a href=#550 id=550 data-nosnippet>550</a>    }
+<a href=#551 id=551 data-nosnippet>551</a>    env
+<a href=#552 id=552 data-nosnippet>552</a>}
+<a href=#553 id=553 data-nosnippet>553</a>
+<a href=#554 id=554 data-nosnippet>554</a><span class="doccomment">/// Probe the system for available runtimes.
+<a href=#555 id=555 data-nosnippet>555</a></span><span class="kw">fn </span>detect_runtimes() -&gt; HashMap&lt;String, RuntimeInfo&gt; {
+<a href=#556 id=556 data-nosnippet>556</a>    <span class="kw">let </span><span class="kw-2">mut </span>runtimes = HashMap::new();
+<a href=#557 id=557 data-nosnippet>557</a>
+<a href=#558 id=558 data-nosnippet>558</a>    <span class="kw">let </span>candidates: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str], <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
+<a href=#559 id=559 data-nosnippet>559</a>        <span class="comment">// (language key, [binary candidates], language label)
+<a href=#560 id=560 data-nosnippet>560</a>        </span>(<span class="string">"js"</span>, <span class="kw-2">&amp;</span>[<span class="string">"node"</span>, <span class="string">"bun"</span>], <span class="string">"js"</span>),
+<a href=#561 id=561 data-nosnippet>561</a>        (<span class="string">"ts"</span>, <span class="kw-2">&amp;</span>[<span class="string">"bun"</span>, <span class="string">"npx"</span>], <span class="string">"ts"</span>),
+<a href=#562 id=562 data-nosnippet>562</a>        (<span class="string">"python"</span>, <span class="kw-2">&amp;</span>[<span class="string">"python3"</span>, <span class="string">"python"</span>], <span class="string">"python"</span>),
+<a href=#563 id=563 data-nosnippet>563</a>        (<span class="string">"shell"</span>, <span class="kw-2">&amp;</span>[<span class="string">"bash"</span>, <span class="string">"sh"</span>], <span class="string">"shell"</span>),
+<a href=#564 id=564 data-nosnippet>564</a>        (<span class="string">"ruby"</span>, <span class="kw-2">&amp;</span>[<span class="string">"ruby"</span>], <span class="string">"ruby"</span>),
+<a href=#565 id=565 data-nosnippet>565</a>        (<span class="string">"go"</span>, <span class="kw-2">&amp;</span>[<span class="string">"go"</span>], <span class="string">"go"</span>),
+<a href=#566 id=566 data-nosnippet>566</a>        (<span class="string">"rust"</span>, <span class="kw-2">&amp;</span>[<span class="string">"rustc"</span>], <span class="string">"rust"</span>),
+<a href=#567 id=567 data-nosnippet>567</a>    ];
+<a href=#568 id=568 data-nosnippet>568</a>
+<a href=#569 id=569 data-nosnippet>569</a>    <span class="kw">for </span><span class="kw-2">&amp;</span>(lang_key, binaries, lang_label) <span class="kw">in </span>candidates {
+<a href=#570 id=570 data-nosnippet>570</a>        <span class="kw">for </span><span class="kw-2">&amp;</span>bin <span class="kw">in </span>binaries {
+<a href=#571 id=571 data-nosnippet>571</a>            <span class="kw">if </span>is_binary_available(bin) {
+<a href=#572 id=572 data-nosnippet>572</a>                <span class="comment">// For ts via npx, we use `npx tsx` as the actual command
+<a href=#573 id=573 data-nosnippet>573</a>                </span><span class="kw">let </span>effective_binary = <span class="kw">if </span>lang_key == <span class="string">"ts" </span>&amp;&amp; bin == <span class="string">"npx" </span>{
+<a href=#574 id=574 data-nosnippet>574</a>                    <span class="string">"npx"</span>.to_string()
+<a href=#575 id=575 data-nosnippet>575</a>                } <span class="kw">else </span>{
+<a href=#576 id=576 data-nosnippet>576</a>                    bin.to_string()
+<a href=#577 id=577 data-nosnippet>577</a>                };
+<a href=#578 id=578 data-nosnippet>578</a>
+<a href=#579 id=579 data-nosnippet>579</a>                runtimes.insert(
+<a href=#580 id=580 data-nosnippet>580</a>                    lang_key.to_string(),
+<a href=#581 id=581 data-nosnippet>581</a>                    RuntimeInfo {
+<a href=#582 id=582 data-nosnippet>582</a>                        name: bin,
+<a href=#583 id=583 data-nosnippet>583</a>                        binary: effective_binary,
+<a href=#584 id=584 data-nosnippet>584</a>                        language: lang_label,
+<a href=#585 id=585 data-nosnippet>585</a>                    },
+<a href=#586 id=586 data-nosnippet>586</a>                );
+<a href=#587 id=587 data-nosnippet>587</a>                <span class="kw">break</span>; <span class="comment">// use first available binary
+<a href=#588 id=588 data-nosnippet>588</a>            </span>}
+<a href=#589 id=589 data-nosnippet>589</a>        }
+<a href=#590 id=590 data-nosnippet>590</a>    }
+<a href=#591 id=591 data-nosnippet>591</a>
+<a href=#592 id=592 data-nosnippet>592</a>    runtimes
+<a href=#593 id=593 data-nosnippet>593</a>}
+<a href=#594 id=594 data-nosnippet>594</a>
+<a href=#595 id=595 data-nosnippet>595</a><span class="doccomment">/// Check if a binary is available on PATH.
+<a href=#596 id=596 data-nosnippet>596</a></span><span class="kw">fn </span>is_binary_available(name: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#597 id=597 data-nosnippet>597</a>    <span class="kw">let </span>probe = <span class="kw">if </span><span class="macro">cfg!</span>(windows) { <span class="string">"where" </span>} <span class="kw">else </span>{ <span class="string">"which" </span>};
+<a href=#598 id=598 data-nosnippet>598</a>    Command::new(probe)
+<a href=#599 id=599 data-nosnippet>599</a>        .arg(name)
+<a href=#600 id=600 data-nosnippet>600</a>        .stdout(Stdio::null())
+<a href=#601 id=601 data-nosnippet>601</a>        .stderr(Stdio::null())
+<a href=#602 id=602 data-nosnippet>602</a>        .status()
+<a href=#603 id=603 data-nosnippet>603</a>        .map(|s| s.success())
+<a href=#604 id=604 data-nosnippet>604</a>        .unwrap_or(<span class="bool-val">false</span>)
+<a href=#605 id=605 data-nosnippet>605</a>}
+<a href=#606 id=606 data-nosnippet>606</a>
+<a href=#607 id=607 data-nosnippet>607</a><span class="comment">// ── Tests ─────────────────────────────────────────────────────────────────────
+<a href=#608 id=608 data-nosnippet>608</a>
+<a href=#609 id=609 data-nosnippet>609</a></span><span class="attr">#[cfg(test)]
+<a href=#610 id=610 data-nosnippet>610</a></span><span class="kw">mod </span>tests {
+<a href=#611 id=611 data-nosnippet>611</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#612 id=612 data-nosnippet>612</a>
+<a href=#613 id=613 data-nosnippet>613</a>    <span class="attr">#[test]
+<a href=#614 id=614 data-nosnippet>614</a>    </span><span class="kw">fn </span>test_new_detects_runtimes() {
+<a href=#615 id=615 data-nosnippet>615</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#616 id=616 data-nosnippet>616</a>        <span class="comment">// At minimum, shell (bash/sh) should be available on any Unix system
+<a href=#617 id=617 data-nosnippet>617</a>        </span><span class="macro">assert!</span>(
+<a href=#618 id=618 data-nosnippet>618</a>            !executor.runtimes.is_empty(),
+<a href=#619 id=619 data-nosnippet>619</a>            <span class="string">"should detect at least one runtime"
+<a href=#620 id=620 data-nosnippet>620</a>        </span>);
+<a href=#621 id=621 data-nosnippet>621</a>    }
+<a href=#622 id=622 data-nosnippet>622</a>
+<a href=#623 id=623 data-nosnippet>623</a>    <span class="attr">#[test]
+<a href=#624 id=624 data-nosnippet>624</a>    </span><span class="kw">fn </span>test_supported_languages_list() {
+<a href=#625 id=625 data-nosnippet>625</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#626 id=626 data-nosnippet>626</a>        <span class="kw">let </span>supported = executor.supported_languages();
+<a href=#627 id=627 data-nosnippet>627</a>        <span class="macro">assert!</span>(supported.len() &gt;= <span class="number">6</span>, <span class="string">"should list at least 6 supported languages"</span>);
+<a href=#628 id=628 data-nosnippet>628</a>        <span class="macro">assert!</span>(supported.contains(<span class="kw-2">&amp;</span><span class="string">"js"</span>));
+<a href=#629 id=629 data-nosnippet>629</a>        <span class="macro">assert!</span>(supported.contains(<span class="kw-2">&amp;</span><span class="string">"python"</span>));
+<a href=#630 id=630 data-nosnippet>630</a>        <span class="macro">assert!</span>(supported.contains(<span class="kw-2">&amp;</span><span class="string">"shell"</span>));
+<a href=#631 id=631 data-nosnippet>631</a>        <span class="macro">assert!</span>(supported.contains(<span class="kw-2">&amp;</span><span class="string">"ruby"</span>));
+<a href=#632 id=632 data-nosnippet>632</a>        <span class="macro">assert!</span>(supported.contains(<span class="kw-2">&amp;</span><span class="string">"go"</span>));
+<a href=#633 id=633 data-nosnippet>633</a>        <span class="macro">assert!</span>(supported.contains(<span class="kw-2">&amp;</span><span class="string">"rust"</span>));
+<a href=#634 id=634 data-nosnippet>634</a>    }
+<a href=#635 id=635 data-nosnippet>635</a>
+<a href=#636 id=636 data-nosnippet>636</a>    <span class="attr">#[test]
+<a href=#637 id=637 data-nosnippet>637</a>    </span><span class="kw">fn </span>test_default_config() {
+<a href=#638 id=638 data-nosnippet>638</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#639 id=639 data-nosnippet>639</a>        <span class="macro">assert_eq!</span>(executor.timeout(), Duration::from_secs(<span class="number">30</span>));
+<a href=#640 id=640 data-nosnippet>640</a>        <span class="macro">assert_eq!</span>(executor.max_output_bytes(), <span class="number">1_048_576</span>);
+<a href=#641 id=641 data-nosnippet>641</a>    }
+<a href=#642 id=642 data-nosnippet>642</a>
+<a href=#643 id=643 data-nosnippet>643</a>    <span class="attr">#[test]
+<a href=#644 id=644 data-nosnippet>644</a>    </span><span class="kw">fn </span>test_custom_config() {
+<a href=#645 id=645 data-nosnippet>645</a>        <span class="kw">let </span>executor = SandboxExecutor::with_config(Duration::from_secs(<span class="number">10</span>), <span class="number">4096</span>);
+<a href=#646 id=646 data-nosnippet>646</a>        <span class="macro">assert_eq!</span>(executor.timeout(), Duration::from_secs(<span class="number">10</span>));
+<a href=#647 id=647 data-nosnippet>647</a>        <span class="macro">assert_eq!</span>(executor.max_output_bytes(), <span class="number">4096</span>);
+<a href=#648 id=648 data-nosnippet>648</a>    }
+<a href=#649 id=649 data-nosnippet>649</a>
+<a href=#650 id=650 data-nosnippet>650</a>    <span class="attr">#[test]
+<a href=#651 id=651 data-nosnippet>651</a>    #[cfg(not(windows))]
+<a href=#652 id=652 data-nosnippet>652</a>    </span><span class="kw">fn </span>test_execute_shell_echo() {
+<a href=#653 id=653 data-nosnippet>653</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#654 id=654 data-nosnippet>654</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#655 id=655 data-nosnippet>655</a>            <span class="kw">return</span>; <span class="comment">// skip if no shell
+<a href=#656 id=656 data-nosnippet>656</a>        </span>}
+<a href=#657 id=657 data-nosnippet>657</a>        <span class="kw">let </span>result = executor.execute(<span class="string">"echo hello sandbox"</span>, <span class="string">"shell"</span>).unwrap();
+<a href=#658 id=658 data-nosnippet>658</a>        <span class="macro">assert_eq!</span>(result.status_code, <span class="number">0</span>);
+<a href=#659 id=659 data-nosnippet>659</a>        <span class="macro">assert_eq!</span>(result.stdout.trim(), <span class="string">"hello sandbox"</span>);
+<a href=#660 id=660 data-nosnippet>660</a>        <span class="macro">assert!</span>(!result.was_truncated);
+<a href=#661 id=661 data-nosnippet>661</a>    }
+<a href=#662 id=662 data-nosnippet>662</a>
+<a href=#663 id=663 data-nosnippet>663</a>    <span class="attr">#[test]
+<a href=#664 id=664 data-nosnippet>664</a>    #[cfg(not(windows))]
+<a href=#665 id=665 data-nosnippet>665</a>    </span><span class="kw">fn </span>test_execute_shell_captures_only_stdout() {
+<a href=#666 id=666 data-nosnippet>666</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#667 id=667 data-nosnippet>667</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#668 id=668 data-nosnippet>668</a>            <span class="kw">return</span>;
+<a href=#669 id=669 data-nosnippet>669</a>        }
+<a href=#670 id=670 data-nosnippet>670</a>        <span class="comment">// Write to both stdout and stderr — only stdout should appear
+<a href=#671 id=671 data-nosnippet>671</a>        </span><span class="kw">let </span>code = <span class="string">r#"echo "visible"
+<a href=#672 id=672 data-nosnippet>672</a>echo "hidden" &gt;&amp;2
+<a href=#673 id=673 data-nosnippet>673</a>echo "also visible""#</span>;
+<a href=#674 id=674 data-nosnippet>674</a>        <span class="kw">let </span>result = executor.execute(code, <span class="string">"shell"</span>).unwrap();
+<a href=#675 id=675 data-nosnippet>675</a>        <span class="macro">assert!</span>(result.stdout.contains(<span class="string">"visible"</span>));
+<a href=#676 id=676 data-nosnippet>676</a>        <span class="macro">assert!</span>(result.stdout.contains(<span class="string">"also visible"</span>));
+<a href=#677 id=677 data-nosnippet>677</a>        <span class="macro">assert!</span>(!result.stdout.contains(<span class="string">"hidden"</span>));
+<a href=#678 id=678 data-nosnippet>678</a>    }
+<a href=#679 id=679 data-nosnippet>679</a>
+<a href=#680 id=680 data-nosnippet>680</a>    <span class="attr">#[test]
+<a href=#681 id=681 data-nosnippet>681</a>    </span><span class="kw">fn </span>test_execute_python() {
+<a href=#682 id=682 data-nosnippet>682</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#683 id=683 data-nosnippet>683</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"python"</span>) {
+<a href=#684 id=684 data-nosnippet>684</a>            <span class="kw">return</span>;
+<a href=#685 id=685 data-nosnippet>685</a>        }
+<a href=#686 id=686 data-nosnippet>686</a>        <span class="kw">let </span>result = executor.execute(<span class="string">"print('hello from python')"</span>, <span class="string">"python"</span>).unwrap();
+<a href=#687 id=687 data-nosnippet>687</a>        <span class="macro">assert_eq!</span>(result.status_code, <span class="number">0</span>);
+<a href=#688 id=688 data-nosnippet>688</a>        <span class="macro">assert_eq!</span>(result.stdout.trim(), <span class="string">"hello from python"</span>);
+<a href=#689 id=689 data-nosnippet>689</a>    }
+<a href=#690 id=690 data-nosnippet>690</a>
+<a href=#691 id=691 data-nosnippet>691</a>    <span class="attr">#[test]
+<a href=#692 id=692 data-nosnippet>692</a>    #[cfg(not(windows))]
+<a href=#693 id=693 data-nosnippet>693</a>    </span><span class="kw">fn </span>test_execute_nonzero_exit() {
+<a href=#694 id=694 data-nosnippet>694</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#695 id=695 data-nosnippet>695</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#696 id=696 data-nosnippet>696</a>            <span class="kw">return</span>;
+<a href=#697 id=697 data-nosnippet>697</a>        }
+<a href=#698 id=698 data-nosnippet>698</a>        <span class="kw">let </span>result = executor.execute(<span class="string">"exit 42"</span>, <span class="string">"shell"</span>).unwrap();
+<a href=#699 id=699 data-nosnippet>699</a>        <span class="macro">assert_eq!</span>(result.status_code, <span class="number">42</span>);
+<a href=#700 id=700 data-nosnippet>700</a>    }
+<a href=#701 id=701 data-nosnippet>701</a>
+<a href=#702 id=702 data-nosnippet>702</a>    <span class="attr">#[test]
+<a href=#703 id=703 data-nosnippet>703</a>    #[cfg(not(windows))]
+<a href=#704 id=704 data-nosnippet>704</a>    </span><span class="kw">fn </span>test_execute_timeout() {
+<a href=#705 id=705 data-nosnippet>705</a>        <span class="kw">let </span>executor = SandboxExecutor::with_config(Duration::from_secs(<span class="number">1</span>), <span class="number">1024</span>);
+<a href=#706 id=706 data-nosnippet>706</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#707 id=707 data-nosnippet>707</a>            <span class="kw">return</span>;
+<a href=#708 id=708 data-nosnippet>708</a>        }
+<a href=#709 id=709 data-nosnippet>709</a>        <span class="kw">let </span>result = executor.execute(<span class="string">"sleep 30"</span>, <span class="string">"shell"</span>);
+<a href=#710 id=710 data-nosnippet>710</a>        <span class="macro">assert!</span>(result.is_err());
+<a href=#711 id=711 data-nosnippet>711</a>        <span class="kw">let </span>err_msg = <span class="macro">format!</span>(<span class="string">"{}"</span>, result.unwrap_err());
+<a href=#712 id=712 data-nosnippet>712</a>        <span class="macro">assert!</span>(err_msg.contains(<span class="string">"timed out"</span>));
+<a href=#713 id=713 data-nosnippet>713</a>    }
+<a href=#714 id=714 data-nosnippet>714</a>
+<a href=#715 id=715 data-nosnippet>715</a>    <span class="attr">#[test]
+<a href=#716 id=716 data-nosnippet>716</a>    </span><span class="kw">fn </span>test_execute_output_truncation() {
+<a href=#717 id=717 data-nosnippet>717</a>        <span class="kw">let </span>executor = SandboxExecutor::with_config(Duration::from_secs(<span class="number">10</span>), <span class="number">32</span>);
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#719 id=719 data-nosnippet>719</a>            <span class="kw">return</span>;
+<a href=#720 id=720 data-nosnippet>720</a>        }
+<a href=#721 id=721 data-nosnippet>721</a>        <span class="comment">// Generate output larger than 32 bytes
+<a href=#722 id=722 data-nosnippet>722</a>        </span><span class="kw">let </span>result = executor
+<a href=#723 id=723 data-nosnippet>723</a>            .execute(<span class="string">"for i in $(seq 1 100); do echo \"line $i\"; done"</span>, <span class="string">"shell"</span>)
+<a href=#724 id=724 data-nosnippet>724</a>            .unwrap();
+<a href=#725 id=725 data-nosnippet>725</a>        <span class="macro">assert!</span>(result.was_truncated);
+<a href=#726 id=726 data-nosnippet>726</a>        <span class="macro">assert!</span>(result.stdout.len() &lt;= <span class="number">32</span>);
+<a href=#727 id=727 data-nosnippet>727</a>    }
+<a href=#728 id=728 data-nosnippet>728</a>
+<a href=#729 id=729 data-nosnippet>729</a>    <span class="attr">#[test]
+<a href=#730 id=730 data-nosnippet>730</a>    </span><span class="kw">fn </span>test_unsupported_runtime() {
+<a href=#731 id=731 data-nosnippet>731</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#732 id=732 data-nosnippet>732</a>        <span class="kw">let </span>result = executor.execute(<span class="string">"code"</span>, <span class="string">"brainfuck"</span>);
+<a href=#733 id=733 data-nosnippet>733</a>        <span class="macro">assert!</span>(result.is_err());
+<a href=#734 id=734 data-nosnippet>734</a>        <span class="kw">let </span>err_msg = <span class="macro">format!</span>(<span class="string">"{}"</span>, result.unwrap_err());
+<a href=#735 id=735 data-nosnippet>735</a>        <span class="macro">assert!</span>(err_msg.contains(<span class="string">"unsupported or unavailable runtime"</span>));
+<a href=#736 id=736 data-nosnippet>736</a>    }
+<a href=#737 id=737 data-nosnippet>737</a>
+<a href=#738 id=738 data-nosnippet>738</a>    <span class="attr">#[test]
+<a href=#739 id=739 data-nosnippet>739</a>    </span><span class="kw">fn </span>test_case_insensitive_language() {
+<a href=#740 id=740 data-nosnippet>740</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#741 id=741 data-nosnippet>741</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#742 id=742 data-nosnippet>742</a>            <span class="kw">return</span>;
+<a href=#743 id=743 data-nosnippet>743</a>        }
+<a href=#744 id=744 data-nosnippet>744</a>        <span class="kw">let </span>result = executor.execute(<span class="string">"echo ok"</span>, <span class="string">"Shell"</span>);
+<a href=#745 id=745 data-nosnippet>745</a>        <span class="macro">assert!</span>(result.is_ok());
+<a href=#746 id=746 data-nosnippet>746</a>    }
+<a href=#747 id=747 data-nosnippet>747</a>
+<a href=#748 id=748 data-nosnippet>748</a>    <span class="attr">#[test]
+<a href=#749 id=749 data-nosnippet>749</a>    #[cfg(not(windows))]
+<a href=#750 id=750 data-nosnippet>750</a>    </span><span class="kw">fn </span>test_credential_env_includes_path() {
+<a href=#751 id=751 data-nosnippet>751</a>        <span class="kw">let </span>env = build_credential_env();
+<a href=#752 id=752 data-nosnippet>752</a>        <span class="macro">assert!</span>(env.contains_key(<span class="string">"PATH"</span>), <span class="string">"PATH should be inherited"</span>);
+<a href=#753 id=753 data-nosnippet>753</a>    }
+<a href=#754 id=754 data-nosnippet>754</a>
+<a href=#755 id=755 data-nosnippet>755</a>    <span class="attr">#[test]
+<a href=#756 id=756 data-nosnippet>756</a>    </span><span class="kw">fn </span>test_credential_env_includes_aws() {
+<a href=#757 id=757 data-nosnippet>757</a>        <span class="comment">// Temporarily set an AWS var to verify it's picked up
+<a href=#758 id=758 data-nosnippet>758</a>        </span>std::env::set_var(<span class="string">"AWS_TEST_SANDBOX"</span>, <span class="string">"test_value"</span>);
+<a href=#759 id=759 data-nosnippet>759</a>        <span class="kw">let </span>env = build_credential_env();
+<a href=#760 id=760 data-nosnippet>760</a>        <span class="macro">assert_eq!</span>(env.get(<span class="string">"AWS_TEST_SANDBOX"</span>).map(|s| s.as_str()), <span class="prelude-val">Some</span>(<span class="string">"test_value"</span>));
+<a href=#761 id=761 data-nosnippet>761</a>        std::env::remove_var(<span class="string">"AWS_TEST_SANDBOX"</span>);
+<a href=#762 id=762 data-nosnippet>762</a>    }
+<a href=#763 id=763 data-nosnippet>763</a>
+<a href=#764 id=764 data-nosnippet>764</a>    <span class="attr">#[test]
+<a href=#765 id=765 data-nosnippet>765</a>    </span><span class="kw">fn </span>test_is_binary_available() {
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="comment">// `sh` should always be available on Unix
+<a href=#767 id=767 data-nosnippet>767</a>        </span><span class="macro">assert!</span>(is_binary_available(<span class="string">"sh"</span>));
+<a href=#768 id=768 data-nosnippet>768</a>        <span class="macro">assert!</span>(!is_binary_available(<span class="string">"definitely_not_a_real_binary_xyz"</span>));
+<a href=#769 id=769 data-nosnippet>769</a>    }
+<a href=#770 id=770 data-nosnippet>770</a>
+<a href=#771 id=771 data-nosnippet>771</a>    <span class="comment">// ── OutputFilter unit tests ───────────────────────────────────────────
+<a href=#772 id=772 data-nosnippet>772</a>
+<a href=#773 id=773 data-nosnippet>773</a>    </span><span class="attr">#[test]
+<a href=#774 id=774 data-nosnippet>774</a>    </span><span class="kw">fn </span>test_chunk_output_splits_on_double_newline() {
+<a href=#775 id=775 data-nosnippet>775</a>        <span class="kw">let </span>text = <span class="string">"first paragraph\n\nsecond paragraph\n\nthird paragraph"</span>;
+<a href=#776 id=776 data-nosnippet>776</a>        <span class="kw">let </span>chunks = OutputFilter::chunk_output(text);
+<a href=#777 id=777 data-nosnippet>777</a>        <span class="macro">assert_eq!</span>(chunks.len(), <span class="number">3</span>);
+<a href=#778 id=778 data-nosnippet>778</a>        <span class="macro">assert_eq!</span>(chunks[<span class="number">0</span>], <span class="string">"first paragraph"</span>);
+<a href=#779 id=779 data-nosnippet>779</a>        <span class="macro">assert_eq!</span>(chunks[<span class="number">1</span>], <span class="string">"second paragraph"</span>);
+<a href=#780 id=780 data-nosnippet>780</a>        <span class="macro">assert_eq!</span>(chunks[<span class="number">2</span>], <span class="string">"third paragraph"</span>);
+<a href=#781 id=781 data-nosnippet>781</a>    }
+<a href=#782 id=782 data-nosnippet>782</a>
+<a href=#783 id=783 data-nosnippet>783</a>    <span class="attr">#[test]
+<a href=#784 id=784 data-nosnippet>784</a>    </span><span class="kw">fn </span>test_chunk_output_splits_large_paragraphs() {
+<a href=#785 id=785 data-nosnippet>785</a>        <span class="comment">// Build a single paragraph &gt; 512 bytes with many lines
+<a href=#786 id=786 data-nosnippet>786</a>        </span><span class="kw">let </span>line = <span class="string">"a]"</span>.repeat(<span class="number">30</span>); <span class="comment">// 60 chars per line
+<a href=#787 id=787 data-nosnippet>787</a>        </span><span class="kw">let </span>big_para = (<span class="number">0</span>..<span class="number">20</span>).map(|i| <span class="macro">format!</span>(<span class="string">"{line} line{i}"</span>)).collect::&lt;Vec&lt;<span class="kw">_</span>&gt;&gt;().join(<span class="string">"\n"</span>);
+<a href=#788 id=788 data-nosnippet>788</a>        <span class="macro">assert!</span>(big_para.len() &gt; <span class="number">512</span>);
+<a href=#789 id=789 data-nosnippet>789</a>
+<a href=#790 id=790 data-nosnippet>790</a>        <span class="kw">let </span>chunks = OutputFilter::chunk_output(<span class="kw-2">&amp;</span>big_para);
+<a href=#791 id=791 data-nosnippet>791</a>        <span class="macro">assert!</span>(chunks.len() &gt; <span class="number">1</span>, <span class="string">"large paragraph should be sub-split"</span>);
+<a href=#792 id=792 data-nosnippet>792</a>        <span class="kw">for </span>chunk <span class="kw">in </span><span class="kw-2">&amp;</span>chunks {
+<a href=#793 id=793 data-nosnippet>793</a>            <span class="macro">assert!</span>(chunk.len() &lt;= <span class="number">600</span>, <span class="string">"each sub-chunk should be roughly ≤512 bytes"</span>);
+<a href=#794 id=794 data-nosnippet>794</a>        }
+<a href=#795 id=795 data-nosnippet>795</a>    }
+<a href=#796 id=796 data-nosnippet>796</a>
+<a href=#797 id=797 data-nosnippet>797</a>    <span class="attr">#[test]
+<a href=#798 id=798 data-nosnippet>798</a>    </span><span class="kw">fn </span>test_chunk_output_empty_input() {
+<a href=#799 id=799 data-nosnippet>799</a>        <span class="kw">let </span>chunks = OutputFilter::chunk_output(<span class="string">""</span>);
+<a href=#800 id=800 data-nosnippet>800</a>        <span class="macro">assert!</span>(chunks.is_empty());
+<a href=#801 id=801 data-nosnippet>801</a>    }
+<a href=#802 id=802 data-nosnippet>802</a>
+<a href=#803 id=803 data-nosnippet>803</a>    <span class="attr">#[test]
+<a href=#804 id=804 data-nosnippet>804</a>    </span><span class="kw">fn </span>test_filter_returns_matching_sections() {
+<a href=#805 id=805 data-nosnippet>805</a>        <span class="kw">let </span>text = <span class="string">"error: compilation failed at line 42\n\n\
+<a href=#806 id=806 data-nosnippet>806</a>                    warning: unused variable `x`\n\n\
+<a href=#807 id=807 data-nosnippet>807</a>                    info: build started at 10:00\n\n\
+<a href=#808 id=808 data-nosnippet>808</a>                    error: type mismatch in function foo\n\n\
+<a href=#809 id=809 data-nosnippet>809</a>                    success: 3 tests passed"</span>;
+<a href=#810 id=810 data-nosnippet>810</a>        <span class="kw">let </span>result = OutputFilter::filter(text, <span class="string">"error compilation"</span>).unwrap();
+<a href=#811 id=811 data-nosnippet>811</a>        <span class="macro">assert!</span>(!result.matched_sections.is_empty(), <span class="string">"should find error-related chunks"</span>);
+<a href=#812 id=812 data-nosnippet>812</a>        <span class="comment">// At least one matched section should contain "error"
+<a href=#813 id=813 data-nosnippet>813</a>        </span><span class="macro">assert!</span>(
+<a href=#814 id=814 data-nosnippet>814</a>            result.matched_sections.iter().any(|s| s.contains(<span class="string">"error"</span>)),
+<a href=#815 id=815 data-nosnippet>815</a>            <span class="string">"matched sections should contain the intent keyword"
+<a href=#816 id=816 data-nosnippet>816</a>        </span>);
+<a href=#817 id=817 data-nosnippet>817</a>        <span class="macro">assert!</span>(result.total_chunks &gt;= <span class="number">4</span>);
+<a href=#818 id=818 data-nosnippet>818</a>    }
+<a href=#819 id=819 data-nosnippet>819</a>
+<a href=#820 id=820 data-nosnippet>820</a>    <span class="attr">#[test]
+<a href=#821 id=821 data-nosnippet>821</a>    </span><span class="kw">fn </span>test_filter_returns_vocabulary() {
+<a href=#822 id=822 data-nosnippet>822</a>        <span class="kw">let </span>text = <span class="string">"the quick brown fox jumps over the lazy dog\n\n\
+<a href=#823 id=823 data-nosnippet>823</a>                    rust programming language is fast and safe\n\n\
+<a href=#824 id=824 data-nosnippet>824</a>                    memory safety without garbage collection"</span>;
+<a href=#825 id=825 data-nosnippet>825</a>        <span class="kw">let </span>result = OutputFilter::filter(text, <span class="string">"rust"</span>).unwrap();
+<a href=#826 id=826 data-nosnippet>826</a>        <span class="macro">assert!</span>(!result.vocabulary.is_empty(), <span class="string">"vocabulary should not be empty"</span>);
+<a href=#827 id=827 data-nosnippet>827</a>        <span class="comment">// Vocabulary should contain stemmed terms from the content
+<a href=#828 id=828 data-nosnippet>828</a>        // (porter stemmer may stem words, so check for presence of some terms)
+<a href=#829 id=829 data-nosnippet>829</a>        </span><span class="kw">let </span>vocab_joined = result.vocabulary.join(<span class="string">" "</span>);
+<a href=#830 id=830 data-nosnippet>830</a>        <span class="macro">assert!</span>(
+<a href=#831 id=831 data-nosnippet>831</a>            vocab_joined.contains(<span class="string">"rust"</span>) || vocab_joined.contains(<span class="string">"fast"</span>) || vocab_joined.contains(<span class="string">"safe"</span>),
+<a href=#832 id=832 data-nosnippet>832</a>            <span class="string">"vocabulary should contain terms from the indexed content"
+<a href=#833 id=833 data-nosnippet>833</a>        </span>);
+<a href=#834 id=834 data-nosnippet>834</a>    }
+<a href=#835 id=835 data-nosnippet>835</a>
+<a href=#836 id=836 data-nosnippet>836</a>    <span class="attr">#[test]
+<a href=#837 id=837 data-nosnippet>837</a>    </span><span class="kw">fn </span>test_filter_no_match_returns_empty() {
+<a href=#838 id=838 data-nosnippet>838</a>        <span class="kw">let </span>text = <span class="string">"hello world\n\nfoo bar baz"</span>;
+<a href=#839 id=839 data-nosnippet>839</a>        <span class="kw">let </span>result = OutputFilter::filter(text, <span class="string">"zzzznonexistent"</span>).unwrap();
+<a href=#840 id=840 data-nosnippet>840</a>        <span class="macro">assert!</span>(result.matched_sections.is_empty());
+<a href=#841 id=841 data-nosnippet>841</a>        <span class="macro">assert_eq!</span>(result.matched_chunks, <span class="number">0</span>);
+<a href=#842 id=842 data-nosnippet>842</a>    }
+<a href=#843 id=843 data-nosnippet>843</a>
+<a href=#844 id=844 data-nosnippet>844</a>    <span class="attr">#[test]
+<a href=#845 id=845 data-nosnippet>845</a>    </span><span class="kw">fn </span>test_filter_special_chars_in_intent() {
+<a href=#846 id=846 data-nosnippet>846</a>        <span class="comment">// Intent with special characters should not crash FTS5
+<a href=#847 id=847 data-nosnippet>847</a>        </span><span class="kw">let </span>text = <span class="string">"error: something went wrong\n\nwarning: check this"</span>;
+<a href=#848 id=848 data-nosnippet>848</a>        <span class="kw">let </span>result = OutputFilter::filter(text, <span class="string">"error: (something) [wrong]"</span>);
+<a href=#849 id=849 data-nosnippet>849</a>        <span class="macro">assert!</span>(result.is_ok(), <span class="string">"special chars in intent should be sanitized"</span>);
+<a href=#850 id=850 data-nosnippet>850</a>    }
+<a href=#851 id=851 data-nosnippet>851</a>
+<a href=#852 id=852 data-nosnippet>852</a>    <span class="attr">#[test]
+<a href=#853 id=853 data-nosnippet>853</a>    #[cfg(not(windows))]
+<a href=#854 id=854 data-nosnippet>854</a>    </span><span class="kw">fn </span>test_execute_with_intent_small_output_no_filter() {
+<a href=#855 id=855 data-nosnippet>855</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#856 id=856 data-nosnippet>856</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#857 id=857 data-nosnippet>857</a>            <span class="kw">return</span>;
+<a href=#858 id=858 data-nosnippet>858</a>        }
+<a href=#859 id=859 data-nosnippet>859</a>        <span class="comment">// Small output (&lt; 5KB) should not trigger filtering
+<a href=#860 id=860 data-nosnippet>860</a>        </span><span class="kw">let </span>(result, filtered) = executor
+<a href=#861 id=861 data-nosnippet>861</a>            .execute_with_intent(<span class="string">"echo hello"</span>, <span class="string">"shell"</span>, <span class="prelude-val">Some</span>(<span class="string">"hello"</span>))
+<a href=#862 id=862 data-nosnippet>862</a>            .unwrap();
+<a href=#863 id=863 data-nosnippet>863</a>        <span class="macro">assert_eq!</span>(result.status_code, <span class="number">0</span>);
+<a href=#864 id=864 data-nosnippet>864</a>        <span class="macro">assert!</span>(!result.was_indexed);
+<a href=#865 id=865 data-nosnippet>865</a>        <span class="macro">assert!</span>(filtered.is_none());
+<a href=#866 id=866 data-nosnippet>866</a>    }
+<a href=#867 id=867 data-nosnippet>867</a>
+<a href=#868 id=868 data-nosnippet>868</a>    <span class="attr">#[test]
+<a href=#869 id=869 data-nosnippet>869</a>    </span><span class="kw">fn </span>test_execute_with_intent_no_intent_no_filter() {
+<a href=#870 id=870 data-nosnippet>870</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#871 id=871 data-nosnippet>871</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#872 id=872 data-nosnippet>872</a>            <span class="kw">return</span>;
+<a href=#873 id=873 data-nosnippet>873</a>        }
+<a href=#874 id=874 data-nosnippet>874</a>        <span class="comment">// Even large output without intent should not filter
+<a href=#875 id=875 data-nosnippet>875</a>        </span><span class="kw">let </span>code = <span class="string">"for i in $(seq 1 1000); do echo \"line $i: some padding text to make it bigger\"; done"</span>;
+<a href=#876 id=876 data-nosnippet>876</a>        <span class="kw">let </span>(result, filtered) = executor
+<a href=#877 id=877 data-nosnippet>877</a>            .execute_with_intent(code, <span class="string">"shell"</span>, <span class="prelude-val">None</span>)
+<a href=#878 id=878 data-nosnippet>878</a>            .unwrap();
+<a href=#879 id=879 data-nosnippet>879</a>        <span class="macro">assert!</span>(!result.was_indexed);
+<a href=#880 id=880 data-nosnippet>880</a>        <span class="macro">assert!</span>(filtered.is_none());
+<a href=#881 id=881 data-nosnippet>881</a>    }
+<a href=#882 id=882 data-nosnippet>882</a>
+<a href=#883 id=883 data-nosnippet>883</a>    <span class="attr">#[test]
+<a href=#884 id=884 data-nosnippet>884</a>    #[cfg(not(windows))]
+<a href=#885 id=885 data-nosnippet>885</a>    </span><span class="kw">fn </span>test_execute_with_intent_large_output_filters() {
+<a href=#886 id=886 data-nosnippet>886</a>        <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#887 id=887 data-nosnippet>887</a>        <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#888 id=888 data-nosnippet>888</a>            <span class="kw">return</span>;
+<a href=#889 id=889 data-nosnippet>889</a>        }
+<a href=#890 id=890 data-nosnippet>890</a>        <span class="comment">// Generate &gt; 5KB of output with identifiable sections
+<a href=#891 id=891 data-nosnippet>891</a>        </span><span class="kw">let </span>code = <span class="string">r#"
+<a href=#892 id=892 data-nosnippet>892</a>for i in $(seq 1 50); do echo "error: compilation failed at module $i"; done
+<a href=#893 id=893 data-nosnippet>893</a>echo ""
+<a href=#894 id=894 data-nosnippet>894</a>for i in $(seq 1 50); do echo "info: processing file $i of 200"; done
+<a href=#895 id=895 data-nosnippet>895</a>echo ""
+<a href=#896 id=896 data-nosnippet>896</a>for i in $(seq 1 50); do echo "warning: deprecated API usage in handler $i"; done
+<a href=#897 id=897 data-nosnippet>897</a>echo ""
+<a href=#898 id=898 data-nosnippet>898</a>for i in $(seq 1 50); do echo "success: test suite $i passed with 100% coverage"; done
+<a href=#899 id=899 data-nosnippet>899</a>"#</span>;
+<a href=#900 id=900 data-nosnippet>900</a>        <span class="kw">let </span>(result, filtered) = executor
+<a href=#901 id=901 data-nosnippet>901</a>            .execute_with_intent(code, <span class="string">"shell"</span>, <span class="prelude-val">Some</span>(<span class="string">"error compilation"</span>))
+<a href=#902 id=902 data-nosnippet>902</a>            .unwrap();
+<a href=#903 id=903 data-nosnippet>903</a>        <span class="macro">assert!</span>(result.was_indexed, <span class="string">"large output with intent should be indexed"</span>);
+<a href=#904 id=904 data-nosnippet>904</a>        <span class="kw">let </span>filtered = filtered.expect(<span class="string">"should have filtered output"</span>);
+<a href=#905 id=905 data-nosnippet>905</a>        <span class="macro">assert!</span>(!filtered.matched_sections.is_empty(), <span class="string">"should have matched sections"</span>);
+<a href=#906 id=906 data-nosnippet>906</a>        <span class="macro">assert!</span>(!filtered.vocabulary.is_empty(), <span class="string">"should have vocabulary"</span>);
+<a href=#907 id=907 data-nosnippet>907</a>        <span class="macro">assert!</span>(filtered.total_chunks &gt; <span class="number">0</span>);
+<a href=#908 id=908 data-nosnippet>908</a>    }
+<a href=#909 id=909 data-nosnippet>909</a>
+<a href=#910 id=910 data-nosnippet>910</a>    <span class="comment">// ── Property-based tests (Unix only — depend on bash/shell) ──────────
+<a href=#911 id=911 data-nosnippet>911</a>
+<a href=#912 id=912 data-nosnippet>912</a>    </span><span class="attr">#[cfg(not(windows))]
+<a href=#913 id=913 data-nosnippet>913</a>    </span><span class="kw">mod </span>proptests {
+<a href=#914 id=914 data-nosnippet>914</a>        <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#915 id=915 data-nosnippet>915</a>        <span class="kw">use </span>proptest::prelude::<span class="kw-2">*</span>;
+<a href=#916 id=916 data-nosnippet>916</a>
+<a href=#917 id=917 data-nosnippet>917</a>        <span class="doccomment">/// Generate a random alphanumeric label safe for use in shell echo commands.
+<a href=#918 id=918 data-nosnippet>918</a>        </span><span class="kw">fn </span>safe_label() -&gt; <span class="kw">impl </span>Strategy&lt;Value = String&gt; {
+<a href=#919 id=919 data-nosnippet>919</a>            <span class="string">"[a-zA-Z0-9]{1,20}"
+<a href=#920 id=920 data-nosnippet>920</a>        </span>}
+<a href=#921 id=921 data-nosnippet>921</a>
+<a href=#922 id=922 data-nosnippet>922</a>        <span class="comment">// **Validates: Requirements 30.1, 30.2**
+<a href=#923 id=923 data-nosnippet>923</a>        //
+<a href=#924 id=924 data-nosnippet>924</a>        // Property 35: Sandbox execution isolation — stdout only
+<a href=#925 id=925 data-nosnippet>925</a>        //
+<a href=#926 id=926 data-nosnippet>926</a>        // For any code execution that writes to both stdout and stderr,
+<a href=#927 id=927 data-nosnippet>927</a>        // only stdout content appears in the returned SandboxResult.
+<a href=#928 id=928 data-nosnippet>928</a>        // We use distinct prefixes to guarantee stdout and stderr
+<a href=#929 id=929 data-nosnippet>929</a>        // messages are distinguishable.
+<a href=#930 id=930 data-nosnippet>930</a>        </span><span class="macro">proptest!</span> {
+<a href=#931 id=931 data-nosnippet>931</a>            <span class="attr">#[test]
+<a href=#932 id=932 data-nosnippet>932</a>            </span><span class="kw">fn </span>prop_only_stdout_captured(
+<a href=#933 id=933 data-nosnippet>933</a>                label <span class="kw">in </span>safe_label(),
+<a href=#934 id=934 data-nosnippet>934</a>            ) {
+<a href=#935 id=935 data-nosnippet>935</a>                <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#936 id=936 data-nosnippet>936</a>                <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#937 id=937 data-nosnippet>937</a>                    <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#938 id=938 data-nosnippet>938</a>                }
+<a href=#939 id=939 data-nosnippet>939</a>
+<a href=#940 id=940 data-nosnippet>940</a>                <span class="kw">let </span>stdout_msg = <span class="macro">format!</span>(<span class="string">"OUT_{label}"</span>);
+<a href=#941 id=941 data-nosnippet>941</a>                <span class="kw">let </span>stderr_msg = <span class="macro">format!</span>(<span class="string">"ERR_{label}"</span>);
+<a href=#942 id=942 data-nosnippet>942</a>
+<a href=#943 id=943 data-nosnippet>943</a>                <span class="comment">// Script writes distinct messages to stdout and stderr
+<a href=#944 id=944 data-nosnippet>944</a>                </span><span class="kw">let </span>code = <span class="macro">format!</span>(
+<a href=#945 id=945 data-nosnippet>945</a>                    <span class="string">"echo \"{stdout_msg}\"\necho \"{stderr_msg}\" &gt;&amp;2"
+<a href=#946 id=946 data-nosnippet>946</a>                </span>);
+<a href=#947 id=947 data-nosnippet>947</a>                <span class="kw">let </span>result = executor.execute(<span class="kw-2">&amp;</span>code, <span class="string">"shell"</span>).unwrap();
+<a href=#948 id=948 data-nosnippet>948</a>
+<a href=#949 id=949 data-nosnippet>949</a>                <span class="comment">// stdout content must be present
+<a href=#950 id=950 data-nosnippet>950</a>                </span><span class="macro">prop_assert!</span>(
+<a href=#951 id=951 data-nosnippet>951</a>                    result.stdout.contains(<span class="kw-2">&amp;</span>stdout_msg),
+<a href=#952 id=952 data-nosnippet>952</a>                    <span class="string">"stdout should contain the stdout message '{}', got: '{}'"</span>,
+<a href=#953 id=953 data-nosnippet>953</a>                    stdout_msg, result.stdout
+<a href=#954 id=954 data-nosnippet>954</a>                );
+<a href=#955 id=955 data-nosnippet>955</a>                <span class="comment">// stderr content must never appear
+<a href=#956 id=956 data-nosnippet>956</a>                </span><span class="macro">prop_assert!</span>(
+<a href=#957 id=957 data-nosnippet>957</a>                    !result.stdout.contains(<span class="kw-2">&amp;</span>stderr_msg),
+<a href=#958 id=958 data-nosnippet>958</a>                    <span class="string">"stdout should NOT contain the stderr message '{}', got: '{}'"</span>,
+<a href=#959 id=959 data-nosnippet>959</a>                    stderr_msg, result.stdout
+<a href=#960 id=960 data-nosnippet>960</a>                );
+<a href=#961 id=961 data-nosnippet>961</a>            }
+<a href=#962 id=962 data-nosnippet>962</a>        }
+<a href=#963 id=963 data-nosnippet>963</a>
+<a href=#964 id=964 data-nosnippet>964</a>        <span class="comment">// **Validates: Requirements 30.1, 30.2**
+<a href=#965 id=965 data-nosnippet>965</a>        //
+<a href=#966 id=966 data-nosnippet>966</a>        // Property 35: Sandbox execution isolation — subprocess isolation
+<a href=#967 id=967 data-nosnippet>967</a>        //
+<a href=#968 id=968 data-nosnippet>968</a>        // Each execution runs in an isolated subprocess with no shared
+<a href=#969 id=969 data-nosnippet>969</a>        // state. Setting an env var in one execution must not be visible
+<a href=#970 id=970 data-nosnippet>970</a>        // in a subsequent execution.
+<a href=#971 id=971 data-nosnippet>971</a>        </span><span class="macro">proptest!</span> {
+<a href=#972 id=972 data-nosnippet>972</a>            <span class="attr">#[test]
+<a href=#973 id=973 data-nosnippet>973</a>            </span><span class="kw">fn </span>prop_no_shared_state_between_executions(
+<a href=#974 id=974 data-nosnippet>974</a>                var_name <span class="kw">in </span><span class="string">"[A-Z]{3,8}"</span>,
+<a href=#975 id=975 data-nosnippet>975</a>                var_value <span class="kw">in </span><span class="string">"[a-z0-9]{1,10}"</span>,
+<a href=#976 id=976 data-nosnippet>976</a>            ) {
+<a href=#977 id=977 data-nosnippet>977</a>                <span class="kw">let </span>executor = SandboxExecutor::new();
+<a href=#978 id=978 data-nosnippet>978</a>                <span class="kw">if </span>!executor.is_available(<span class="string">"shell"</span>) {
+<a href=#979 id=979 data-nosnippet>979</a>                    <span class="kw">return </span><span class="prelude-val">Ok</span>(());
+<a href=#980 id=980 data-nosnippet>980</a>                }
+<a href=#981 id=981 data-nosnippet>981</a>
+<a href=#982 id=982 data-nosnippet>982</a>                <span class="kw">let </span>unique_var = <span class="macro">format!</span>(<span class="string">"SQZ_PROP_{var_name}"</span>);
+<a href=#983 id=983 data-nosnippet>983</a>
+<a href=#984 id=984 data-nosnippet>984</a>                <span class="comment">// First execution: export an env var
+<a href=#985 id=985 data-nosnippet>985</a>                </span><span class="kw">let </span>code1 = <span class="macro">format!</span>(
+<a href=#986 id=986 data-nosnippet>986</a>                    <span class="string">"export {unique_var}={var_value}\necho \"set {unique_var}\""
+<a href=#987 id=987 data-nosnippet>987</a>                </span>);
+<a href=#988 id=988 data-nosnippet>988</a>                <span class="kw">let </span>result1 = executor.execute(<span class="kw-2">&amp;</span>code1, <span class="string">"shell"</span>).unwrap();
+<a href=#989 id=989 data-nosnippet>989</a>                <span class="macro">prop_assert!</span>(
+<a href=#990 id=990 data-nosnippet>990</a>                    result1.stdout.contains(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"set {unique_var}"</span>)),
+<a href=#991 id=991 data-nosnippet>991</a>                    <span class="string">"first execution should succeed"
+<a href=#992 id=992 data-nosnippet>992</a>                </span>);
+<a href=#993 id=993 data-nosnippet>993</a>
+<a href=#994 id=994 data-nosnippet>994</a>                <span class="comment">// Second execution: try to read that env var — it should be empty
+<a href=#995 id=995 data-nosnippet>995</a>                </span><span class="kw">let </span>code2 = <span class="macro">format!</span>(
+<a href=#996 id=996 data-nosnippet>996</a>                    <span class="string">"echo \"val=${{{unique_var}:-UNSET}}\""
+<a href=#997 id=997 data-nosnippet>997</a>                </span>);
+<a href=#998 id=998 data-nosnippet>998</a>                <span class="kw">let </span>result2 = executor.execute(<span class="kw-2">&amp;</span>code2, <span class="string">"shell"</span>).unwrap();
+<a href=#999 id=999 data-nosnippet>999</a>                <span class="macro">prop_assert!</span>(
+<a href=#1000 id=1000 data-nosnippet>1000</a>                    result2.stdout.contains(<span class="string">"val=UNSET"</span>),
+<a href=#1001 id=1001 data-nosnippet>1001</a>                    <span class="string">"env var from first execution should not leak into second; got: '{}'"</span>,
+<a href=#1002 id=1002 data-nosnippet>1002</a>                    result2.stdout
+<a href=#1003 id=1003 data-nosnippet>1003</a>                );
+<a href=#1004 id=1004 data-nosnippet>1004</a>            }
+<a href=#1005 id=1005 data-nosnippet>1005</a>        }
+<a href=#1006 id=1006 data-nosnippet>1006</a>    }
+<a href=#1007 id=1007 data-nosnippet>1007</a>}
+</code></pre></div></section></main></body></html>

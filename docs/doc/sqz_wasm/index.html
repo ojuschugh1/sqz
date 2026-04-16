@@ -1,0 +1,39 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="sqz-wasm"><title>sqz_wasm - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-b7b9f40b.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="sqz_wasm" data-themes="" data-resource-suffix="" data-rustdoc-version="1.95.0-nightly (c7f5f3e0d 2026-02-07)" data-channel="nightly" data-search-js="search-fb33671b.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-f9617a14.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-12f88f4f.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate sqz_wasm</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../sqz_wasm/index.html">sqz_<wbr>wasm</a><span class="version">0.5.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#sqz-wasm" title="sqz-wasm">sqz-wasm</a><ul><li><a href="#whats-included" title="What’s included">What’s included</a></li><li><a href="#browser-usage" title="Browser usage">Browser usage</a></li><li><a href="#presets" title="Presets">Presets</a></li></ul></li></ul><h3><a href="#structs">Crate Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1>Crate <span>sqz_<wbr>wasm</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/sqz_wasm/lib.rs.html#1-913">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="sqz-wasm"><a class="doc-anchor" href="#sqz-wasm">§</a>sqz-wasm</h2>
+<p>Browser-compatible WASM build of the sqz compression engine. This is a
+self-contained subset of <code>sqz_engine</code> compiled to <code>wasm32-unknown-unknown</code> —
+no tree-sitter, no SQLite, no filesystem. Everything runs in memory.</p>
+<h3 id="whats-included"><a class="doc-anchor" href="#whats-included">§</a>What’s included</h3>
+<ul>
+<li>TOON encoding for JSON (null stripping, array collapsing, tabular encoding)</li>
+<li>Content classification (JSON, code, logs, prose)</li>
+<li>Text compression with phrase abbreviation and word shortening</li>
+<li>Log condensing (repeated lines collapsed)</li>
+<li>Code compression (comment stripping, blank line collapsing)</li>
+<li>In-memory dedup cache (hash-based, no persistence)</li>
+<li>Three compression presets: minimal, default, aggressive</li>
+</ul>
+<h3 id="browser-usage"><a class="doc-anchor" href="#browser-usage">§</a>Browser usage</h3>
+<p>Build with <code>wasm-pack</code>:</p>
+<div class="example-wrap"><pre class="language-text"><code>wasm-pack build sqz-wasm --target web</code></pre></div>
+<p>Then in JavaScript:</p>
+<div class="example-wrap"><pre class="language-text"><code>import init, { SqzWasm } from &#39;./pkg/sqz_wasm.js&#39;;
+
+await init();
+const sqz = new SqzWasm(&quot;default&quot;);
+
+// Compress JSON — gets TOON-encoded, nulls stripped
+const result = sqz.compress(&#39;{&quot;name&quot;: &quot;Alice&quot;, &quot;debug&quot;: null}&#39;);
+console.log(result); // TOON:{name:&quot;Alice&quot;}
+
+// Estimate token count
+const tokens = sqz.estimate_tokens(result);
+
+// Session export/import for persistence
+const ctx = sqz.export_ctx();
+sqz.import_ctx(ctx);</code></pre></div><h3 id="presets"><a class="doc-anchor" href="#presets">§</a>Presets</h3>
+<ul>
+<li><code>"minimal"</code> — TOON encoding only, no stripping</li>
+<li><code>"default"</code> — strip nulls + condense + TOON + word abbreviation</li>
+<li><code>"aggressive"</code> — all of default + collapse arrays at 5 items</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SqzWasm.html" title="struct sqz_wasm::SqzWasm">SqzWasm</a></dt><dd>Browser-facing WASM wrapper for the sqz compression engine.</dd></dl></section></div></main></body></html>

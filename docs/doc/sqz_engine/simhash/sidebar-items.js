@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["simhash","simhash_weighted"],"struct":["SimHashFingerprint"]};

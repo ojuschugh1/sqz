@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["McpTransport"],"fn":["default_tool_definitions"],"struct":["McpServer","ToolCallRequest","ToolCallResponse"]};

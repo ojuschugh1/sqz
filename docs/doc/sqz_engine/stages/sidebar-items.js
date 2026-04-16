@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["abbreviate_words"],"struct":["CollapseArraysStage","CondenseStage","CustomTransformsStage","FlattenStage","GitDiffFoldStage","KeepFieldsStage","StripFieldsStage","StripNullsStage","TruncateStringsStage","WordAbbreviateStage"],"trait":["CompressionStage"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_tree","compress_to_budget"],"struct":["SemanticNode"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLI_PATTERNS"],"fn":["content_hash"],"struct":["CacheEntry","CliProxy"]};
