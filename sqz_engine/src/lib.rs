@@ -1,6 +1,8 @@
+pub mod adaptive_tree;
 pub mod advanced_search;
 pub mod ansi_strip;
 pub mod api_proxy;
+pub mod ast_delta;
 pub mod ast_parser;
 pub mod benchmarks;
 pub mod bpe_compressor;
@@ -16,8 +18,10 @@ pub mod entropy_analyzer;
 pub mod entropy_truncator;
 pub mod file_reader;
 pub mod image_compressor;
+pub mod kv_cache_optimizer;
 pub mod litm_positioner;
 pub mod mdl_selector;
+pub mod minhash_lsh;
 pub mod ngram_abbreviator;
 pub mod rle_compressor;
 pub mod simhash;
@@ -34,6 +38,7 @@ pub mod cost_calculator;
 pub mod ctx_format;
 pub mod error;
 pub mod model_router;
+pub mod parse_tree_compressor;
 pub mod pipeline;
 pub mod pin_manager;
 pub mod plugin_api;
@@ -120,3 +125,9 @@ pub use hook_manager::{
 pub use sandbox_executor::{SandboxExecutor, SandboxResult, RuntimeInfo, FilteredOutput};
 pub use url_indexer::{ContentFetcher, IndexedChunk, IndexResult, UrlIndexer};
 pub use verifier::Verifier;
+
+pub use adaptive_tree::{compress_to_budget, build_tree, SemanticNode};
+pub use ast_delta::{ast_diff, encode_delta, AstDelta, AstChange, ChangeKind};
+pub use kv_cache_optimizer::{compress_with_sinks, compress_with_custom_sinks};
+pub use minhash_lsh::{MinHashLsh, MinHashSignature};
+pub use parse_tree_compressor::{compress_code, char_entropy};
