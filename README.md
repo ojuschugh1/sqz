@@ -33,7 +33,7 @@
 
 ---
 
-sqz compresses command output before it reaches your LLM. Single Rust binary, 100+ commands, zero config.
+sqz compresses command output before it reaches your LLM. Single Rust binary, zero config.
 
 The real win is dedup: when the same file gets read 5 times in a session, sqz sends it once and returns a 13-token reference for every repeat.
 
@@ -58,6 +58,8 @@ Total:         6,000 tokens     Total:         ~826 tokens (86% saved)
 | `git log` (5x) | 2,500 | 425 | -83% |
 | JSON API responses | 4,000 | 1,200 | -70% |
 | **30-min session total** | **~84,500** | **~12,175** | **-86%** |
+
+*Session estimates include dedup savings across repeated reads. Single-command compression ranges from 10-60% depending on content type. Run `cargo test -p sqz-engine benchmarks -- --nocapture` for exact per-command numbers.*
 
 Dedup cache is where the biggest savings come from. Without it, repeated file reads get compressed each time (~60% savings). With it, reads 2+ are 13 tokens.
 
@@ -140,7 +142,7 @@ sqz token savings (last 7 days)
 3. **JSON pipeline** — strip nulls → flatten → collapse arrays → TOON encoding (lossless compact format)
 4. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
 
-For the full technical details, see [ARCHITECTURE.md](ARCHITECTURE.md).
+For the full technical details, see [docs/](docs/).
 
 ## Configuration
 
