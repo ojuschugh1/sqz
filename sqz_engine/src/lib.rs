@@ -1,3 +1,54 @@
+//! # sqz_engine
+//!
+//! The core compression engine behind sqz. Takes text — JSON, CLI output, code,
+//! logs, prose — and squeezes it down to use fewer LLM tokens while keeping the
+//! important stuff intact.
+//!
+//! ## Quick start
+//!
+//! ```rust
+//! use sqz_engine::SqzEngine;
+//!
+//! let engine = SqzEngine::new().expect("failed to init engine");
+//!
+//! // Compress some text
+//! let result = engine.compress("hello world").unwrap();
+//! println!("compressed: {}", result.data);
+//! println!("tokens: {} → {}", result.tokens_original, result.tokens_compressed);
+//!
+//! // JSON gets TOON-encoded automatically
+//! let json_result = engine.compress(r#"{"name": "Alice", "age": 30}"#).unwrap();
+//! assert!(json_result.data.starts_with("TOON:"));
+//! ```
+//!
+//! ## How it works
+//!
+//! Content flows through a multi-stage pipeline:
+//!
+//! 1. **Content routing** — the confidence router classifies input (JSON, code,
+//!    logs, prose) and picks a compression mode (safe, default, aggressive).
+//! 2. **Stage pipeline** — configurable stages run in priority order: ANSI
+//!    stripping, null removal, repeated-line condensing, git diff folding,
+//!    string truncation, array collapsing, and custom transforms.
+//! 3. **Post-processing** — RLE compression, sliding-window dedup, entropy
+//!    truncation, and token pruning for prose.
+//! 4. **TOON encoding** — JSON gets encoded into Token-Optimized Object
+//!    Notation, which drops unnecessary quotes and whitespace for 30-60%
+//!    fewer tokens.
+//! 5. **Verification** — a two-pass verifier checks that error lines, JSON
+//!    keys, and diff hunks survived compression. If confidence is low, the
+//!    engine falls back to safe mode.
+//!
+//! ## Key types
+//!
+//! - [`SqzEngine`] — top-level facade, wires everything together
+//! - [`CompressionPipeline`] — the stage-based compression orchestrator
+//! - [`CacheManager`] — SHA-256 content-hash dedup cache
+//! - [`SessionStore`] — SQLite-backed session and cache persistence
+//! - [`Preset`] — TOML-configurable compression settings
+//! - [`ToonEncoder`] — JSON → TOON lossless encoding
+//! - [`CompressedContent`] — compression result with token counts and metadata
+
 pub mod adaptive_tree;
 pub mod advanced_search;
 pub mod ansi_strip;

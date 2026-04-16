@@ -3,7 +3,44 @@ use std::collections::HashMap;
 
 use crate::error::{Result, SqzError};
 
-/// Parses, validates, and serializes TOML Preset files.
+/// Parses, validates, and serializes TOML preset files.
+///
+/// Presets control every aspect of the compression pipeline — which stages
+/// run, how aggressive they are, token budget limits, model family, etc.
+///
+/// ```rust
+/// use sqz_engine::preset::PresetParser;
+///
+/// let toml = r#"
+/// [preset]
+/// name = "my-preset"
+/// version = "1.0"
+///
+/// [compression]
+/// stages = ["condense", "strip_nulls"]
+///
+/// [tool_selection]
+/// max_tools = 5
+/// similarity_threshold = 0.7
+///
+/// [budget]
+/// warning_threshold = 0.70
+/// ceiling_threshold = 0.85
+/// default_window_size = 200000
+///
+/// [terse_mode]
+/// enabled = false
+/// level = "moderate"
+///
+/// [model]
+/// family = "anthropic"
+/// primary = "claude-sonnet-4-20250514"
+/// complexity_threshold = 0.4
+/// "#;
+///
+/// let preset = PresetParser::parse(toml).unwrap();
+/// assert_eq!(preset.preset.name, "my-preset");
+/// ```
 pub struct PresetParser;
 
 impl PresetParser {
@@ -80,6 +117,11 @@ impl PresetParser {
     }
 }
 
+/// A complete compression preset. Controls the pipeline stages, budget
+/// thresholds, model routing, terse mode, and tool selection.
+///
+/// Use [`Preset::default()`] for sensible defaults, or load from TOML
+/// with [`PresetParser::parse`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preset {
     pub preset: PresetHeader,

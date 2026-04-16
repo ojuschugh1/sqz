@@ -1,6 +1,52 @@
-// sqz-wasm: Browser extension WASM integration surface
-// Subset of sqz_engine compiled to wasm32-unknown-unknown
-// No tree-sitter, no file cache — in-memory session store only
+//! # sqz-wasm
+//!
+//! Browser-compatible WASM build of the sqz compression engine. This is a
+//! self-contained subset of `sqz_engine` compiled to `wasm32-unknown-unknown` —
+//! no tree-sitter, no SQLite, no filesystem. Everything runs in memory.
+//!
+//! ## What's included
+//!
+//! - TOON encoding for JSON (null stripping, array collapsing, tabular encoding)
+//! - Content classification (JSON, code, logs, prose)
+//! - Text compression with phrase abbreviation and word shortening
+//! - Log condensing (repeated lines collapsed)
+//! - Code compression (comment stripping, blank line collapsing)
+//! - In-memory dedup cache (hash-based, no persistence)
+//! - Three compression presets: minimal, default, aggressive
+//!
+//! ## Browser usage
+//!
+//! Build with `wasm-pack`:
+//!
+//! ```text
+//! wasm-pack build sqz-wasm --target web
+//! ```
+//!
+//! Then in JavaScript:
+//!
+//! ```text
+//! import init, { SqzWasm } from './pkg/sqz_wasm.js';
+//!
+//! await init();
+//! const sqz = new SqzWasm("default");
+//!
+//! // Compress JSON — gets TOON-encoded, nulls stripped
+//! const result = sqz.compress('{"name": "Alice", "debug": null}');
+//! console.log(result); // TOON:{name:"Alice"}
+//!
+//! // Estimate token count
+//! const tokens = sqz.estimate_tokens(result);
+//!
+//! // Session export/import for persistence
+//! const ctx = sqz.export_ctx();
+//! sqz.import_ctx(ctx);
+//! ```
+//!
+//! ## Presets
+//!
+//! - `"minimal"` — TOON encoding only, no stripping
+//! - `"default"` — strip nulls + condense + TOON + word abbreviation
+//! - `"aggressive"` — all of default + collapse arrays at 5 items
 
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -582,8 +628,10 @@ impl WasmEngine {
 // ---------------------------------------------------------------------------
 
 /// Browser-facing WASM wrapper for the sqz compression engine.
-/// Full-featured subset: null stripping, condense, content classification,
-/// word abbreviation, tabular array encoding, in-memory dedup cache.
+///
+/// Provides content-aware compression (JSON, code, logs, prose), TOON
+/// encoding, word abbreviation, in-memory dedup caching, and session
+/// export/import. No filesystem or network access — everything runs in memory.
 #[wasm_bindgen]
 pub struct SqzWasm {
     engine: WasmEngine,

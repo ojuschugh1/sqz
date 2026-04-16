@@ -1,5 +1,43 @@
-// sqz-mcp: MCP server integration surface
-// Thin adapter over sqz_engine for Model Context Protocol transport
+//! # sqz-mcp
+//!
+//! MCP (Model Context Protocol) server for sqz. This is a thin adapter over
+//! `sqz_engine` that exposes context compression through the MCP transport
+//! layer — either stdio (for local tool integration) or SSE (for network use).
+//!
+//! ## What it does
+//!
+//! When an MCP-compatible tool (Claude Code, Cursor, etc.) makes a tool call,
+//! sqz-mcp intercepts the response and compresses it before it hits the LLM's
+//! context window. JSON gets TOON-encoded, repeated lines get condensed, ANSI
+//! codes get stripped — the usual sqz pipeline.
+//!
+//! ## Configuration
+//!
+//! The server loads presets from a directory you specify at startup. Drop a
+//! `.toml` file in there and the server picks it up automatically — hot-reload
+//! is built in, no restart needed.
+//!
+//! ```text
+//! # Start on stdio (default for MCP tool integration)
+//! sqz-mcp --preset-dir ~/.sqz/presets
+//!
+//! # Start on SSE for network access
+//! sqz-mcp --preset-dir ~/.sqz/presets --transport sse --port 3002
+//! ```
+//!
+//! ## MCP protocol
+//!
+//! The server implements the MCP JSON-RPC interface:
+//!
+//! - `initialize` — returns server capabilities
+//! - `tools/list` — returns registered tools (optionally filtered by intent)
+//! - `tools/call` — compresses tool output through the sqz pipeline
+//!
+//! ## Tool selection
+//!
+//! When `tools/list` is called with an `intent` parameter, the built-in
+//! `ToolSelector` ranks tools by semantic similarity and returns the top
+//! matches. This keeps the tool list small and relevant.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -13,7 +51,8 @@ use sqz_engine::preset::{Preset, PresetParser};
 
 // ── Public data types ─────────────────────────────────────────────────────────
 
-/// An incoming MCP tool-call request.
+/// An incoming MCP tool-call request. Contains the tool ID, input arguments,
+/// and an optional intent string for tool filtering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequest {
     pub tool_id: String,
@@ -21,7 +60,8 @@ pub struct ToolCallRequest {
     pub intent: Option<String>,
 }
 
-/// The result of processing an MCP tool call through the compression pipeline.
+/// The result of processing an MCP tool call. Includes the compressed output
+/// and before/after token counts so the caller can see the savings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallResponse {
     pub tool_id: String,

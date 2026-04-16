@@ -11,6 +11,11 @@ use crate::session_store::SessionStore;
 use crate::types::CompressedContent;
 
 /// Outcome of a cache lookup in [`CacheManager`].
+///
+/// The cache has three possible outcomes:
+/// - **Dedup**: exact match, returns a tiny `§ref:HASH§` token (~13 tokens)
+/// - **Delta**: near-duplicate, returns a compact diff against the cached version
+/// - **Fresh**: cache miss, returns the full compressed output
 pub enum CacheResult {
     /// Previously seen content — returns a short inline reference (~13 tokens).
     Dedup {
@@ -25,7 +30,7 @@ pub enum CacheResult {
         delta_text: String,
         /// Approximate token cost of the delta.
         token_cost: u32,
-        /// Similarity to the cached version.
+        /// Similarity to the cached version (0.0–1.0).
         similarity: f64,
     },
     /// Content not seen before — full compression result.
@@ -62,6 +67,11 @@ pub struct CacheManager {
 }
 
 impl CacheManager {
+    /// Create a new cache manager backed by the given session store.
+    ///
+    /// `max_size_bytes` controls when LRU eviction kicks in. A good default
+    /// is 512 MB (`512 * 1024 * 1024`). Dedup refs go stale after 20 turns
+    /// by default — use [`with_ref_age`](CacheManager::with_ref_age) to tune this.
     pub fn new(store: SessionStore, max_size_bytes: u64) -> Self {
         Self {
             store,

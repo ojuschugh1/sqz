@@ -13,13 +13,21 @@ use crate::token_pruner::TokenPruner;
 use crate::toon::ToonEncoder;
 use crate::types::{CompressedContent, Content, ContentType, ModelFamily, StageConfig};
 
-/// Minimal session context passed to the pipeline.
+/// Minimal session context passed to the pipeline. Just carries the session
+/// ID so stages can log or cache per-session.
 pub struct SessionContext {
     pub session_id: String,
 }
 
-/// The compression pipeline orchestrator with integrated token pruning,
-/// dictionary compression, and entropy-weighted truncation.
+/// The compression pipeline orchestrator.
+///
+/// Runs content through a sequence of configurable stages (condense, strip
+/// nulls, collapse arrays, etc.), then applies post-processing: RLE
+/// compression, sliding-window dedup, entropy truncation, token pruning,
+/// dictionary compression, and TOON encoding for JSON.
+///
+/// Stages are sorted by priority — lower numbers run first. You can insert
+/// custom stages with [`insert_stage`](CompressionPipeline::insert_stage).
 pub struct CompressionPipeline {
     stages: Vec<Box<dyn crate::stages::CompressionStage>>,
     toon_encoder: ToonEncoder,

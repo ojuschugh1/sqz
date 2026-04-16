@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, SqzError};
 use crate::types::{CompressedContent, SessionId, SessionState};
 
-/// A lightweight summary of a session for search results.
+/// A lightweight summary of a session for search results. Doesn't include
+/// the full conversation — just enough to identify and filter sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: SessionId,
@@ -18,7 +19,21 @@ pub struct SessionSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// SQLite FTS5-backed persistent session and cache store.
+/// SQLite-backed persistent session and cache store with FTS5 full-text search.
+///
+/// Stores sessions, cache entries, compression logs, and known files in a
+/// single SQLite database. Uses WAL mode for concurrent read access.
+///
+/// ```rust,no_run
+/// use sqz_engine::SessionStore;
+/// use std::path::Path;
+///
+/// let store = SessionStore::open_or_create(Path::new("~/.sqz/sessions.db")).unwrap();
+/// let results = store.search("authentication refactor").unwrap();
+/// for session in &results {
+///     println!("{}: {}", session.id, session.compressed_summary);
+/// }
+/// ```
 pub struct SessionStore {
     db: Connection,
 }
