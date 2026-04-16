@@ -6,7 +6,6 @@
 //! The tracker records these and adjusts compression aggressiveness per file.
 
 use std::collections::HashMap;
-use crate::error::Result;
 
 /// A single regret event.
 #[derive(Debug, Clone)]

@@ -9,7 +9,6 @@
 //! Each level is a lossy compression of the previous level, but sqz controls
 //! what's lost (unlike the LLM's compaction which is unpredictable).
 
-use crate::error::Result;
 
 /// Compression cascade level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
