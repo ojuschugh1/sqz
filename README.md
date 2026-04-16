@@ -49,19 +49,26 @@ Total:         6,000 tokens     Total:         ~826 tokens (86% saved)
 
 ## Token Savings
 
-| Command | Before | After | Saved |
+Single-command compression (measured via `cargo test -p sqz-engine benchmarks`):
+
+| Content | Before | After | Saved |
 |---|---:|---:|---:|
-| `git status` (10x) | 3,000 | 450 | -85% |
-| `cat` / file reads (20x, with dedup) | 40,000 | 4,800 | -88% |
-| `cargo test` / `npm test` (5x) | 25,000 | 2,500 | -90% |
-| `git diff` (5x) | 10,000 | 2,800 | -72% |
-| `git log` (5x) | 2,500 | 425 | -83% |
-| JSON API responses | 4,000 | 1,200 | -70% |
-| **30-min session total** | **~84,500** | **~12,175** | **-86%** |
+| Repeated log lines | 148 | 62 | **58%** |
+| Large JSON array | 259 | 142 | **45%** |
+| JSON API response | 64 | 53 | **17%** |
+| Git diff | 61 | 54 | **12%** |
+| Prose/docs | 124 | 121 | **2%** |
+| Stack trace (safe mode) | 82 | 82 | **0%** |
 
-*Session estimates include dedup savings across repeated reads. Single-command compression ranges from 10-60% depending on content type. Run `cargo test -p sqz-engine benchmarks -- --nocapture` for exact per-command numbers.*
+Session-level savings (with dedup cache across repeated reads):
 
-Dedup cache is where the biggest savings come from. Without it, repeated file reads get compressed each time (~60% savings). With it, reads 2+ are 13 tokens.
+| Scenario | Without sqz | With sqz | Saved |
+|---|---:|---:|---:|
+| Same file read 5x | 10,000 | 826 | **92%** |
+| Same JSON response 3x | 192 | 79 | **59%** |
+| Test-fix-test cycle (3 runs) | 15,000 | 5,186 | **65%** |
+
+The dedup cache is where the real savings live. Single-command compression ranges from 2-58% depending on content. Repeated reads drop to 13 tokens each.
 
 ## Install
 
