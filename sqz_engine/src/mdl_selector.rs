@@ -7,8 +7,6 @@
 /// subset of stages for each content type. Stages that add overhead (headers,
 /// legends) without sufficient compression are skipped.
 
-use crate::error::Result;
-
 /// A stage candidate with its estimated cost and benefit.
 #[derive(Debug, Clone)]
 pub struct StageCandidate {

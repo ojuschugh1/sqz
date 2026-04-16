@@ -1,5 +1,6 @@
 pub mod advanced_search;
 pub mod ansi_strip;
+pub mod api_proxy;
 pub mod ast_parser;
 pub mod benchmarks;
 pub mod bpe_compressor;
@@ -53,6 +54,7 @@ pub mod verifier;
 
 pub use advanced_search::{AdvancedSearch, SearchResult};
 pub use ansi_strip::AnsiStripper;
+pub use api_proxy::{compress_request, parse_http_request, build_http_response, ApiFormat, ProxyConfig, ProxyStats};
 pub use ast_parser::{AstParser, ClassDefinition, CodeSummary, FunctionSignature, ImportDecl, TypeDeclaration};
 pub use bpe_compressor::{bpe_compress, BpeConfig, BpeResult};
 pub use compression_quality::{measure_quality, format_quality_report, CompressionQuality, QualityGrade};

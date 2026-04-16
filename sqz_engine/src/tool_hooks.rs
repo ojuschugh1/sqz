@@ -68,17 +68,13 @@ pub fn process_hook(input: &str) -> Result<String> {
         .unwrap_or("");
 
     // Only intercept Bash/shell tool calls.
-    // NOTE: Claude Code's built-in tools (Read, Grep, Glob, Write) bypass
-    // shell hooks entirely. PostToolUse hooks can view but NOT modify their
-    // output (confirmed: github.com/anthropics/claude-code/issues/4544).
-    // The only way to compress built-in tool output is via the MCP server
-    // (sqz-mcp), which provides compressed alternatives to these tools.
     //
-    // NOTE: We cannot intercept Read/Grep/Glob output via PostToolUse hooks.
-    // Claude Code's PostToolUse hooks can view but NOT modify tool output
-    // (confirmed: github.com/anthropics/claude-code/issues/4544).
-    // The tool output enters the context unchanged. We can only compress
-    // Bash command output by rewriting the command via PreToolUse.
+    // Claude Code's built-in tools (Read, Grep, Glob, Write) bypass shell
+    // hooks entirely. PostToolUse hooks can view but NOT modify their output
+    // (confirmed: github.com/anthropics/claude-code/issues/4544). The tool
+    // output enters the context unchanged. We can only compress Bash command
+    // output by rewriting the command via PreToolUse. The MCP server
+    // (sqz-mcp) provides compressed alternatives to these built-in tools.
     if !matches!(tool_name, "Bash" | "bash" | "shell" | "terminal"
         | "run_terminal_command" | "run_shell_command") {
         // Pass through non-bash tools unchanged
