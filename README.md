@@ -128,11 +128,12 @@ sqz proxy --port 8080 # API proxy (compresses full request payloads)
 $ sqz gain
 sqz token savings (last 7 days)
 ──────────────────────────────────────────────────
-  04-13 │██████████████████████████████│ 2329 saved
+  04-13 │█████                         │ 2329 saved
   04-14 │                              │ 0 saved
-  04-15 │████████████████████████      │ 1894 saved
+  04-15 │██████████████████████████████│ 12954 saved
+  04-16 │████████████                  │ 5532 saved
 ──────────────────────────────────────────────────
-  Total: 835 compressions, 2622 tokens saved
+  Total: 1178 compressions, 19214 tokens saved
 ```
 
 ## How Compression Works
