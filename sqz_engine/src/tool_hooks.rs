@@ -11,6 +11,7 @@
 /// - Windsurf: .windsurf/hooks.json (nested PreToolUse, matcher: "Bash")
 /// - Gemini CLI: .gemini/settings.json (nested BeforeTool, matcher: "run_shell_command")
 /// - Cline: .cline/hooks.json (nested PreToolUse, matcher: "Bash")
+/// - OpenCode: ~/.config/opencode/plugins/sqz.ts (TypeScript plugin, tool.execute.before)
 
 use std::path::{Path, PathBuf};
 
@@ -262,6 +263,28 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
             ),
             scope: HookScope::Project,
         },
+        // OpenCode — TypeScript plugin at ~/.config/opencode/plugins/sqz.ts
+        // plus opencode.json config in project root. Unlike other tools,
+        // OpenCode uses a TS plugin (not JSON hooks), so we generate a
+        // placeholder config here and the actual plugin is installed
+        // separately via install_opencode_plugin().
+        ToolHookConfig {
+            tool_name: "OpenCode".to_string(),
+            config_path: PathBuf::from("opencode.json"),
+            config_content: format!(
+                r#"{{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {{
+    "sqz": {{
+      "type": "local",
+      "command": ["sqz-mcp", "--transport", "stdio"]
+    }}
+  }},
+  "plugin": ["sqz"]
+}}"#
+            ),
+            scope: HookScope::Project,
+        },
     ]
 }
 
@@ -289,6 +312,13 @@ pub fn install_tool_hooks(project_dir: &Path, sqz_path: &str) -> Vec<String> {
 
         if std::fs::write(&full_path, &config.config_content).is_ok() {
             installed.push(config.tool_name.clone());
+        }
+    }
+
+    // Also install the OpenCode TypeScript plugin (user-level)
+    if let Ok(true) = crate::opencode_plugin::install_opencode_plugin(sqz_path) {
+        if !installed.iter().any(|n| n == "OpenCode") {
+            installed.push("OpenCode".to_string());
         }
     }
 
@@ -421,9 +451,10 @@ mod tests {
     #[test]
     fn test_generate_hook_configs() {
         let configs = generate_hook_configs("sqz");
-        assert!(configs.len() >= 4, "should generate configs for multiple tools");
+        assert!(configs.len() >= 5, "should generate configs for multiple tools (including OpenCode)");
         assert!(configs.iter().any(|c| c.tool_name == "Claude Code"));
         assert!(configs.iter().any(|c| c.tool_name == "Cursor"));
+        assert!(configs.iter().any(|c| c.tool_name == "OpenCode"));
     }
 
     #[test]

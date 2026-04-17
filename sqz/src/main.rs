@@ -1006,7 +1006,7 @@ fn cmd_compact() {
 
 /// `sqz hook <tool>` — process a PreToolUse hook invocation.
 /// Reads JSON from stdin, rewrites bash commands to pipe through sqz.
-fn cmd_hook(_tool: &str) {
+fn cmd_hook(tool: &str) {
     use std::io::Read;
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
@@ -1016,7 +1016,12 @@ fn cmd_hook(_tool: &str) {
         return;
     }
 
-    match sqz_engine::process_hook(&input) {
+    let result = match tool {
+        "opencode" => sqz_engine::process_opencode_hook(&input),
+        _ => sqz_engine::process_hook(&input),
+    };
+
+    match result {
         Ok(output) => print!("{output}"),
         Err(e) => {
             eprintln!("[sqz] hook: processing error: {e}");

@@ -77,6 +77,7 @@ pub mod litm_positioner;
 pub mod mdl_selector;
 pub mod minhash_lsh;
 pub mod ngram_abbreviator;
+pub mod opencode_plugin;
 pub mod rle_compressor;
 pub mod simhash;
 pub mod textrank;
@@ -137,6 +138,10 @@ pub use simhash::{simhash, SimHashFingerprint};
 pub use textrank::{textrank_compress, TextRankConfig, TextRankResult};
 pub use mdl_selector::{select_stages, profile_content, ContentProfile, MdlSelection};
 pub use tool_hooks::{process_hook, generate_hook_configs, install_tool_hooks, ToolHookConfig, HookScope};
+pub use opencode_plugin::{
+    generate_opencode_plugin, install_opencode_plugin, update_opencode_config,
+    process_opencode_hook, opencode_plugin_path,
+};
 pub use token_pruner::{TokenPruner, PrunerConfig, PruneResult};
 pub use tool_selector::{ToolDefinition, ToolSelector};
 pub use budget_tracker::{

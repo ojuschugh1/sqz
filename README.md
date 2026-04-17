@@ -111,6 +111,7 @@ What doesn't get compressed:
 | Windsurf | PreToolUse hook (transparent) | `sqz init` |
 | Cline | PreToolUse hook (transparent) | `sqz init` |
 | Gemini CLI | BeforeTool hook (transparent) | `sqz init` |
+| OpenCode | TypeScript plugin (transparent) | `sqz init` |
 | VS Code | [Extension](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz) | Install from Marketplace |
 | JetBrains | [Plugin](https://plugins.jetbrains.com/plugin/31240-sqz--context-intelligence/) | Install from Marketplace |
 | Chrome | Browser extension | ChatGPT, Claude.ai, Gemini, Grok, Perplexity |
