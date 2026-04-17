@@ -1,6 +1,6 @@
 [package]
 name = "sqz-mcp"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "MCP server for sqz — expose LLM context compression over Model Context Protocol (stdio/SSE)"
 license-file = "../LICENSE"
@@ -19,7 +19,7 @@ name = "sqz_mcp"
 path = "src/lib.rs"
 
 [dependencies]
-sqz-engine = { path = "../sqz_engine", version = "0.5.0" }
+sqz-engine = { path = "../sqz_engine", version = "0.6.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

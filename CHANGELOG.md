@@ -5,6 +5,42 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-04-17
+
+### Added
+
+- **OpenCode plugin support** — transparent compression for OpenCode via a TypeScript plugin
+  (`~/.config/opencode/plugins/sqz.ts`). Unlike other tools that use JSON hook configs,
+  OpenCode requires a TS factory function. `sqz init` installs the plugin, creates
+  `opencode.json` with MCP config, and handles idempotent re-runs. New `sqz hook opencode`
+  subcommand routes to the OpenCode-specific hook processor which handles OpenCode's
+  `tool + args` field format (vs `toolName + toolCall` used by Claude Code / Cursor).
+  15 new tests covering plugin generation, install, config update, and hook processing.
+
+- **Schema-Aware JSON Projection** — `project_json()` strips API responses to only the
+  fields the agent needs, going beyond null removal to eliminate entire irrelevant keys.
+  Configurable via field allowlist or deny list. Particularly effective on large API
+  responses (GitHub issues, REST payloads) where agents need 3-5 fields out of 50+.
+
+- **`sqz compact` command** — proactive context eviction. The agent can call `sqz compact`
+  to summarize and evict stale session context before the window fills, rather than waiting
+  for reactive compaction. Supports `--strategy` (keep_recent, keep_relevant, keep_errors)
+  and `--retain-minutes` flags.
+
+### Changed
+
+- `generate_hook_configs()` now includes OpenCode in the returned config list
+- `install_tool_hooks()` also installs the OpenCode TypeScript plugin (user-level)
+- README: OpenCode added to the supported tools table
+- `cmd_hook()` in CLI now dispatches `"opencode"` to `process_opencode_hook()` instead
+  of the generic `process_hook()`
+
+### Testing
+
+- 947 tests total (up from 800 in 0.5.0), 0 failures
+- 15 new OpenCode plugin tests
+- 1 pre-existing flaky proptest in `api_proxy` (SQLite temp file race, unrelated)
+
 ## [0.5.0] — 2026-04-16
 
 ### Added

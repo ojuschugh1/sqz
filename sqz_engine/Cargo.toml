@@ -1,6 +1,6 @@
 [package]
 name = "sqz-engine"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Adaptive multi-pass LLM context compression engine — content-aware pipeline with AST parsing, token counting, session persistence, and budget tracking"
 license-file = "../LICENSE"
