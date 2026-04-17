@@ -144,6 +144,10 @@ enum Command {
         /// The AI tool sending the hook: claude, cursor, windsurf, cline.
         tool: String,
     },
+
+    /// Proactively evict stale context to free tokens before compaction hits.
+    /// Summarizes old items and outputs an eviction report.
+    Compact,
 }
 
 #[derive(Subcommand)]
@@ -195,6 +199,7 @@ fn main() {
         Some(Command::Discover { days }) => cmd_discover(days),
         Some(Command::Resume { session_id }) => cmd_resume(session_id),
         Some(Command::Hook { tool }) => cmd_hook(&tool),
+        Some(Command::Compact) => cmd_compact(),
     }
 }
 
@@ -940,6 +945,61 @@ fn cmd_resume(session_id: Option<String>) {
 
     println!("{}", guide.text);
     eprintln!("[sqz] session guide: {} tokens from session '{}'", guide.token_count, sid);
+}
+
+// ── Compact command ───────────────────────────────────────────────────────
+
+/// `sqz compact` — proactively evict stale context.
+fn cmd_compact() {
+    let engine = require_engine();
+    let store = engine.session_store();
+
+    // Build context items from known files in the cache
+    let known_files = store.known_files().unwrap_or_default();
+    let cache_entries = store.list_cache_entries_lru().unwrap_or_default();
+    let current_turn = engine.cache_manager().current_turn();
+
+    if known_files.is_empty() && cache_entries.is_empty() {
+        println!("[sqz] nothing to compact — no cached content");
+        return;
+    }
+
+    // Build context items from cache entries
+    let items: Vec<sqz_engine::ContextItem> = cache_entries
+        .iter()
+        .enumerate()
+        .map(|(i, (hash, size))| sqz_engine::ContextItem {
+            id: format!("cache:{}", &hash[..hash.len().min(12)]),
+            content: format!("[cached content, {} bytes]", size),
+            last_accessed_turn: current_turn.saturating_sub(cache_entries.len() as u64 - i as u64),
+            access_count: 1,
+            tokens: (*size as u32 + 3) / 4,
+            pinned: false,
+        })
+        .collect();
+
+    let config = sqz_engine::EvictionConfig::default();
+    match sqz_engine::evict(&items, current_turn, &config) {
+        Ok(result) => {
+            if result.evicted.is_empty() {
+                println!("[sqz] compact: nothing to evict (all items are recent)");
+            } else {
+                // Notify the cache manager that compaction happened
+                engine.cache_manager().notify_compaction();
+
+                println!("{}", result.eviction_summary);
+                println!(
+                    "[sqz] compact: {} → {} tokens ({} freed)",
+                    result.tokens_before,
+                    result.tokens_after,
+                    result.tokens_before - result.tokens_after,
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("[sqz] compact error: {e}");
+        }
+    }
 }
 
 // ── Hook command ──────────────────────────────────────────────────────────

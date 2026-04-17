@@ -107,6 +107,18 @@ impl CompressionPipeline {
 
         let is_json = ToonEncoder::is_json(&content.raw);
 
+        // JSON projection: strip internal/debug fields, empty collections,
+        // deep nesting, and redundant timestamps before other JSON processing
+        if is_json && content.raw.len() > 100 {
+            let proj_config = crate::json_projection::ProjectionConfig::default();
+            if let Ok(proj_result) = crate::json_projection::project_json(&content.raw, &proj_config) {
+                if proj_result.fields_removed > 0 {
+                    content.raw = proj_result.data;
+                    stages_applied.push("json_projection".to_owned());
+                }
+            }
+        }
+
         // RLE: collapse repeated patterns in non-JSON content (generalizes condense)
         // Only apply when content is long enough to benefit
         if !is_json && content.raw.len() > 200 {
