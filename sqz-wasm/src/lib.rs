@@ -363,8 +363,21 @@ fn compress_text(input: &str) -> String {
         .replace("As a result of", "From")
         .replace("  ", " ");
 
-    // Pass 3: Word abbreviations (same table as the Rust engine)
-    let result = abbreviate_words(&result);
+    // Pass 3: Word abbreviations — intentionally NOT called on this path.
+    //
+    // Single-word substitutions like "configuration" → "config" or
+    // "repository" → "repo" silently rewrite content the model may need
+    // to dereference (directory names, URL segments, identifiers). The
+    // classifier's "Prose" bucket is a fallback that catches `ls -l`,
+    // stack traces, and other mixed-content pastes — not just pure prose.
+    //
+    // The CLI proxy removed its equivalent call in fd4603d after a Reddit
+    // user reported "packages → pkgs" breaking every tool call. Keeping
+    // the behavior in the extension's WASM path would reintroduce the
+    // same class of bug behind the preview gate.
+    //
+    // `abbreviate_words()` is retained below for callers that know their
+    // input is pure prose (no paths, no identifiers).
 
     let result = result.trim_end().to_string();
     if result.len() < input.len() { result } else { input.to_string() }
@@ -432,6 +445,13 @@ fn compress_code(input: &str) -> String {
 }
 
 /// Word abbreviation table (subset of the Rust engine's 100+ entries).
+///
+/// NOTE: this function is NOT called from the WASM compress pipeline. Word-level
+/// substitution on free-form text silently rewrites path segments and
+/// identifiers (the failure mode reported in issue #1). It is retained here
+/// for callers that can prove their input is pure prose — no paths, no
+/// identifiers, no URLs, no filenames.
+#[allow(dead_code)]
 fn abbreviate_words(text: &str) -> String {
     let abbrevs: &[(&str, &str)] = &[
         ("implementation", "impl"),
@@ -781,12 +801,38 @@ mod tests {
     }
 
     #[test]
-    fn compress_text_abbreviates_words() {
+    fn compress_text_does_not_abbreviate_words() {
+        // Regression: word abbreviation used to run on all prose, which
+        // includes any content the classifier couldn't place elsewhere
+        // (ls -l output, stack traces, mixed docs). It silently rewrote
+        // directory names and identifiers. We keep the text as-is and
+        // leave `abbreviate_words()` available only to callers that can
+        // prove their input contains no paths/identifiers.
         let input = "The implementation of the configuration requires authentication";
         let result = compress_text(input);
-        assert!(result.contains("impl"), "should abbreviate implementation: {result}");
-        assert!(result.contains("config"), "should abbreviate configuration: {result}");
-        assert!(result.contains("auth"), "should abbreviate authentication: {result}");
+        assert!(result.contains("implementation"),
+            "word 'implementation' must be preserved: {result}");
+        assert!(result.contains("configuration"),
+            "word 'configuration' must be preserved: {result}");
+        assert!(result.contains("authentication"),
+            "word 'authentication' must be preserved: {result}");
+    }
+
+    #[test]
+    fn compress_text_preserves_paths_in_prose() {
+        // Direct repro for the Reddit failure mode, at the WASM layer.
+        // A paste containing a path segment must not have the path
+        // silently rewritten by `compress_text`.
+        let input = "Please check the file at /etc/myapp/configuration/default.yml \
+                     which lives in the main repository at \
+                     github.com/example/repository for the current environment setup.";
+        let result = compress_text(input);
+        assert!(result.contains("/etc/myapp/configuration/default.yml"),
+            "path must survive compression: {result}");
+        assert!(result.contains("github.com/example/repository"),
+            "URL must survive compression: {result}");
+        assert!(result.contains("environment"),
+            "identifier must survive compression: {result}");
     }
 
     #[test]
