@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use sqz_engine::{format_command, CompressedContent, DependencyMapper, NgramAbbreviator, SqzEngine};
-use sqz_engine::stages::abbreviate_words;
 
 // ── CLI compression patterns ──────────────────────────────────────────────
 
@@ -239,10 +238,10 @@ impl CliProxy {
     fn apply_context_refs(&self, text: &str) -> String {
         let known = match self.engine.session_store().known_files() {
             Ok(files) => files,
-            Err(_) => return abbreviate_words(text),
+            Err(_) => return text.to_string(),
         };
         if known.is_empty() {
-            return abbreviate_words(text);
+            return text.to_string();
         }
 
         let mut result = text.to_string();
@@ -261,9 +260,7 @@ impl CliProxy {
                 result = result.replace(&at_marker, &note);
             }
         }
-        // Word abbreviation as the final output step — after all content
-        // fidelity checks have passed, abbreviate common long words
-        abbreviate_words(&result)
+        result
     }
 
     /// Track a file path as "in context" — persists to SessionStore so it
@@ -467,5 +464,55 @@ mod tests {
         let error = "error[E0308]: mismatched types\n --> src/unknown.rs:42:5\n";
         let result = proxy.apply_context_refs(error);
         assert!(!result.contains("[in context]"), "should not annotate unknown file");
+    }
+
+    // ── Regression tests for Reddit bug report ────────────────────────────
+    // https://github.com/ojuschugh1/sqz/issues/1 (related discussion)
+    //
+    // Word abbreviation was silently rewriting directory names, file paths,
+    // and identifiers in command output. "packages" → "pkgs" broke paths,
+    // "configuration" → "config" broke directory listings, etc.
+
+    #[test]
+    fn test_reddit_packages_not_abbreviated() {
+        let proxy = CliProxy::new().expect("engine init");
+        let output = "drwxr-xr-x  5 user user 4096 Apr 15 10:00 packages\n\
+                      drwxr-xr-x  3 user user 4096 Apr 15 10:00 configuration\n\
+                      drwxr-xr-x  2 user user 4096 Apr 15 10:00 documentation\n";
+        let result = proxy.intercept_output("ls -la", output);
+        assert!(result.contains("packages"), "directory name 'packages' must not be abbreviated: {result}");
+        assert!(result.contains("configuration"), "directory name 'configuration' must not be abbreviated: {result}");
+        assert!(result.contains("documentation"), "directory name 'documentation' must not be abbreviated: {result}");
+    }
+
+    #[test]
+    fn test_paths_preserved_in_output() {
+        let proxy = CliProxy::new().expect("engine init");
+        let output = "/etc/myapp/configuration/default.yml\n\
+                      /usr/share/documentation/readme.md\n\
+                      /home/user/.local/environment/config\n";
+        let result = proxy.intercept_output("find /etc -name '*.yml'", output);
+        assert!(result.contains("configuration"), "path segment 'configuration' must be preserved: {result}");
+        assert!(result.contains("documentation"), "path segment 'documentation' must be preserved: {result}");
+        assert!(result.contains("environment"), "path segment 'environment' must be preserved: {result}");
+    }
+
+    #[test]
+    fn test_git_urls_preserved() {
+        let proxy = CliProxy::new().expect("engine init");
+        let output = "origin\thttps://github.com/example/repository.git (fetch)\n\
+                      origin\thttps://github.com/example/repository.git (push)\n";
+        let result = proxy.intercept_output("git remote -v", output);
+        assert!(result.contains("repository"), "URL segment 'repository' must be preserved: {result}");
+    }
+
+    #[test]
+    fn test_identifiers_preserved_in_code_output() {
+        let proxy = CliProxy::new().expect("engine init");
+        let output = "error[E0433]: failed to resolve: use of undeclared crate or module `implementation`\n\
+                      --> src/main.rs:5:5\n\
+                      5 | use implementation::Config;\n";
+        let result = proxy.intercept_output("cargo build", output);
+        assert!(result.contains("implementation"), "identifier 'implementation' must be preserved: {result}");
     }
 }
