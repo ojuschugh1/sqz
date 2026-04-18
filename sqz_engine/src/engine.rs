@@ -36,7 +36,6 @@ pub struct SqzEngine {
 
     // --- Single-owner state (no cross-thread sharing needed) ---
     session_store: SessionStore,
-    #[allow(dead_code)] // used internally by compress pipeline; public API pending
     cache_manager: CacheManager,
     budget_tracker: BudgetTracker,
     cost_calculator: CostCalculator,
@@ -64,6 +63,16 @@ impl SqzEngine {
         if let Some(home) = dirs_next::home_dir() {
             let sqz_dir = home.join(".sqz");
             if std::fs::create_dir_all(&sqz_dir).is_ok() {
+                // Harden permissions on Unix: ~/.sqz/ contains session data
+                // and cached content that may include sensitive output.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &sqz_dir,
+                        std::fs::Permissions::from_mode(0o700),
+                    );
+                }
                 return sqz_dir.join("sessions.db");
             }
         }

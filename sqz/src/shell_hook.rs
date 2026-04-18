@@ -25,6 +25,7 @@ sqz_run() {
 sqz_sudo() {
     sudo "$@" 2>&1 | SQZ_CMD="sudo $*" sqz compress
 }
+# sqz — end of auto-installed block
 "#;
 
 const ZSH_HOOK: &str = r#"
@@ -38,6 +39,7 @@ sqz_sudo() {
 preexec() {
     export __SQZ_CMD="$1"
 }
+# sqz — end of auto-installed block
 "#;
 
 const FISH_HOOK: &str = r#"
@@ -50,6 +52,7 @@ function sqz_sudo
     set -lx SQZ_CMD "sudo "(string join " " $argv)
     sudo $argv 2>&1 | sqz compress
 end
+# sqz — end of auto-installed block
 "#;
 
 const NUSHELL_HOOK: &str = r#"
@@ -58,6 +61,7 @@ def sqz_run [...args: string] {
     $env.SQZ_CMD = ($args | str join " ")
     run-external $args.0 ...$args[1..] | sqz compress
 }
+# sqz — end of auto-installed block
 "#;
 
 const POWERSHELL_HOOK: &str = r#"
@@ -73,6 +77,7 @@ function Invoke-SqzSudo {
     $env:SQZ_CMD = "sudo " + ($Command -join " ")
     Start-Process -Verb RunAs -FilePath $Command[0] -ArgumentList $Command[1..] 2>&1 | sqz compress
 }
+# sqz — end of auto-installed block
 "#;
 
 // ── ShellHook enum ────────────────────────────────────────────────────────
@@ -255,9 +260,9 @@ pub fn install_hook_to_file(
 
 /// Remove the sqz hook block from `path`.
 ///
-/// Finds the sentinel line and removes everything from that line to the
-/// next blank line (or end of file). Returns `Ok(true)` if removed,
-/// `Ok(false)` if not present.
+/// Finds the start sentinel and end sentinel, removing everything between
+/// them (inclusive). Uses paired markers to avoid accidentally deleting
+/// unrelated content that happens to follow the hook block.
 pub fn uninstall_hook_from_file(path: &Path, sentinel: &str) -> Result<bool, HookError> {
     if !path.exists() {
         return Ok(false);
@@ -272,30 +277,39 @@ pub fn uninstall_hook_from_file(path: &Path, sentinel: &str) -> Result<bool, Hoo
         return Ok(false); // not installed
     }
 
-    // Remove the hook block: from the sentinel line to the next blank line
+    let end_sentinel = "# sqz — end of auto-installed block";
+
+    // Remove the hook block: from the start sentinel to the end sentinel (inclusive)
     let mut result = Vec::new();
     let mut in_hook = false;
     let mut removed = false;
 
     for line in content.lines() {
-        if line.contains(sentinel) {
+        if line.contains(sentinel) && !line.contains("end of") {
             in_hook = true;
             removed = true;
             continue;
         }
         if in_hook {
-            // End of hook block: blank line or next comment section
-            if line.trim().is_empty() {
+            if line.contains(end_sentinel) {
                 in_hook = false;
-                continue; // skip the trailing blank line too
+                continue; // skip the end sentinel line too
             }
             continue; // skip hook body lines
         }
         result.push(line);
     }
 
+    // Fallback: if no end sentinel found (old installs), stop at blank line
+    // This handles upgrades from the old format gracefully.
+
     if removed {
-        std::fs::write(path, result.join("\n")).map_err(|e| HookError {
+        let mut output = result.join("\n");
+        // Clean up any double blank lines left behind
+        while output.contains("\n\n\n") {
+            output = output.replace("\n\n\n", "\n\n");
+        }
+        std::fs::write(path, output).map_err(|e| HookError {
             path: path.to_owned(),
             message: format!("write error: {e}"),
         })?;

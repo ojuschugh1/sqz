@@ -744,19 +744,87 @@ fn cmd_proxy(port: u16) {
     }
 }
 
-/// `sqz uninstall` — remove sqz shell hooks from the RC file.
+/// `sqz uninstall` — remove sqz shell hooks and AI tool configs.
 fn cmd_uninstall() {
+    use std::io::Write;
+
     let hook = ShellHook::detect();
     println!("[sqz] detected shell: {:?}", hook);
 
-    match hook.uninstall() {
-        Ok(true) => println!("[sqz] hook removed from {}", hook.rc_path().display()),
-        Ok(false) => println!("[sqz] hook not found in {} — nothing to remove", hook.rc_path().display()),
-        Err(e) => {
-            eprintln!("[sqz] warning: {e}");
-            eprintln!("[sqz] could not remove hook; you may need to edit {} manually", hook.rc_path().display());
+    // Build list of files to remove
+    let mut files_to_remove: Vec<(String, bool)> = Vec::new(); // (path, exists)
+
+    // Shell RC hook
+    let rc_path = hook.rc_path();
+    let rc_has_hook = rc_path.exists() && std::fs::read_to_string(&rc_path)
+        .map(|s| s.contains(hook.sentinel()))
+        .unwrap_or(false);
+    if rc_has_hook {
+        files_to_remove.push((rc_path.display().to_string(), true));
+    }
+
+    // AI tool configs created by sqz init
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let tool_paths = [
+        ".claude/settings.local.json",
+        ".cursor/hooks.json",
+        ".windsurf/hooks.json",
+        ".clinerules/hooks/PreToolUse",
+        ".gemini/settings.json",
+        "opencode.json",
+    ];
+    for path in &tool_paths {
+        let full = project_dir.join(path);
+        if full.exists() {
+            files_to_remove.push((full.display().to_string(), true));
         }
     }
+
+    if files_to_remove.is_empty() {
+        println!("[sqz] nothing to uninstall — no sqz files found.");
+        return;
+    }
+
+    println!("\nThe following files will be modified or removed:\n");
+    for (path, _) in &files_to_remove {
+        println!("  [remove] {path}");
+    }
+    println!();
+
+    print!("Do you want to continue? [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        eprintln!("[sqz] could not read input, aborting.");
+        std::process::exit(1);
+    }
+    let answer = answer.trim().to_lowercase();
+    if !answer.is_empty() && answer != "y" && answer != "yes" {
+        println!("[sqz] aborted.");
+        return;
+    }
+
+    // Remove shell hook
+    if rc_has_hook {
+        match hook.uninstall() {
+            Ok(true) => println!("[sqz] ✓ hook removed from {}", rc_path.display()),
+            Ok(false) => println!("[sqz] ✓ hook not found in {}", rc_path.display()),
+            Err(e) => eprintln!("[sqz] ✗ warning: {e}"),
+        }
+    }
+
+    // Remove AI tool configs
+    for path in &tool_paths {
+        let full = project_dir.join(path);
+        if full.exists() {
+            match std::fs::remove_file(&full) {
+                Ok(()) => println!("[sqz] ✓ removed {}", full.display()),
+                Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", full.display()),
+            }
+        }
+    }
+
+    println!("\n[sqz] uninstall complete.");
 }
 
 /// `sqz stats [session-id]` — full compression stats report.

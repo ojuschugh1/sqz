@@ -173,8 +173,11 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         });
     }
 
-    // Don't intercept commands that are already piped through sqz
-    if command.contains("sqz") || command.contains("SQZ_CMD") {
+    // Don't intercept commands that are already piped through sqz.
+    // Check the base command name specifically, not substring — so
+    // "grep sqz logfile" or "cargo search sqz" aren't skipped.
+    let base_cmd = extract_base_command(command);
+    if base_cmd == "sqz" || command.starts_with("SQZ_CMD=") {
         return Ok(match platform {
             HookPlatform::Cursor => "{}".to_string(),
             _ => input.to_string(),
@@ -189,7 +192,19 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         });
     }
 
-    // Rewrite: pipe the command's output through sqz compress
+    // Don't intercept commands with shell operators that would break piping.
+    // Compound commands (&&, ||, ;), redirects (>, <, >>), background (&),
+    // heredocs (<<), and process substitution would misbehave when we append
+    // `2>&1 | sqz compress` — the pipe only captures the last command.
+    if has_shell_operators(command) {
+        return Ok(match platform {
+            HookPlatform::Cursor => "{}".to_string(),
+            _ => input.to_string(),
+        });
+    }
+
+    // Rewrite: pipe the command's output through sqz compress.
+    // The command is a simple command (no operators), so direct piping is safe.
     let rewritten = format!(
         "SQZ_CMD={} {} 2>&1 | sqz compress",
         shell_escape(extract_base_command(command)),
@@ -486,6 +501,24 @@ fn shell_escape(s: &str) -> String {
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
+}
+
+/// Check if a command contains shell operators that would break piping.
+/// Commands with these operators are passed through uncompressed rather
+/// than risk incorrect behavior.
+fn has_shell_operators(cmd: &str) -> bool {
+    // Check for operators that would cause the pipe to only capture
+    // the last command in a chain
+    cmd.contains("&&")
+        || cmd.contains("||")
+        || cmd.contains(';')
+        || cmd.contains('>')
+        || cmd.contains('<')
+        || cmd.contains('|') // already has a pipe
+        || cmd.contains('&') && !cmd.contains("&&") // background &
+        || cmd.contains("<<")  // heredoc
+        || cmd.contains("$(")  // command substitution
+        || cmd.contains('`')   // backtick substitution
 }
 
 /// Check if a command is interactive or long-running (should not be intercepted).

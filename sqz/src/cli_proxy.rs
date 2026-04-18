@@ -162,9 +162,13 @@ impl CliProxy {
             let tokens_original = (output.len() as u32 + 3) / 4;
             let tokens_compressed = (formatted.len() as u32 + 3) / 4;
             if tokens_compressed < tokens_original {
-                // Persist to L2 cache
-                if let Ok(compressed) = self.engine.compress(&formatted) {
-                    let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
+                // Persist to L2 cache — but skip if content contains secrets
+                // (confidence router detected high-risk patterns like API keys)
+                let mode = self.engine.route_compression_mode(output);
+                if mode != sqz_engine::CompressionMode::Safe {
+                    if let Ok(compressed) = self.engine.compress(&formatted) {
+                        let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
+                    }
                 }
                 self.l1_cache.borrow_mut().insert(fast_hash);
                 self.log_compression(cmd, tokens_original, tokens_compressed);
@@ -177,8 +181,12 @@ impl CliProxy {
             Ok(compressed) => {
                 let tokens_original = compressed.tokens_original;
                 let tokens_compressed = compressed.tokens_compressed;
-                // Persist to L2 cache
-                let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
+                // Persist to L2 cache — skip if content was routed to Safe mode
+                // (may contain secrets, API keys, passwords)
+                let mode = self.engine.route_compression_mode(output);
+                if mode != sqz_engine::CompressionMode::Safe {
+                    let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
+                }
                 self.l1_cache.borrow_mut().insert(fast_hash);
                 self.log_compression(cmd, tokens_original, tokens_compressed);
 
