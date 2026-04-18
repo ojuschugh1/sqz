@@ -735,8 +735,18 @@ impl CompressionStage for GitDiffFoldStage {
             ContentType::PlainText | ContentType::CliOutput { .. } => {}
             _ => return Ok(()),
         }
-        // Quick check: must contain diff markers
-        if !content.raw.contains("\n+") && !content.raw.contains("\n-") {
+
+        // Real diff detection: require strong structural signals, not just
+        // lines starting with +/-. The old check (`contains("\n+") || contains("\n-")`)
+        // false-positived on ls -l output (regular files start with -rw-),
+        // Markdown bullet lists, CSV with negative numbers, etc.
+        let looks_like_diff = content.raw.starts_with("diff --git ")
+            || content.raw.starts_with("diff -")
+            || content.raw.contains("\n@@ ")       // hunk header
+            || content.raw.contains("\n--- a/")    // unified diff file header
+            || content.raw.contains("\n+++ b/");   // unified diff file header
+
+        if !looks_like_diff {
             return Ok(());
         }
 
@@ -1174,6 +1184,90 @@ mod tests {
         let mut c = text_content(diff);
         GitDiffFoldStage.process(&mut c, &disabled_config()).unwrap();
         assert_eq!(c.raw, diff);
+    }
+
+    // --- git_diff_fold false-positive regression tests ---
+    // https://github.com/ojuschugh1/sqz/issues/1 (Reddit report)
+    //
+    // ls -l output contains lines starting with - (regular file permissions:
+    // -rw-r--r--) which the old diff detector treated as diff deletions.
+    // Directory entries were silently dropped from the model's view.
+
+    #[test]
+    fn git_diff_fold_does_not_fold_ls_output() {
+        let ls_output = concat!(
+            "total 24\n",
+            "drwxr-xr-x  6 user user  192 Apr 18 10:00 packages\n",
+            "drwxr-xr-x  3 user user   96 Apr 18 10:00 configuration\n",
+            "drwxr-xr-x  4 user user  128 Apr 18 10:00 documentation\n",
+            "drwxr-xr-x  2 user user   64 Apr 18 10:00 environment\n",
+            "-rw-r--r--  1 user user 1024 Apr 18 10:00 README.md\n",
+        );
+        let mut c = text_content(ls_output);
+        let cfg = enabled_config(serde_json::json!({"max_context_lines": 2}));
+        GitDiffFoldStage.process(&mut c, &cfg).unwrap();
+        // ALL directory entries must be preserved — none should be folded
+        assert!(c.raw.contains("packages"), "packages must survive: {}", c.raw);
+        assert!(c.raw.contains("configuration"), "configuration must survive: {}", c.raw);
+        assert!(c.raw.contains("documentation"), "documentation must survive: {}", c.raw);
+        assert!(c.raw.contains("environment"), "environment must survive: {}", c.raw);
+        assert!(c.raw.contains("README.md"), "README.md must survive: {}", c.raw);
+        assert!(!c.raw.contains("unchanged lines"), "no folding should occur: {}", c.raw);
+    }
+
+    #[test]
+    fn git_diff_fold_does_not_fold_markdown_bullets() {
+        let markdown = concat!(
+            "# Features\n",
+            "\n",
+            "- First feature\n",
+            "- Second feature\n",
+            "- Third feature\n",
+            "+ Added bonus\n",
+            "\n",
+            "## Details\n",
+        );
+        let mut c = text_content(markdown);
+        let cfg = enabled_config(serde_json::json!({"max_context_lines": 2}));
+        GitDiffFoldStage.process(&mut c, &cfg).unwrap();
+        assert_eq!(c.raw, markdown, "markdown should pass through unchanged");
+    }
+
+    #[test]
+    fn git_diff_fold_still_works_on_real_diffs() {
+        // Verify the fix didn't break actual diff folding
+        let diff = concat!(
+            "diff --git a/src/main.rs b/src/main.rs\n",
+            "--- a/src/main.rs\n",
+            "+++ b/src/main.rs\n",
+            "@@ -1,10 +1,10 @@\n",
+            " line1\n",
+            " line2\n",
+            " line3\n",
+            " line4\n",
+            " line5\n",
+            "-old line\n",
+            "+new line\n",
+            " line6\n",
+            " line7\n",
+            " line8\n",
+            " line9\n",
+            " line10\n",
+        );
+        let mut c = text_content(diff);
+        let cfg = enabled_config(serde_json::json!({"max_context_lines": 2}));
+        GitDiffFoldStage.process(&mut c, &cfg).unwrap();
+        // Changed lines must be preserved
+        assert!(c.raw.contains("-old line"), "removed line preserved: {}", c.raw);
+        assert!(c.raw.contains("+new line"), "added line preserved: {}", c.raw);
+        // Should fold some context lines
+        assert!(c.raw.contains("unchanged lines"), "should fold context: {}", c.raw);
+        // Output should have fewer lines (fold markers replace multiple lines)
+        assert!(
+            c.raw.lines().count() < diff.lines().count(),
+            "output should have fewer lines: {} vs {}",
+            c.raw.lines().count(), diff.lines().count()
+        );
     }
 
     // --- custom_transforms ---
