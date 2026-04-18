@@ -439,9 +439,21 @@ impl McpServer {
             }
 
             "initialize" => {
+                // Tools capability must be a non-empty object signalling tool
+                // support. An empty {} is spec-valid JSON but some MCP clients
+                // (OpenCode among them — see issue #3) interpret it as "no
+                // tools capability" and skip the tools/list call entirely.
+                //
+                // `listChanged: false` honestly declares that the tool list is
+                // static for the session (sqz-mcp registers its tools once at
+                // startup via default_tool_definitions() and never emits
+                // notifications/tools/list_changed). This matches the MCP
+                // 2024-11-05 spec: https://mcpcn.com/en/specification/2024-11-05/server/tools/
                 JsonRpcResponse::ok(req.id, serde_json::json!({
                     "protocolVersion": "2024-11-05",
-                    "capabilities": { "tools": {} },
+                    "capabilities": {
+                        "tools": { "listChanged": false }
+                    },
                     "serverInfo": { "name": "sqz-mcp", "version": env!("CARGO_PKG_VERSION") }
                 }))
             }
@@ -831,6 +843,41 @@ complexity_threshold = 0.4
         assert!(resp.error.is_none(), "initialize should not error");
         let result = resp.result.expect("initialize should have result");
         assert!(result.get("protocolVersion").is_some());
+    }
+
+    /// Regression for issue #3: the initialize response MUST advertise a
+    /// non-empty tools capability so compliant MCP clients (OpenCode, etc.)
+    /// know to call tools/list. An empty `{}` is spec-valid JSON but was
+    /// interpreted as "no tools" by some clients.
+    #[test]
+    fn test_initialize_advertises_tools_capability() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        let resp = server.handle_jsonrpc_line(line);
+        let result = resp.result.expect("initialize should have result");
+
+        let caps = result.get("capabilities")
+            .expect("initialize result must include capabilities");
+        let tools_cap = caps.get("tools")
+            .expect("capabilities must include 'tools' key");
+
+        // Must be an object...
+        let tools_obj = tools_cap.as_object()
+            .expect("'tools' capability must be an object");
+        // ...that is not empty. An empty {} is what issue #3 reported as
+        // causing OpenCode to skip tools/list.
+        assert!(
+            !tools_obj.is_empty(),
+            "'tools' capability must not be empty {{}} — some MCP clients \
+             interpret that as no tools available. Got: {tools_cap:?}"
+        );
+        // And specifically it should carry the listChanged hint (the spec's
+        // documented signal for static vs. dynamic tool lists).
+        assert!(
+            tools_obj.contains_key("listChanged"),
+            "'tools' capability should include listChanged per MCP 2024-11-05 \
+             spec. Got: {tools_cap:?}"
+        );
     }
 
     /// Test JSON-RPC tools/list method.
