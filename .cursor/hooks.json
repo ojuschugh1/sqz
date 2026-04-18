@@ -1,14 +1,10 @@
 {
+  "version": 1,
   "hooks": {
-    "PreToolUse": [
+    "preToolUse": [
       {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sqz hook cursor"
-          }
-        ]
+        "command": "sqz hook cursor",
+        "matcher": "Shell"
       }
     ]
   }

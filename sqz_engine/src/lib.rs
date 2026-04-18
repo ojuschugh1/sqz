@@ -139,7 +139,7 @@ pub use simhash::{simhash, SimHashFingerprint};
 pub use structural_summary::{summarize as structural_summarize, summarize_multi, SummaryConfig, StructuralSummaryResult};
 pub use textrank::{textrank_compress, TextRankConfig, TextRankResult};
 pub use mdl_selector::{select_stages, profile_content, ContentProfile, MdlSelection};
-pub use tool_hooks::{process_hook, generate_hook_configs, install_tool_hooks, ToolHookConfig, HookScope};
+pub use tool_hooks::{process_hook, process_hook_cursor, process_hook_gemini, process_hook_windsurf, generate_hook_configs, install_tool_hooks, ToolHookConfig, HookScope, HookPlatform};
 pub use opencode_plugin::{
     generate_opencode_plugin, install_opencode_plugin, update_opencode_config,
     process_opencode_hook, opencode_plugin_path,

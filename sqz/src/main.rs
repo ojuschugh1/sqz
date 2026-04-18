@@ -1018,6 +1018,10 @@ fn cmd_hook(tool: &str) {
 
     let result = match tool {
         "opencode" => sqz_engine::process_opencode_hook(&input),
+        "cursor" => sqz_engine::process_hook_cursor(&input),
+        "gemini" => sqz_engine::process_hook_gemini(&input),
+        "windsurf" => sqz_engine::process_hook_windsurf(&input),
+        // "claude" and any other tool use the default Claude Code format
         _ => sqz_engine::process_hook(&input),
     };
 
