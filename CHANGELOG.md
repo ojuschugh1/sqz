@@ -5,6 +5,53 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-04-18
+
+### Added
+
+- **Structural summary extraction** — code files compressed to imports + function
+  signatures + call graph (~70% reduction). The model sees the architecture, not
+  implementation noise.
+
+### Fixed
+
+- **MCP `initialize` capability (issue #3)** — changed `"tools": {}` to
+  `"tools": {"listChanged": false}` per MCP 2024-11-05 spec. OpenCode and other
+  compliant clients were interpreting the empty object as "no tools" and skipping
+  `tools/list`. Regression test added.
+- **Windows path escaping in hook configs (issue #2)** — `std::env::current_exe()`
+  returns backslash paths on Windows. These were interpolated raw into JSON/TS
+  string literals, producing invalid JSON. Added `json_escape_string_value()` helper
+  implementing RFC 8259 escaping. Markdown rules files (Windsurf/Cline) keep raw
+  paths for copy-paste readability. 7 new tests.
+- **Hook format corrections** — matched hook JSON output to official docs for Claude
+  Code (`hookSpecificOutput.updatedInput`), Cursor (flat `permission` + `updated_input`,
+  `"version": 1`, matcher `"Shell"`), Gemini CLI (`decision` + `hookSpecificOutput.tool_input`),
+  and Windsurf (`agent_action_name` + `tool_info.command_line`). Windsurf/Cline
+  downgraded to prompt-level `.windsurfrules`/`.clinerules` guidance since they
+  don't support command rewriting via hooks.
+- **Word abbreviation removed from CLI and WASM paths** — the n-gram abbreviator
+  was mangling directory names and filenames in `ls -l` output. Removed from the
+  shell hook compression path and browser extension.
+- **RLE false-positive on `ls -l` output** — the pattern-run compressor was
+  collapsing filenames that happened to share prefixes. Fixed.
+- **GitDiffFoldStage false-positive on `ls -l`** — the diff folder was triggering
+  on lines starting with `d` (directory entries). Fixed.
+- **`sqz init` now asks for confirmation** before modifying existing files.
+- **Audit findings addressed** — H-1, M-1, M-2, M-6, M-9, M-12, L-13 from
+  external security audit.
+
+### Changed
+
+- Benchmark doc corrected: edited file re-reads use delta encoding (~60-75 tokens),
+  not dedup refs (13 tokens). Session totals updated accordingly.
+- npm README synced with root README.
+
+### Testing
+
+- 986 tests total (up from 947 in 0.6.0), 0 new failures
+- 1 pre-existing flaky proptest in `api_proxy` (SQLite temp file race, unrelated)
+
 ## [0.6.0] — 2026-04-17
 
 ### Added

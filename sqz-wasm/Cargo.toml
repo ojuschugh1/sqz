@@ -1,6 +1,6 @@
 [package]
 name = "sqz-wasm"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Browser WASM build of sqz — LLM context compression for browser extensions"
 license-file = "../LICENSE"
