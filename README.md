@@ -122,6 +122,7 @@ What doesn't get compressed:
 ```sh
 sqz init              # Install hooks
 sqz compress <text>   # Compress (or pipe from stdin)
+sqz compact           # Evict stale context to free tokens
 sqz gain              # Show daily token savings
 sqz stats             # Cumulative report
 sqz discover          # Find missed savings
@@ -147,9 +148,10 @@ sqz token savings (last 7 days)
 ## How Compression Works
 
 1. **Per-command formatters** — `git status` → compact summary, `cargo test` → failures only, `docker ps` → name/image/status table
-2. **Dedup cache** — SHA-256 content hash, persistent across sessions. Second read = 13-token reference.
-3. **JSON pipeline** — strip nulls → flatten → collapse arrays → TOON encoding (lossless compact format)
-4. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
+2. **Structural summaries** — code files compressed to imports + function signatures + call graph (~70% reduction). The model sees the architecture, not implementation noise.
+3. **Dedup cache** — SHA-256 content hash, persistent across sessions. Second read = 13-token reference.
+4. **JSON pipeline** — strip nulls → project out debug fields → flatten → collapse arrays → TOON encoding (lossless compact format)
+5. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
 
 For the full technical details, see [docs/](docs/).
 

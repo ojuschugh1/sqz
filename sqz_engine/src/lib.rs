@@ -105,6 +105,7 @@ pub mod sandbox_executor;
 pub mod session_continuity;
 pub mod session_store;
 pub mod stages;
+pub mod structural_summary;
 pub mod tee_mode;
 pub mod terse_mode;
 pub mod token_counter;
@@ -135,6 +136,7 @@ pub use litm_positioner::{ContextSection, LitmPositioner, LitmStrategy, SectionT
 pub use ngram_abbreviator::{NgramAbbreviator, AbbreviatorConfig, AbbreviationResult};
 pub use rle_compressor::{rle_compress, sliding_window_dedup, RleResult, SlidingWindowResult};
 pub use simhash::{simhash, SimHashFingerprint};
+pub use structural_summary::{summarize as structural_summarize, summarize_multi, SummaryConfig, StructuralSummaryResult};
 pub use textrank::{textrank_compress, TextRankConfig, TextRankResult};
 pub use mdl_selector::{select_stages, profile_content, ContentProfile, MdlSelection};
 pub use tool_hooks::{process_hook, generate_hook_configs, install_tool_hooks, ToolHookConfig, HookScope};
