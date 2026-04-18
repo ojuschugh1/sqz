@@ -40,36 +40,29 @@ pub fn rle_compress(text: &str, min_run_length: usize) -> Result<RleResult> {
     let mut i = 0;
 
     while i < lines.len() {
-        // Try to find a run of identical or pattern-matching lines
+        // Try to find a run of identical lines (lossless — safe to collapse)
         let mut run_len = 1;
         while i + run_len < lines.len() && lines[i] == lines[i + run_len] {
             run_len += 1;
         }
 
         if run_len >= min_run_length {
-            // Collapse the run
+            // Collapse the run of identical lines. Lossless: N copies of the
+            // same text can be recovered from "{text} [×N]".
             output.push(format!("{} [×{}]", lines[i], run_len));
             runs_collapsed += 1;
             let line_tokens = (lines[i].len() as u32 + 3) / 4;
             tokens_saved += line_tokens * (run_len as u32 - 1);
             i += run_len;
         } else {
-            // Try pattern-based RLE: detect lines that match a template
-            // e.g., "Compiling foo v1.0" / "Compiling bar v2.0" → "Compiling {N items}..."
-            let pattern_run = detect_pattern_run(&lines[i..]);
-            if pattern_run.count >= min_run_length {
-                output.push(format!(
-                    "{} [×{}, varying: {}]",
-                    pattern_run.template, pattern_run.count, pattern_run.varying_part
-                ));
-                runs_collapsed += 1;
-                let line_tokens = (lines[i].len() as u32 + 3) / 4;
-                tokens_saved += line_tokens * (pattern_run.count as u32 - 1);
-                i += pattern_run.count;
-            } else {
-                output.push(lines[i].to_string());
-                i += 1;
-            }
+            // Pattern-run detection (lines with shared word-prefix but
+            // different suffixes) was removed because it was LOSSY: it
+            // replaced the varying parts with "{count} unique values",
+            // discarding real filenames from `ls -l` output. See Reddit
+            // report #1 and the test_ls_output_preserves_all_filenames
+            // regression test. Exact duplicates above are still collapsed.
+            output.push(lines[i].to_string());
+            i += 1;
         }
     }
 
@@ -84,91 +77,6 @@ pub fn rle_compress(text: &str, min_run_length: usize) -> Result<RleResult> {
         runs_collapsed,
         tokens_saved,
     })
-}
-
-/// A detected pattern run.
-struct PatternRun {
-    template: String,
-    count: usize,
-    varying_part: String,
-}
-
-/// Detect a run of lines that share a common prefix/suffix pattern.
-/// E.g., "Compiling foo v1.0", "Compiling bar v2.0" share prefix "Compiling ".
-fn detect_pattern_run(lines: &[&str]) -> PatternRun {
-    if lines.len() < 2 {
-        return PatternRun {
-            template: lines.first().unwrap_or(&"").to_string(),
-            count: 1,
-            varying_part: String::new(),
-        };
-    }
-
-    let first = lines[0];
-    let words_first: Vec<&str> = first.split_whitespace().collect();
-    if words_first.is_empty() {
-        return PatternRun {
-            template: first.to_string(),
-            count: 1,
-            varying_part: String::new(),
-        };
-    }
-
-    // Find the longest common prefix (in words) between first and second line
-    let second_words: Vec<&str> = lines[1].split_whitespace().collect();
-    let mut prefix_len = 0;
-    for w in 0..words_first.len().min(second_words.len()) {
-        if words_first[w] == second_words[w] {
-            prefix_len = w + 1;
-        } else {
-            break;
-        }
-    }
-
-    // Need at least 1 shared prefix word to form a pattern
-    if prefix_len == 0 {
-        return PatternRun {
-            template: first.to_string(),
-            count: 1,
-            varying_part: String::new(),
-        };
-    }
-
-    let prefix: String = words_first[..prefix_len].join(" ");
-
-    // Count how many consecutive lines share this prefix
-    let mut count = 1;
-    for line in &lines[1..] {
-        let words: Vec<&str> = line.split_whitespace().collect();
-        if words.len() >= prefix_len && words[..prefix_len].join(" ") == prefix {
-            count += 1;
-        } else {
-            break;
-        }
-    }
-
-    if count < 2 {
-        return PatternRun {
-            template: first.to_string(),
-            count: 1,
-            varying_part: String::new(),
-        };
-    }
-
-    // Collect the varying parts
-    let varying: Vec<String> = lines[..count]
-        .iter()
-        .map(|l| {
-            let words: Vec<&str> = l.split_whitespace().collect();
-            words[prefix_len..].join(" ")
-        })
-        .collect();
-
-    PatternRun {
-        template: format!("{prefix} ..."),
-        count,
-        varying_part: format!("{} unique values", varying.len()),
-    }
 }
 
 // ── Sliding Window Dedup ──────────────────────────────────────────────────────
@@ -263,11 +171,33 @@ mod tests {
     }
 
     #[test]
-    fn test_rle_pattern_repetition() {
+    fn test_rle_pattern_no_longer_collapses() {
+        // Pattern-run collapsing was removed because it was lossy — it
+        // replaced varying filename/identifier suffixes with "N unique
+        // values", dropping data the LLM needs. Different lines that
+        // merely share a prefix must pass through unchanged.
         let input = "Compiling foo v1.0\nCompiling bar v2.0\nCompiling baz v3.0\ndone\n";
         let result = rle_compress(input, 2).unwrap();
-        assert!(result.runs_collapsed > 0, "should detect pattern run");
-        assert!(result.text.contains("×3"), "output: {}", result.text);
+        assert_eq!(result.runs_collapsed, 0, "different lines must not be collapsed");
+        assert!(result.text.contains("foo"), "filename 'foo' must survive: {}", result.text);
+        assert!(result.text.contains("bar"), "filename 'bar' must survive: {}", result.text);
+        assert!(result.text.contains("baz"), "filename 'baz' must survive: {}", result.text);
+    }
+
+    #[test]
+    fn test_rle_ls_l_output_preserves_filenames() {
+        // Regression for https://github.com/ojuschugh1/sqz/issues/1
+        // ls -l lines share the 'drwxr-xr-x' prefix but have distinct
+        // filenames. Pattern-run collapsing used to delete them.
+        let input = "drwxr-xr-x  6 user user  192 Apr 18 10:00 packages\n\
+                     drwxr-xr-x  3 user user   96 Apr 18 10:00 configuration\n\
+                     drwxr-xr-x  4 user user  128 Apr 18 10:00 documentation\n\
+                     drwxr-xr-x  2 user user   64 Apr 18 10:00 environment\n";
+        let result = rle_compress(input, 2).unwrap();
+        for name in &["packages", "configuration", "documentation", "environment"] {
+            assert!(result.text.contains(name),
+                "filename '{}' must be preserved — got:\n{}", name, result.text);
+        }
     }
 
     #[test]

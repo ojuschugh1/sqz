@@ -515,4 +515,30 @@ mod tests {
         let result = proxy.intercept_output("cargo build", output);
         assert!(result.contains("implementation"), "identifier 'implementation' must be preserved: {result}");
     }
+
+    #[test]
+    fn test_ls_output_preserves_all_filenames_through_rle() {
+        // Reproduces the Reddit user's report at the full pipeline level.
+        // ls -l output ≥200 bytes triggers the RLE pattern-run detector,
+        // which collapses lines sharing a word-prefix (e.g. 'drwxr-xr-x')
+        // into '{prefix} ... [×N, varying: N unique values]' — losing the
+        // actual filenames.
+        let proxy = CliProxy::new().expect("engine init");
+        let output = "total 24\n\
+                      drwxr-xr-x  6 user user  192 Apr 18 10:00 packages\n\
+                      drwxr-xr-x  3 user user   96 Apr 18 10:00 configuration\n\
+                      drwxr-xr-x  4 user user  128 Apr 18 10:00 documentation\n\
+                      drwxr-xr-x  2 user user   64 Apr 18 10:00 environment\n\
+                      -rw-r--r--  1 user user 1024 Apr 18 10:00 README.md\n\
+                      -rw-r--r--  1 user user  512 Apr 18 10:00 Cargo.toml\n\
+                      -rw-r--r--  1 user user  256 Apr 18 10:00 LICENSE\n";
+        let result = proxy.intercept_output("ls -la", output);
+        for name in &["packages", "configuration", "documentation", "environment",
+                      "README.md", "Cargo.toml", "LICENSE"] {
+            assert!(result.contains(name),
+                "filename '{name}' must appear in output — got:\n{result}");
+        }
+        assert!(!result.contains("unique values"),
+            "RLE pattern-run summary must not replace real filenames — got:\n{result}");
+    }
 }
