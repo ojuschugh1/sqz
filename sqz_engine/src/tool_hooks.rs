@@ -61,10 +61,17 @@ pub fn process_hook(input: &str) -> Result<String> {
         .map_err(|e| crate::error::SqzError::Other(format!("hook: invalid JSON input: {e}")))?;
 
     // Claude Code uses "tool_name" + "tool_input" (official docs).
-    // Some older references show "toolName" + "toolCall" — accept both.
+    // Cursor uses "hook_event_name": "beforeShellExecution" with "command" at top level.
+    // Some older references show "toolName" + "toolCall" — accept all.
     let tool_name = parsed
         .get("tool_name")
         .or_else(|| parsed.get("toolName"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let hook_event = parsed
+        .get("hook_event_name")
+        .or_else(|| parsed.get("agent_action_name"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
@@ -76,19 +83,36 @@ pub fn process_hook(input: &str) -> Result<String> {
     // output enters the context unchanged. We can only compress Bash command
     // output by rewriting the command via PreToolUse. The MCP server
     // (sqz-mcp) provides compressed alternatives to these built-in tools.
-    if !matches!(tool_name, "Bash" | "bash" | "shell" | "terminal"
-        | "run_terminal_command" | "run_shell_command") {
+    let is_shell = matches!(tool_name, "Bash" | "bash" | "shell" | "terminal"
+        | "run_terminal_command" | "run_shell_command")
+        || matches!(hook_event, "beforeShellExecution" | "pre_run_command");
+
+    if !is_shell {
         // Pass through non-bash tools unchanged
         return Ok(input.to_string());
     }
 
     // Claude Code puts command in tool_input.command (official docs).
-    // Some older references show toolCall.command — accept both.
+    // Cursor puts command at top level: { "command": "git status" }.
+    // Windsurf puts command in tool_info.command_line.
+    // Some older references show toolCall.command — accept all.
     let command = parsed
         .get("tool_input")
-        .or_else(|| parsed.get("toolCall"))
         .and_then(|v| v.get("command"))
         .and_then(|v| v.as_str())
+        .or_else(|| parsed.get("command").and_then(|v| v.as_str()))
+        .or_else(|| {
+            parsed
+                .get("tool_info")
+                .and_then(|v| v.get("command_line"))
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            parsed
+                .get("toolCall")
+                .and_then(|v| v.get("command"))
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or("");
 
     if command.is_empty() {
@@ -112,18 +136,27 @@ pub fn process_hook(input: &str) -> Result<String> {
         command
     );
 
-    // Build the output in the format Claude Code expects.
-    // Official format (code.claude.com/docs/en/hooks-guide):
-    // {
-    //   "hookSpecificOutput": {
-    //     "hookEventName": "PreToolUse",
-    //     "permissionDecision": "allow",
-    //     "updatedInput": { "command": "rewritten command" }
-    //   }
-    // }
+    // Build the output in a format compatible with Claude Code, Gemini CLI, and Cursor.
     //
-    // Gemini CLI uses a different format with tool_input instead of updatedInput.
+    // Claude Code (docs.anthropic.com/en/docs/claude-code/hooks):
+    //   hookSpecificOutput.hookEventName = "PreToolUse"
+    //   hookSpecificOutput.permissionDecision = "allow" | "deny" | "ask"
+    //   hookSpecificOutput.permissionDecisionReason = "..."
+    //   hookSpecificOutput.updatedInput = { "command": "..." }  (replaces entire input)
+    //
+    // Gemini CLI (geminicli.com/docs/hooks/reference):
+    //   decision = "allow" | "deny"  (top-level)
+    //   hookSpecificOutput.tool_input = { "command": "..." }  (merged with model args)
+    //
+    // Cursor (blog.gitbutler.com/cursor-hooks-deep-dive):
+    //   continue = true | false
+    //   permission = "allow" | "deny" | "ask"
+    //
+    // We include all formats so the same hook binary works for any tool.
     let output = serde_json::json!({
+        "continue": true,
+        "permission": "allow",
+        "decision": "allow",
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
@@ -180,22 +213,21 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
             ),
             scope: HookScope::Project,
         },
-        // Cursor
+        // Cursor — uses its own hook format (different from Claude Code).
+        // Config: .cursor/hooks.json with "version": 1
+        // Event: "beforeShellExecution" (not "PreToolUse")
+        // Input: { "command": "...", "hook_event_name": "beforeShellExecution" }
+        // Output: { "continue": true, "permission": "allow" }
         ToolHookConfig {
             tool_name: "Cursor".to_string(),
             config_path: PathBuf::from(".cursor/hooks.json"),
             config_content: format!(
                 r#"{{
+  "version": 1,
   "hooks": {{
-    "PreToolUse": [
+    "beforeShellExecution": [
       {{
-        "matcher": "Bash",
-        "hooks": [
-          {{
-            "type": "command",
-            "command": "{sqz_path} hook cursor"
-          }}
-        ]
+        "command": "{sqz_path} hook cursor"
       }}
     ]
   }}
@@ -203,22 +235,20 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
             ),
             scope: HookScope::Project,
         },
-        // Windsurf
+        // Windsurf — uses its own hook format (Cascade Hooks).
+        // Config: .windsurf/hooks.json
+        // Event: "pre_run_command" (not "PreToolUse")
+        // Input: { "agent_action_name": "pre_run_command", "tool_info": { "command_line": "..." } }
+        // Output: exit 0 = allow, exit 2 = block
         ToolHookConfig {
             tool_name: "Windsurf".to_string(),
             config_path: PathBuf::from(".windsurf/hooks.json"),
             config_content: format!(
                 r#"{{
   "hooks": {{
-    "PreToolUse": [
+    "pre_run_command": [
       {{
-        "matcher": "Bash",
-        "hooks": [
-          {{
-            "type": "command",
-            "command": "{sqz_path} hook windsurf"
-          }}
-        ]
+        "command": "{sqz_path} hook windsurf"
       }}
     ]
   }}
@@ -226,27 +256,24 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
             ),
             scope: HookScope::Project,
         },
-        // Cline
+        // Cline — uses executable scripts in .clinerules/hooks/ directory.
+        // Script name must match the hook type: "PreToolUse" (no extension).
+        // Input: JSON via stdin with hookName, toolName, toolInput fields.
+        // Output: { "cancel": false } to allow, { "cancel": true } to block.
+        // Note: Cline's PreToolUse cannot rewrite commands (only cancel/allow +
+        // contextModification for the NEXT request). Transparent compression
+        // is handled by the sqz-mcp server instead. This hook is a placeholder.
         ToolHookConfig {
             tool_name: "Cline".to_string(),
-            config_path: PathBuf::from(".cline/hooks.json"),
-            config_content: format!(
-                r#"{{
-  "hooks": {{
-    "PreToolUse": [
-      {{
-        "matcher": "Bash",
-        "hooks": [
-          {{
-            "type": "command",
-            "command": "{sqz_path} hook cline"
-          }}
-        ]
-      }}
-    ]
-  }}
-}}"#
-            ),
+            config_path: PathBuf::from(".clinerules/hooks/PreToolUse"),
+            config_content: r#"#!/usr/bin/env bash
+# sqz hook for Cline — passes through all tool calls.
+# Cline's PreToolUse cannot rewrite commands, so compression
+# is handled by the sqz-mcp server instead.
+echo '{"cancel": false}'
+exit 0
+"#
+            .to_string(),
             scope: HookScope::Project,
         },
         // Gemini CLI — goes in .gemini/settings.json (BeforeTool event)
@@ -383,14 +410,20 @@ mod tests {
         let input = r#"{"tool_name":"Bash","tool_input":{"command":"git status"}}"#;
         let result = process_hook(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        // Output must use hookSpecificOutput with permissionDecision
+        // Top-level decision for Gemini CLI compatibility
+        assert_eq!(parsed["decision"].as_str().unwrap(), "allow");
+        // hookSpecificOutput for Claude Code compatibility
         let hook_output = &parsed["hookSpecificOutput"];
         assert_eq!(hook_output["hookEventName"].as_str().unwrap(), "PreToolUse");
         assert_eq!(hook_output["permissionDecision"].as_str().unwrap(), "allow");
+        // updatedInput for Claude Code
         let cmd = hook_output["updatedInput"]["command"].as_str().unwrap();
         assert!(cmd.contains("sqz compress"), "should pipe through sqz: {cmd}");
         assert!(cmd.contains("git status"), "should preserve original command: {cmd}");
         assert!(cmd.contains("SQZ_CMD=git"), "should set SQZ_CMD: {cmd}");
+        // tool_input for Gemini CLI
+        let gemini_cmd = hook_output["tool_input"]["command"].as_str().unwrap();
+        assert_eq!(cmd, gemini_cmd, "updatedInput and tool_input should match");
     }
 
     #[test]
@@ -449,6 +482,33 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
         assert!(cmd.contains("sqz compress"), "legacy format should still work: {cmd}");
+    }
+
+    #[test]
+    fn test_process_hook_cursor_format() {
+        // Cursor uses hook_event_name + command at top level
+        let input = r#"{"hook_event_name":"beforeShellExecution","command":"git status","conversation_id":"abc"}"#;
+        let result = process_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        // Cursor expects continue + permission
+        assert_eq!(parsed["continue"].as_bool().unwrap(), true);
+        assert_eq!(parsed["permission"].as_str().unwrap(), "allow");
+        // Also check the rewritten command is in hookSpecificOutput
+        let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
+        assert!(cmd.contains("sqz compress"), "cursor format should work: {cmd}");
+        assert!(cmd.contains("git status"));
+    }
+
+    #[test]
+    fn test_process_hook_windsurf_format() {
+        // Windsurf uses agent_action_name + tool_info.command_line
+        let input = r#"{"agent_action_name":"pre_run_command","tool_info":{"command_line":"cargo test","cwd":"/project"}}"#;
+        let result = process_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
+        assert!(cmd.contains("sqz compress"), "windsurf format should work: {cmd}");
+        assert!(cmd.contains("cargo test"));
+        assert!(cmd.contains("SQZ_CMD=cargo"));
     }
 
     #[test]

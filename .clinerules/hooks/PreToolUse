@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# sqz hook for Cline — passes through all tool calls.
+# Cline's PreToolUse cannot rewrite commands, so compression
+# is handled by the sqz-mcp server instead.
+echo '{"cancel": false}'
+exit 0
