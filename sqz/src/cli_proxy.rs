@@ -144,6 +144,7 @@ impl CliProxy {
             // L1 hit — check L2 persistent cache for the actual ref
             if let Ok(Some(inline_ref)) = self.engine.cache_manager().check_dedup(output.as_bytes()) {
                 eprintln!("[sqz] dedup hit: {} (L1+L2)", inline_ref);
+                self.log_dedup_hit(cmd, output);
                 return inline_ref;
             }
         }
@@ -153,6 +154,7 @@ impl CliProxy {
             // Promote to L1 for faster future lookups
             self.l1_cache.borrow_mut().insert(fast_hash);
             eprintln!("[sqz] dedup hit: {} (L2)", inline_ref);
+            self.log_dedup_hit(cmd, output);
             return inline_ref;
         }
 
@@ -218,6 +220,34 @@ impl CliProxy {
         // Also log to session store for `sqz gain` tracking
         let _ = self.engine.session_store().log_compression(
             original, compressed, &[], cmd,
+        );
+    }
+
+    /// Record a dedup hit in the compression log so `sqz stats` and
+    /// `sqz gain` reflect the savings.
+    ///
+    /// A dedup hit replaces the full content with a 13-token §ref:hash§
+    /// marker (hard-coded to match `CacheResult::Dedup { token_cost: 13 }`
+    /// in cache_manager.rs). Without this call the dominant savings path
+    /// is invisible to users — they'd see ~15% average reduction in
+    /// `sqz stats` while actually getting 99%+ on repeat reads.
+    ///
+    /// `tokens_original` uses the same byte/4 heuristic the formatter
+    /// path uses (cli_proxy.rs line ~161). Switching both paths to real
+    /// tiktoken counts is a separate follow-up; using the same heuristic
+    /// keeps the reporting internally consistent.
+    fn log_dedup_hit(&self, _cmd: &str, output: &str) {
+        let tokens_original = (output.len() as u32 + 3) / 4;
+        // A dedup ref is approximately 13 tokens; matches token_cost in
+        // CacheResult::Dedup and the tests that assert on it.
+        const DEDUP_REF_TOKENS: u32 = 13;
+        // Tag with mode "dedup" so downstream analysis can distinguish
+        // pipeline compressions from cache hits.
+        let _ = self.engine.session_store().log_compression(
+            tokens_original,
+            DEDUP_REF_TOKENS,
+            &["dedup".to_string()],
+            "dedup",
         );
     }
 
@@ -428,13 +458,46 @@ mod tests {
     #[test]
     fn test_dedup_cache_returns_ref_on_second_call() {
         let proxy = CliProxy::new().expect("engine init");
-        let output = "some repeated output that is long enough to be meaningful\n".repeat(5);
+        // Use unique content so this test doesn't depend on prior test state
+        // in the shared ~/.sqz/sessions.db cache.
+        let unique_tag = format!(
+            "tag-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now(),
+        );
+        let output = format!(
+            "dedup test content with {}\n{}",
+            unique_tag,
+            "some repeated output that is long enough to be meaningful\n".repeat(5),
+        );
+
+        // Capture the compression count before the two calls.
+        let store = proxy.engine.session_store();
+        let count_before = store.compression_stats().unwrap_or_default().total_compressions;
+
         let first = proxy.intercept_output("echo", &output);
         let second = proxy.intercept_output("echo", &output);
-        // Second call should return a dedup reference (from L1 or L2 cache)
-        assert!(second.starts_with("§ref:"), "expected dedup ref, got: {}", second);
-        assert!(second.len() < first.len() || first.starts_with("§ref:"),
-            "dedup ref should be shorter than original");
+
+        // Second call must be a dedup ref.
+        assert!(
+            second.starts_with("§ref:"),
+            "expected dedup ref, got: {}",
+            second
+        );
+        assert!(
+            second.len() < first.len(),
+            "dedup ref should be shorter than original"
+        );
+
+        // Both calls must be recorded in the log. Before the April 18
+        // reporting fix, dedup hits returned early and never logged — so
+        // `sqz stats` undercounted. This assertion locks in the fix.
+        let count_after = store.compression_stats().unwrap_or_default().total_compressions;
+        assert!(
+            count_after >= count_before + 2,
+            "both intercept calls must be logged (including dedup hit); \
+             before={count_before}, after={count_after}"
+        );
     }
 
     #[test]
