@@ -284,6 +284,20 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
 
 /// Generate hook configuration files for all supported AI tools.
 pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
+    // On Windows, `sqz_path` contains backslashes (C:\Users\...\sqz.exe).
+    // Embedding the raw path into JSON string values produces invalid JSON
+    // because `\` must be escaped as `\\` per RFC 8259. Same rule applies
+    // to JS/TS string literals. See issue #2.
+    //
+    // We keep TWO versions of the path:
+    //   - `sqz_path_raw` — the original, shown in markdown files the user
+    //     reads (.windsurfrules, .clinerules) where backslashes should
+    //     render as-is so the user can copy-paste the command.
+    //   - `sqz_path` — JSON/JS-escaped, used in every .json / .ts config.
+    let sqz_path_raw = sqz_path;
+    let sqz_path_json = json_escape_string_value(sqz_path);
+    let sqz_path = &sqz_path_json;
+
     vec![
         // Claude Code — goes in .claude/settings.local.json (nested format)
         // Includes PreToolUse for Bash compression AND SessionStart compact
@@ -360,10 +374,10 @@ Always prefix shell commands with `sqz` to compress output for token savings:
 
 ```bash
 # Instead of:              Use:
-git status                 {sqz_path} git status
-cargo test                 {sqz_path} cargo test
-git log -10                {sqz_path} git log -10
-docker ps                  {sqz_path} docker ps
+git status                 {sqz_path_raw} git status
+cargo test                 {sqz_path_raw} cargo test
+git log -10                {sqz_path_raw} git log -10
+docker ps                  {sqz_path_raw} docker ps
 ```
 
 sqz is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
@@ -385,10 +399,10 @@ Always prefix shell commands with `sqz` to compress output for token savings:
 
 ```bash
 # Instead of:              Use:
-git status                 {sqz_path} git status
-cargo test                 {sqz_path} cargo test
-git log -10                {sqz_path} git log -10
-docker ps                  {sqz_path} docker ps
+git status                 {sqz_path_raw} git status
+cargo test                 {sqz_path_raw} cargo test
+git log -10                {sqz_path_raw} git log -10
+docker ps                  {sqz_path_raw} docker ps
 ```
 
 sqz is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
@@ -492,6 +506,37 @@ fn extract_base_command(cmd: &str) -> &str {
         .rsplit('/')
         .next()
         .unwrap_or("unknown")
+}
+
+/// Escape a string for embedding as the contents of a double-quoted JSON
+/// string value (per RFC 8259). Also valid for embedding in a double-quoted
+/// JavaScript/TypeScript string literal — JS string-escape rules for the
+/// characters that appear in filesystem paths (`\`, `"`, control chars) are
+/// a strict subset of JSON's.
+///
+/// Needed because hook configs embed the sqz executable path into JSON/TS
+/// files via `format!`. On Windows, `current_exe()` returns
+/// `C:\Users\...\sqz.exe` — the raw backslashes produce invalid JSON that
+/// Claude/Cursor/Gemini fail to parse. See issue #2.
+pub(crate) fn json_escape_string_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                // Other control chars: use \u00XX escape
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Shell-escape a string for use in an environment variable assignment.
@@ -719,6 +764,100 @@ mod tests {
         // Cursor should NOT use nested hooks array (that's Claude Code format)
         assert!(!cursor.config_content.contains("\"type\": \"command\""),
             "Cursor config should use flat format, not nested hooks array");
+    }
+
+    // ── Issue #2: Windows path escaping in hook configs ───────────────
+
+    #[test]
+    fn test_json_escape_string_value() {
+        // Plain ASCII: unchanged
+        assert_eq!(json_escape_string_value("sqz"), "sqz");
+        assert_eq!(json_escape_string_value("/usr/local/bin/sqz"), "/usr/local/bin/sqz");
+        // Backslash: escaped
+        assert_eq!(json_escape_string_value(r"C:\Users\Alice\sqz.exe"),
+                   r"C:\\Users\\Alice\\sqz.exe");
+        // Double quote: escaped
+        assert_eq!(json_escape_string_value(r#"path with "quotes""#),
+                   r#"path with \"quotes\""#);
+        // Control chars
+        assert_eq!(json_escape_string_value("a\nb\tc"), r"a\nb\tc");
+    }
+
+    #[test]
+    fn test_windows_path_produces_valid_json_for_claude() {
+        // Issue #2 repro: on Windows, current_exe() returns a path with
+        // backslashes. Without escaping, the generated JSON is invalid.
+        let windows_path = r"C:\Users\SqzUser\.cargo\bin\sqz.exe";
+        let configs = generate_hook_configs(windows_path);
+
+        let claude = configs.iter().find(|c| c.tool_name == "Claude Code")
+            .expect("Claude config should be generated");
+        let parsed: serde_json::Value = serde_json::from_str(&claude.config_content)
+            .expect("Claude hook config must be valid JSON on Windows paths");
+
+        // Verify the command was written with the original path (not lossy-transformed).
+        let cmd = parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command field must be a string");
+        assert!(cmd.contains(windows_path),
+            "command '{cmd}' must contain the original Windows path '{windows_path}'");
+    }
+
+    #[test]
+    fn test_windows_path_produces_valid_json_for_cursor() {
+        let windows_path = r"C:\Users\SqzUser\.cargo\bin\sqz.exe";
+        let configs = generate_hook_configs(windows_path);
+
+        let cursor = configs.iter().find(|c| c.tool_name == "Cursor").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&cursor.config_content)
+            .expect("Cursor hook config must be valid JSON on Windows paths");
+        let cmd = parsed["hooks"]["preToolUse"][0]["command"].as_str().unwrap();
+        assert!(cmd.contains(windows_path));
+    }
+
+    #[test]
+    fn test_windows_path_produces_valid_json_for_gemini() {
+        let windows_path = r"C:\Users\SqzUser\.cargo\bin\sqz.exe";
+        let configs = generate_hook_configs(windows_path);
+
+        let gemini = configs.iter().find(|c| c.tool_name == "Gemini CLI").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&gemini.config_content)
+            .expect("Gemini hook config must be valid JSON on Windows paths");
+        let cmd = parsed["hooks"]["BeforeTool"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.contains(windows_path));
+    }
+
+    #[test]
+    fn test_rules_files_use_raw_path_for_readability() {
+        // The .windsurfrules / .clinerules files are markdown for humans.
+        // Backslashes should NOT be doubled there — the user needs to
+        // copy-paste the command into their shell.
+        let windows_path = r"C:\Users\SqzUser\.cargo\bin\sqz.exe";
+        let configs = generate_hook_configs(windows_path);
+
+        for tool in &["Windsurf", "Cline"] {
+            let cfg = configs.iter().find(|c| &c.tool_name == tool).unwrap();
+            assert!(cfg.config_content.contains(windows_path),
+                "{tool} rules file must contain the raw (unescaped) path — got:\n{}",
+                cfg.config_content);
+            assert!(!cfg.config_content.contains(r"C:\\Users"),
+                "{tool} rules file must NOT double-escape backslashes — got:\n{}",
+                cfg.config_content);
+        }
+    }
+
+    #[test]
+    fn test_unix_path_still_works() {
+        // Regression: make sure the escape path doesn't mangle Unix paths
+        // (which have no backslashes to escape).
+        let unix_path = "/usr/local/bin/sqz";
+        let configs = generate_hook_configs(unix_path);
+
+        let claude = configs.iter().find(|c| c.tool_name == "Claude Code").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&claude.config_content)
+            .expect("Unix path should produce valid JSON");
+        let cmd = parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(cmd, "/usr/local/bin/sqz hook claude");
     }
 
     #[test]

@@ -19,6 +19,10 @@ use crate::error::Result;
 /// The plugin intercepts shell tool calls and rewrites them to pipe
 /// output through `sqz hook opencode`, which compresses the output.
 pub fn generate_opencode_plugin(sqz_path: &str) -> String {
+    // Escape for embedding in a double-quoted TypeScript string literal.
+    // On Windows, sqz_path contains backslashes that must be escaped —
+    // same reason we escape hook JSON in generate_hook_configs. See issue #2.
+    let sqz_path = crate::tool_hooks::json_escape_string_value(sqz_path);
     format!(
         r#"/**
  * sqz — OpenCode plugin for transparent context compression.
@@ -296,6 +300,29 @@ mod tests {
         assert!(content.contains("/usr/local/bin/sqz"));
         assert!(content.contains("SqzPlugin"));
         assert!(content.contains("tool.execute.before"));
+    }
+
+    #[test]
+    fn test_generate_opencode_plugin_windows_path_escaped() {
+        // Issue #2: Windows paths embedded in the TS string literal must
+        // have backslashes escaped. Before the fix, raw backslashes were
+        // interpreted as JS escape sequences (\U, \S, \b) producing an
+        // invalid or silently-wrong SQZ_PATH.
+        let windows_path = r"C:\Users\SqzUser\.cargo\bin\sqz.exe";
+        let content = generate_opencode_plugin(windows_path);
+        // The string literal in the generated TS should contain the
+        // path with doubled backslashes so that the runtime JS string
+        // value equals the original path.
+        assert!(
+            content.contains(r#"const SQZ_PATH = "C:\\Users\\SqzUser\\.cargo\\bin\\sqz.exe""#),
+            "expected JS-escaped path in plugin — got:\n{content}"
+        );
+        // And must NOT contain an unescaped backslash-sequence like \U
+        // (which JS would interpret as a unicode escape and then fail).
+        assert!(
+            !content.contains(r#"const SQZ_PATH = "C:\U"#),
+            "plugin must not contain unescaped backslashes in the string literal"
+        );
     }
 
     #[test]
