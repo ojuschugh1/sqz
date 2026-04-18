@@ -7,14 +7,21 @@
 ///
 /// Supported hook formats (tools that support command rewriting via hooks):
 /// - Claude Code: .claude/settings.local.json (nested PreToolUse, matcher: "Bash")
-/// - Cursor: .cursor/hooks.json (flat preToolUse, matcher: "Shell")
 /// - Gemini CLI: .gemini/settings.json (nested BeforeTool, matcher: "run_shell_command")
 /// - OpenCode: ~/.config/opencode/plugins/sqz.ts (TypeScript plugin, tool.execute.before)
 ///
-/// Tools that do NOT support command rewriting via hooks (use MCP server instead):
+/// Tools that do NOT support command rewriting via hooks (use prompt-level
+/// guidance via rules files instead):
 /// - Codex: only supports deny in PreToolUse; updatedInput is parsed but ignored
 /// - Windsurf: no documented hook API; uses .windsurfrules prompt-level guidance
 /// - Cline: PreToolUse cannot rewrite commands; uses .clinerules prompt-level guidance
+/// - Cursor: beforeShellExecution hook can allow/deny/ask only; the response
+///   has no documented field for rewriting the command. Uses .cursor/rules/sqz.mdc
+///   prompt-level guidance instead. The `sqz hook cursor` subcommand remains
+///   available and well-formed for users who configure hooks manually, but
+///   Cursor's documented hook schema (per GitButler deep-dive and Cupcake
+///   reference docs) confirms the response is `{permission, continue,
+///   userMessage, agentMessage}` only — no `updated_input`.
 
 use std::path::{Path, PathBuf};
 
@@ -335,29 +342,54 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
             ),
             scope: HookScope::Project,
         },
-        // Cursor — uses its own hook format (different from Claude Code).
-        // Config: .cursor/hooks.json with "version": 1
-        // Event key: "preToolUse" (camelCase, NOT "PreToolUse" or "beforeShellExecution")
-        // Entry format: flat { "command": "...", "matcher": "Shell" } (NOT nested hooks array)
-        // Input: { "tool_name": "Shell", "tool_input": { "command": "..." } }
-        // Output: { "permission": "allow", "updated_input": { "command": "..." } }
-        // Returns {} when no rewrite (Cursor requires JSON on all paths).
-        // Verified against RTK: github.com/rtk-ai/rtk/blob/master/hooks/cursor/
+        // Cursor — beforeShellExecution hook can only allow/deny/ask; it
+        // does NOT support rewriting the command via `updated_input` or any
+        // other field (verified against Cursor's documented schema via
+        // GitButler's deep-dive and Cupcake's reference, plus an empirical
+        // trace against cursor-agent 2026.04.14-ee4b43a). We use the modern
+        // .cursor/rules/*.mdc format (legacy .cursorrules is deprecated per
+        // docs.cursor.com/en/context/rules). `alwaysApply: true` guarantees
+        // the rule loads for every agent interaction.
         ToolHookConfig {
             tool_name: "Cursor".to_string(),
-            config_path: PathBuf::from(".cursor/hooks.json"),
+            config_path: PathBuf::from(".cursor/rules/sqz.mdc"),
             config_content: format!(
-                r#"{{
-  "version": 1,
-  "hooks": {{
-    "preToolUse": [
-      {{
-        "command": "{sqz_path} hook cursor",
-        "matcher": "Shell"
-      }}
-    ]
-  }}
-}}"#
+                r#"---
+description: sqz — Token-Optimized CLI Output
+alwaysApply: true
+---
+
+# sqz — Token-Optimized CLI Output
+
+When running shell commands whose output may be long (directory listings,
+git log/diff, test runners, build logs, `docker ps`, `kubectl get`, etc.),
+pipe the output through `sqz compress` to reduce token consumption.
+
+`sqz` is a stdin-to-stdout compressor, not a command wrapper. The correct
+usage is to pipe the command's output into `sqz compress`:
+
+```bash
+# Instead of:     Use:
+git status        git status 2>&1 | {sqz_path_raw} compress
+cargo test        cargo test 2>&1 | {sqz_path_raw} compress
+git log -10       git log -10 2>&1 | {sqz_path_raw} compress
+docker ps         docker ps 2>&1 | {sqz_path_raw} compress
+ls -la            ls -la 2>&1 | {sqz_path_raw} compress
+```
+
+The `2>&1` captures stderr too, which is useful for commands like `cargo
+test` where diagnostics go to stderr. `sqz compress` filters and compresses
+the combined output while preserving filenames, paths, and identifiers.
+It typically saves 60-90% tokens on verbose commands.
+
+Do NOT pipe output for:
+- Interactive commands (`vim`, `ssh`, `python`, REPLs)
+- Compound commands with operators (`cmd && other`, `cmd > file.txt`,
+  `cmd; other`) — run those directly
+- Short commands whose output is already a few lines
+
+If `sqz` is not on PATH, run commands normally.
+"#
             ),
             scope: HookScope::Project,
         },
@@ -370,18 +402,23 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
             config_content: format!(
                 r#"# sqz — Token-Optimized CLI Output
 
-Always prefix shell commands with `sqz` to compress output for token savings:
+Pipe verbose shell command output through `sqz compress` to save tokens.
+`sqz` reads from stdin and writes the compressed output to stdout — it is
+NOT a command wrapper, so `{sqz_path_raw} git status` is not valid.
 
 ```bash
-# Instead of:              Use:
-git status                 {sqz_path_raw} git status
-cargo test                 {sqz_path_raw} cargo test
-git log -10                {sqz_path_raw} git log -10
-docker ps                  {sqz_path_raw} docker ps
+# Instead of:     Use:
+git status        git status 2>&1 | {sqz_path_raw} compress
+cargo test        cargo test 2>&1 | {sqz_path_raw} compress
+git log -10       git log -10 2>&1 | {sqz_path_raw} compress
+docker ps         docker ps 2>&1 | {sqz_path_raw} compress
 ```
 
-sqz is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
-If sqz is not available, run commands normally.
+sqz filters and compresses command outputs while preserving filenames,
+paths, and identifiers (typically 60-90% token reduction on verbose
+commands). Skip short commands, interactive commands (vim, ssh, python),
+and commands with shell operators (`&&`, `||`, `;`, `>`, `<`). If sqz is
+not on PATH, run commands normally.
 "#
             ),
             scope: HookScope::Project,
@@ -395,18 +432,23 @@ If sqz is not available, run commands normally.
             config_content: format!(
                 r#"# sqz — Token-Optimized CLI Output
 
-Always prefix shell commands with `sqz` to compress output for token savings:
+Pipe verbose shell command output through `sqz compress` to save tokens.
+`sqz` reads from stdin and writes the compressed output to stdout — it is
+NOT a command wrapper, so `{sqz_path_raw} git status` is not valid.
 
 ```bash
-# Instead of:              Use:
-git status                 {sqz_path_raw} git status
-cargo test                 {sqz_path_raw} cargo test
-git log -10                {sqz_path_raw} git log -10
-docker ps                  {sqz_path_raw} docker ps
+# Instead of:     Use:
+git status        git status 2>&1 | {sqz_path_raw} compress
+cargo test        cargo test 2>&1 | {sqz_path_raw} compress
+git log -10       git log -10 2>&1 | {sqz_path_raw} compress
+docker ps         docker ps 2>&1 | {sqz_path_raw} compress
 ```
 
-sqz is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
-If sqz is not available, run commands normally.
+sqz filters and compresses command outputs while preserving filenames,
+paths, and identifiers (typically 60-90% token reduction on verbose
+commands). Skip short commands, interactive commands (vim, ssh, python),
+and commands with shell operators (`&&`, `||`, `;`, `>`, `<`). If sqz is
+not on PATH, run commands normally.
 "#
             ),
             scope: HookScope::Project,
@@ -746,24 +788,28 @@ mod tests {
         assert!(configs.iter().any(|c| c.tool_name == "Claude Code"));
         assert!(configs.iter().any(|c| c.tool_name == "Cursor"));
         assert!(configs.iter().any(|c| c.tool_name == "OpenCode"));
-        // Windsurf and Cline should generate rules files, not hook configs
+        // Windsurf, Cline, and Cursor should generate rules files, not hook configs
+        // (none of the three support transparent command rewriting via hooks).
         let windsurf = configs.iter().find(|c| c.tool_name == "Windsurf").unwrap();
         assert_eq!(windsurf.config_path, PathBuf::from(".windsurfrules"),
             "Windsurf should use .windsurfrules, not .windsurf/hooks.json");
         let cline = configs.iter().find(|c| c.tool_name == "Cline").unwrap();
         assert_eq!(cline.config_path, PathBuf::from(".clinerules"),
             "Cline should use .clinerules, not .clinerules/hooks/PreToolUse");
-        // Cursor should use correct format
+        // Cursor — empirically verified (forum/Cupcake/GitButler docs +
+        // live cursor-agent trace) that beforeShellExecution cannot rewrite
+        // commands. Use the modern .cursor/rules/*.mdc format.
         let cursor = configs.iter().find(|c| c.tool_name == "Cursor").unwrap();
-        assert!(cursor.config_content.contains("\"preToolUse\""),
-            "Cursor config should use preToolUse (camelCase), not PreToolUse or beforeShellExecution");
-        assert!(cursor.config_content.contains("\"version\": 1"),
-            "Cursor config should include version: 1");
-        assert!(cursor.config_content.contains("\"matcher\": \"Shell\""),
-            "Cursor config should use matcher: Shell");
-        // Cursor should NOT use nested hooks array (that's Claude Code format)
-        assert!(!cursor.config_content.contains("\"type\": \"command\""),
-            "Cursor config should use flat format, not nested hooks array");
+        assert_eq!(cursor.config_path, PathBuf::from(".cursor/rules/sqz.mdc"),
+            "Cursor should use .cursor/rules/sqz.mdc (modern rules), not \
+             .cursor/hooks.json (non-functional) or .cursorrules (legacy)");
+        assert!(cursor.config_content.starts_with("---"),
+            "Cursor rule should start with YAML frontmatter");
+        assert!(cursor.config_content.contains("alwaysApply: true"),
+            "Cursor rule should use alwaysApply: true so the guidance loads \
+             for every agent interaction");
+        assert!(cursor.config_content.contains("sqz"),
+            "Cursor rule body should mention sqz");
     }
 
     // ── Issue #2: Windows path escaping in hook configs ───────────────
@@ -804,15 +850,23 @@ mod tests {
     }
 
     #[test]
-    fn test_windows_path_produces_valid_json_for_cursor() {
+    fn test_windows_path_in_cursor_rules_file() {
+        // Cursor's config is now .cursor/rules/sqz.mdc (markdown), not JSON.
+        // Markdown doesn't escape backslashes — the user reads this rule
+        // through the agent and needs to see the raw path so commands are
+        // pasteable. See test_rules_files_use_raw_path_for_readability for
+        // the same property on Windsurf/Cline.
         let windows_path = r"C:\Users\SqzUser\.cargo\bin\sqz.exe";
         let configs = generate_hook_configs(windows_path);
 
         let cursor = configs.iter().find(|c| c.tool_name == "Cursor").unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&cursor.config_content)
-            .expect("Cursor hook config must be valid JSON on Windows paths");
-        let cmd = parsed["hooks"]["preToolUse"][0]["command"].as_str().unwrap();
-        assert!(cmd.contains(windows_path));
+        assert_eq!(cursor.config_path, PathBuf::from(".cursor/rules/sqz.mdc"));
+        assert!(cursor.config_content.contains(windows_path),
+            "Cursor rule must contain the raw (unescaped) path so users can \
+             copy-paste the shown commands — got:\n{}", cursor.config_content);
+        assert!(!cursor.config_content.contains(r"C:\\Users"),
+            "Cursor rule must NOT double-escape backslashes in markdown — \
+             got:\n{}", cursor.config_content);
     }
 
     #[test]
@@ -829,13 +883,13 @@ mod tests {
 
     #[test]
     fn test_rules_files_use_raw_path_for_readability() {
-        // The .windsurfrules / .clinerules files are markdown for humans.
-        // Backslashes should NOT be doubled there — the user needs to
-        // copy-paste the command into their shell.
+        // The .windsurfrules / .clinerules / .cursor/rules/sqz.mdc files are
+        // markdown for humans. Backslashes should NOT be doubled there — the
+        // user needs to copy-paste the command into their shell.
         let windows_path = r"C:\Users\SqzUser\.cargo\bin\sqz.exe";
         let configs = generate_hook_configs(windows_path);
 
-        for tool in &["Windsurf", "Cline"] {
+        for tool in &["Windsurf", "Cline", "Cursor"] {
             let cfg = configs.iter().find(|c| &c.tool_name == tool).unwrap();
             assert!(cfg.config_content.contains(windows_path),
                 "{tool} rules file must contain the raw (unescaped) path — got:\n{}",
