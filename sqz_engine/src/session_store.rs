@@ -398,6 +398,56 @@ impl SessionStore {
         }
     }
 
+    /// Read the `accessed_at` timestamp for a cached hash without updating
+    /// it. Returns `None` if the hash is not cached.
+    ///
+    /// Used by the dedup freshness check: if `accessed_at` is recent, the
+    /// LLM likely still has the original content in its context window, so
+    /// returning a ref is safe. If it's old, re-send the full content.
+    pub fn get_cache_entry_accessed_at(&self, hash: &str) -> Result<Option<DateTime<Utc>>> {
+        let result: rusqlite::Result<String> = self.db.query_row(
+            "SELECT accessed_at FROM cache_entries WHERE hash = ?1",
+            params![hash],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(s) => {
+                let ts = s
+                    .parse::<DateTime<Utc>>()
+                    .map_err(|e| SqzError::Other(format!("invalid accessed_at: {e}")))?;
+                Ok(Some(ts))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(SqzError::SessionStore(e)),
+        }
+    }
+
+    /// Check if a cache entry exists without updating `accessed_at`.
+    pub fn cache_entry_exists(&self, hash: &str) -> Result<bool> {
+        let result: rusqlite::Result<i64> = self.db.query_row(
+            "SELECT 1 FROM cache_entries WHERE hash = ?1",
+            params![hash],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(_) => Ok(true),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(SqzError::SessionStore(e)),
+        }
+    }
+
+    /// Update `accessed_at` for a cached hash to the current time. Called by
+    /// the cache manager when a ref is served so the next staleness check
+    /// sees the recent send.
+    pub fn touch_cache_entry(&self, hash: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.execute(
+            "UPDATE cache_entries SET accessed_at = ?1 WHERE hash = ?2",
+            params![now, hash],
+        )?;
+        Ok(())
+    }
+
     /// Log a compression event for cumulative stats tracking.
     pub fn log_compression(
         &self,

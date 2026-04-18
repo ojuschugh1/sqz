@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -38,7 +39,14 @@ pub enum CacheResult {
 }
 
 /// Tracks when a dedup ref was last sent, so we can detect staleness.
+///
+/// Historically used for an in-memory per-process turn counter; now kept
+/// only for interface compatibility (clear on notify_compaction). Actual
+/// staleness is computed from SQLite `accessed_at` timestamps so it works
+/// across the shell-hook invocation model where each sqz process is short-
+/// lived. See the comment on `is_ref_fresh` for details.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct RefEntry {
     /// The turn number when this ref was last sent to the LLM.
     last_sent_turn: u64,
@@ -47,51 +55,80 @@ struct RefEntry {
 /// SHA-256 content-hash deduplication cache backed by [`SessionStore`],
 /// with delta encoding for near-duplicate content and compaction awareness.
 ///
-/// The turn-counter heuristic: each call to `get_or_compress` increments a
-/// monotonic turn counter. When a dedup ref was last sent more than
-/// `max_ref_age_turns` turns ago, the ref is considered stale (the original
-/// content may have been compacted out of the LLM's context window) and the
-/// full compressed content is re-sent instead.
+/// # Freshness model
+///
+/// A dedup ref is considered fresh (safe to serve instead of the full
+/// content) when the cache entry's `accessed_at` timestamp in SQLite is
+/// within `max_ref_age` of now. When sqz is invoked from shell hooks each
+/// invocation is a short-lived process, so the freshness check must be
+/// persistent — in-memory state is gone the moment the process exits.
+///
+/// The previous turn-counter heuristic was in-memory only and therefore
+/// never registered freshness across hook invocations, which silently
+/// disabled the dedup feature in production. Issue found April 18 2026.
+///
+/// Default TTL: 30 minutes. Empirically matches a typical active coding
+/// session before a context compaction. Use [`with_ref_age`] to tune.
 pub struct CacheManager {
     store: SessionStore,
     max_size_bytes: u64,
     delta_encoder: DeltaEncoder,
-    /// Monotonic turn counter — incremented on each get_or_compress call.
+    /// Retained for notify_compaction's semantic ("forget all tracked refs"),
+    /// but no longer consulted for freshness checks.
+    #[allow(dead_code)]
     turn_counter: std::cell::Cell<u64>,
-    /// Maps content hash → turn when the dedup ref was last sent.
+    /// Retained for notify_compaction; cleared on compaction events.
+    #[allow(dead_code)]
     ref_tracker: std::cell::RefCell<HashMap<String, RefEntry>>,
-    /// Maximum age (in turns) before a dedup ref is considered stale.
-    /// After this many turns, the original content may have been compacted
-    /// out of the LLM's context window, so we re-send the full content.
-    max_ref_age_turns: u64,
+    /// Maximum wall-clock age before a dedup ref is considered stale.
+    /// After this duration we assume the LLM's context window has rolled
+    /// over enough to have dropped the original content, so we re-send the
+    /// full version instead of a dangling ref.
+    max_ref_age: Duration,
+    /// Records the instant at which the in-memory compaction flag was set.
+    /// Any cache entry whose `accessed_at` predates this instant is stale.
+    /// Reset by [`notify_compaction`].
+    compaction_marker: std::cell::Cell<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 impl CacheManager {
     /// Create a new cache manager backed by the given session store.
     ///
     /// `max_size_bytes` controls when LRU eviction kicks in. A good default
-    /// is 512 MB (`512 * 1024 * 1024`). Dedup refs go stale after 20 turns
-    /// by default — use [`with_ref_age`](CacheManager::with_ref_age) to tune this.
+    /// is 512 MB (`512 * 1024 * 1024`). Dedup refs go stale after 30 minutes
+    /// of wall-clock time by default — use [`with_ref_age`] to tune.
     pub fn new(store: SessionStore, max_size_bytes: u64) -> Self {
-        Self {
-            store,
-            max_size_bytes,
-            delta_encoder: DeltaEncoder::new(),
-            turn_counter: std::cell::Cell::new(0),
-            ref_tracker: std::cell::RefCell::new(HashMap::new()),
-            max_ref_age_turns: 20,
-        }
+        Self::with_ref_age_duration(store, max_size_bytes, Duration::from_secs(30 * 60))
     }
 
-    /// Create a CacheManager with a custom ref staleness threshold.
+    /// Create a CacheManager with a custom ref staleness threshold measured
+    /// in turns. The turn count is converted to wall-clock time by assuming
+    /// ~1 minute per turn (a rough approximation; the real freshness check
+    /// uses SQLite timestamps). This constructor exists for backward
+    /// compatibility with tests that previously advanced a turn counter.
+    #[doc(hidden)]
     pub fn with_ref_age(store: SessionStore, max_size_bytes: u64, max_ref_age_turns: u64) -> Self {
+        Self::with_ref_age_duration(
+            store,
+            max_size_bytes,
+            Duration::from_secs(max_ref_age_turns.saturating_mul(60)),
+        )
+    }
+
+    /// Create a CacheManager with an explicit wall-clock ref-age cap.
+    pub fn with_ref_age_duration(
+        store: SessionStore,
+        max_size_bytes: u64,
+        max_ref_age: Duration,
+    ) -> Self {
         Self {
             store,
             max_size_bytes,
             delta_encoder: DeltaEncoder::new(),
             turn_counter: std::cell::Cell::new(0),
             ref_tracker: std::cell::RefCell::new(HashMap::new()),
-            max_ref_age_turns,
+            max_ref_age,
+            compaction_marker: std::cell::Cell::new(None),
         }
     }
 
@@ -102,50 +139,66 @@ impl CacheManager {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Advance the turn counter. Call this once per LLM interaction turn.
+    /// Advance the turn counter. Retained for API compatibility; not used
+    /// for freshness. The context_evictor still reads `current_turn` for
+    /// LRU scoring during `sqz compact`.
     pub fn advance_turn(&self) {
         self.turn_counter.set(self.turn_counter.get() + 1);
     }
 
-    /// Get the current turn number.
+    /// Get the current turn number. Used by the context_evictor for scoring.
     pub fn current_turn(&self) -> u64 {
         self.turn_counter.get()
     }
 
     /// Notify the cache that a context compaction has occurred.
     ///
-    /// This marks ALL existing dedup refs as stale, forcing the next read
-    /// of any cached content to re-send the full compressed version instead
-    /// of a dangling `§ref:...§` token.
+    /// Marks an in-memory compaction timestamp so any cache entry whose
+    /// `accessed_at` predates the marker is considered stale. Combined with
+    /// the wall-clock TTL check, this forces re-sending of full content
+    /// after a compaction rather than returning a potentially-dangling ref.
     ///
     /// Call this when:
     /// - The harness signals a compaction event (PreCompact hook)
     /// - A session is resumed after being idle
-    /// - The turn counter exceeds a threshold
+    /// - The user runs `sqz compact`
     pub fn notify_compaction(&self) {
+        self.compaction_marker.set(Some(chrono::Utc::now()));
         self.ref_tracker.borrow_mut().clear();
     }
 
     /// Check if a dedup ref for the given hash is still fresh (likely still
     /// in the LLM's context window).
+    ///
+    /// Uses the SQLite `accessed_at` timestamp rather than the in-memory
+    /// turn counter. This works across sqz process invocations: shell hooks
+    /// spawn a new sqz process per intercepted command, so any in-memory
+    /// counter would reset every time. The database survives.
     fn is_ref_fresh(&self, hash: &str) -> bool {
-        let tracker = self.ref_tracker.borrow();
-        if let Some(entry) = tracker.get(hash) {
-            let age = self.turn_counter.get().saturating_sub(entry.last_sent_turn);
-            age < self.max_ref_age_turns
-        } else {
-            false
+        let accessed = match self.store.get_cache_entry_accessed_at(hash) {
+            Ok(Some(ts)) => ts,
+            _ => return false,
+        };
+        // A post-compaction access: the entry's accessed_at is earlier than
+        // our compaction marker, so this ref predates the compaction event.
+        if let Some(marker) = self.compaction_marker.get() {
+            if accessed < marker {
+                return false;
+            }
         }
+        let age = (chrono::Utc::now() - accessed)
+            .to_std()
+            .unwrap_or(Duration::from_secs(0));
+        age < self.max_ref_age
     }
 
-    /// Record that a dedup ref was sent for the given hash at the current turn.
+    /// Record that a dedup ref was sent for the given hash. Updates the
+    /// persistent `accessed_at` timestamp so subsequent freshness checks
+    /// see this send. Silently swallows SQLite errors — losing a touch
+    /// means the next call may treat the ref as stale and re-send, which
+    /// is strictly worse on tokens but never wrong.
     fn record_ref_sent(&self, hash: &str) {
-        self.ref_tracker.borrow_mut().insert(
-            hash.to_string(),
-            RefEntry {
-                last_sent_turn: self.turn_counter.get(),
-            },
-        );
+        let _ = self.store.touch_cache_entry(hash);
     }
 
     /// Look up `content` in the cache with compaction awareness.
@@ -164,7 +217,11 @@ impl CacheManager {
         let hash = Self::sha256_hex(content);
 
         // Exact match — check if the ref is still fresh
-        if self.store.get_cache_entry(&hash)?.is_some() {
+        // Exact match — probe without touching accessed_at, then check
+        // freshness. Touching on the probe would make every ref appear
+        // fresh immediately (the timestamp we just wrote is `now`).
+        let exists = self.store.cache_entry_exists(&hash)?;
+        if exists {
             if self.is_ref_fresh(&hash) {
                 // Ref is fresh — the LLM likely still has the original in context
                 let hash_prefix = &hash[..16];
@@ -254,18 +311,21 @@ impl CacheManager {
     ///
     /// Returns `Some(inline_ref)` if cached AND the ref is still fresh,
     /// `None` if the content is not cached or the ref is stale.
+    ///
+    /// Unlike [`get_or_compress`], this method does not touch `accessed_at`
+    /// until after the freshness check — otherwise every read would make
+    /// itself "fresh."
     pub fn check_dedup(&self, content: &[u8]) -> Result<Option<String>> {
         let hash = Self::sha256_hex(content);
-        if self.store.get_cache_entry(&hash)?.is_some() {
-            if self.is_ref_fresh(&hash) {
-                let hash_prefix = &hash[..16];
-                self.record_ref_sent(&hash);
-                Ok(Some(format!("§ref:{hash_prefix}§")))
-            } else {
-                // Cache hit but ref is stale — don't return a dangling ref
-                Ok(None)
-            }
+        // Probe existence without touching accessed_at.
+        let fresh = self.is_ref_fresh(&hash);
+        if fresh {
+            let hash_prefix = &hash[..16];
+            self.record_ref_sent(&hash);
+            Ok(Some(format!("§ref:{hash_prefix}§")))
         } else {
+            // If the entry exists but is stale, don't return a dangling ref.
+            // If it doesn't exist at all, same result: no dedup.
             Ok(None)
         }
     }
@@ -525,47 +585,68 @@ mod tests {
             .unwrap();
     }
 
-    // ── Compaction awareness tests ────────────────────────────────────────
+    // ── Compaction / freshness tests ──────────────────────────────────────
+    //
+    // These tests used to exercise an in-memory turn counter. Freshness is
+    // now computed from SQLite `accessed_at` timestamps so dedup works
+    // across the shell-hook model (each hook invocation is a fresh
+    // process). The tests below use wall-clock durations instead.
 
     #[test]
     fn stale_ref_returns_fresh_instead_of_dedup() {
         let (store, _dir) = in_memory_store();
-        // Set max_ref_age to 3 turns so refs go stale quickly
-        let cm = CacheManager::with_ref_age(store, u64::MAX, 3);
+        // Set max_ref_age to 0 — every ref goes stale immediately.
+        let cm = CacheManager::with_ref_age_duration(store, u64::MAX, Duration::ZERO);
         let pipeline = make_pipeline();
         let content = b"hello world";
         let path = Path::new("file.txt");
 
-        // First read — miss, records ref at turn 0
+        // First read — miss. accessed_at recorded.
         cm.get_or_compress(path, content, &pipeline).unwrap();
 
-        // Second read at turn 0 — ref is fresh (age 0 < 3)
+        // Second read — with TTL=0 the ref is already stale, should re-send.
         let result = cm.get_or_compress(path, content, &pipeline).unwrap();
-        assert!(matches!(result, CacheResult::Dedup { .. }), "ref should be fresh at turn 0");
+        assert!(
+            matches!(result, CacheResult::Fresh { .. }),
+            "stale ref (TTL=0) should return Fresh, not Dedup"
+        );
+    }
 
-        // Advance past the staleness threshold
-        for _ in 0..4 {
-            cm.advance_turn();
-        }
+    #[test]
+    fn fresh_ref_returns_dedup() {
+        let (store, _dir) = in_memory_store();
+        // Generous TTL: one day. Refs stay fresh for the life of the test.
+        let cm = CacheManager::with_ref_age_duration(
+            store,
+            u64::MAX,
+            Duration::from_secs(86_400),
+        );
+        let pipeline = make_pipeline();
+        let content = b"hello world";
+        let path = Path::new("file.txt");
 
-        // Third read at turn 4 — ref is stale (age 4 >= 3), should re-send full content
+        cm.get_or_compress(path, content, &pipeline).unwrap();
         let result = cm.get_or_compress(path, content, &pipeline).unwrap();
-        assert!(matches!(result, CacheResult::Fresh { .. }),
-            "stale ref should return Fresh, not Dedup");
+        assert!(
+            matches!(result, CacheResult::Dedup { .. }),
+            "fresh ref should dedup"
+        );
     }
 
     #[test]
     fn notify_compaction_invalidates_all_refs() {
         let (store, _dir) = in_memory_store();
-        let cm = CacheManager::new(store, u64::MAX);
+        let cm = CacheManager::with_ref_age_duration(
+            store,
+            u64::MAX,
+            Duration::from_secs(86_400),
+        );
         let pipeline = make_pipeline();
         let path = Path::new("file.txt");
 
-        // Populate cache
+        // Populate cache — every subsequent read is a dedup hit.
         cm.get_or_compress(path, b"content A", &pipeline).unwrap();
         cm.get_or_compress(path, b"content B", &pipeline).unwrap();
-
-        // Both should be dedup hits
         assert!(matches!(
             cm.get_or_compress(path, b"content A", &pipeline).unwrap(),
             CacheResult::Dedup { .. }
@@ -575,10 +656,14 @@ mod tests {
             CacheResult::Dedup { .. }
         ));
 
-        // Simulate compaction
+        // Simulate a context compaction. The compaction marker is set to
+        // `now`; any cache entry whose accessed_at predates this moment is
+        // treated as stale even though the TTL hasn't expired.
+        // Sleep 10ms to ensure `now` is strictly after the last touch.
+        std::thread::sleep(std::time::Duration::from_millis(10));
         cm.notify_compaction();
 
-        // After compaction, refs are stale — should return Fresh
+        // After compaction, refs predate the marker — re-send full content.
         assert!(matches!(
             cm.get_or_compress(path, b"content A", &pipeline).unwrap(),
             CacheResult::Fresh { .. }
@@ -592,55 +677,62 @@ mod tests {
     #[test]
     fn ref_refreshed_after_resend() {
         let (store, _dir) = in_memory_store();
-        let cm = CacheManager::with_ref_age(store, u64::MAX, 3);
+        // TTL of 10ms: a fresh send bumps accessed_at, so immediately after
+        // the re-send the ref is fresh again.
+        let cm = CacheManager::with_ref_age_duration(
+            store,
+            u64::MAX,
+            Duration::from_millis(10),
+        );
         let pipeline = make_pipeline();
         let content = b"hello world";
         let path = Path::new("file.txt");
 
-        // First read — miss
         cm.get_or_compress(path, content, &pipeline).unwrap();
+        // Wait past the TTL so the entry is stale.
+        std::thread::sleep(std::time::Duration::from_millis(25));
 
-        // Advance past staleness
-        for _ in 0..4 {
-            cm.advance_turn();
-        }
-
-        // Read at turn 4 — stale, returns Fresh (re-sends content)
+        // Stale — must re-send Fresh. The re-send bumps accessed_at.
         let result = cm.get_or_compress(path, content, &pipeline).unwrap();
         assert!(matches!(result, CacheResult::Fresh { .. }));
 
-        // Immediately read again — ref was refreshed by the re-send, should be Dedup
+        // Immediately read again — the freshly-updated accessed_at is
+        // within the 10ms TTL, so the ref is fresh.
         let result = cm.get_or_compress(path, content, &pipeline).unwrap();
-        assert!(matches!(result, CacheResult::Dedup { .. }),
-            "ref should be fresh after re-send");
+        assert!(
+            matches!(result, CacheResult::Dedup { .. }),
+            "ref should be fresh after re-send"
+        );
     }
 
     #[test]
     fn check_dedup_returns_none_for_stale_ref() {
         let (store, _dir) = in_memory_store();
-        let cm = CacheManager::with_ref_age(store, u64::MAX, 2);
+        let cm = CacheManager::with_ref_age_duration(
+            store,
+            u64::MAX,
+            Duration::from_millis(10),
+        );
         let pipeline = make_pipeline();
         let content = b"test content";
         let path = Path::new("file.txt");
 
-        // Populate cache
         cm.get_or_compress(path, content, &pipeline).unwrap();
 
-        // check_dedup should return Some (ref is fresh)
+        // Immediately fresh.
         assert!(cm.check_dedup(content).unwrap().is_some());
 
-        // Advance past staleness
-        for _ in 0..3 {
-            cm.advance_turn();
-        }
-
-        // check_dedup should return None (ref is stale)
-        assert!(cm.check_dedup(content).unwrap().is_none(),
-            "stale ref should not be returned by check_dedup");
+        // Wait past TTL.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert!(
+            cm.check_dedup(content).unwrap().is_none(),
+            "stale ref should not be returned by check_dedup"
+        );
     }
 
     #[test]
     fn advance_turn_increments_counter() {
+        // The counter is retained for context_evictor compatibility.
         let (store, _dir) = in_memory_store();
         let cm = CacheManager::new(store, u64::MAX);
         assert_eq!(cm.current_turn(), 0);
@@ -648,6 +740,47 @@ mod tests {
         assert_eq!(cm.current_turn(), 1);
         cm.advance_turn();
         assert_eq!(cm.current_turn(), 2);
+    }
+
+    #[test]
+    fn dedup_survives_cache_manager_restart() {
+        // Regression for the April 18 bug: the turn counter was in-memory
+        // only, so every new sqz process saw an empty ref tracker and the
+        // dedup feature silently produced Fresh results forever. With
+        // accessed_at-based freshness, a fresh CacheManager reading the
+        // same SQLite store picks up the dedup correctly.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cache.db");
+        let pipeline = make_pipeline();
+        let content = b"a substantial chunk of content to dedup";
+        let path = Path::new("x.txt");
+
+        // First "process": populate cache.
+        {
+            let store = SessionStore::open_or_create(&db_path).unwrap();
+            let cm = CacheManager::with_ref_age_duration(
+                store,
+                u64::MAX,
+                Duration::from_secs(3600),
+            );
+            let first = cm.get_or_compress(path, content, &pipeline).unwrap();
+            assert!(matches!(first, CacheResult::Fresh { .. }));
+        }
+
+        // Second "process": new CacheManager, same DB. Dedup must fire.
+        {
+            let store = SessionStore::open_or_create(&db_path).unwrap();
+            let cm = CacheManager::with_ref_age_duration(
+                store,
+                u64::MAX,
+                Duration::from_secs(3600),
+            );
+            let second = cm.get_or_compress(path, content, &pipeline).unwrap();
+            assert!(
+                matches!(second, CacheResult::Dedup { .. }),
+                "second-process read must dedup — this was broken before the April 18 fix"
+            );
+        }
     }
 
     // ── Property-based tests ──────────────────────────────────────────────────
@@ -818,11 +951,14 @@ mod tests {
     proptest! {
         /// **Validates: Requirements 18.4**
         ///
-        /// Cache entries written in one CacheManager instance SHALL survive a
-        /// store close/reopen. After a process restart, the ref tracker is
-        /// empty so the first read returns Fresh (re-sends content since we
-        /// can't know if the LLM still has it in context). The second read
-        /// in the same session returns Dedup.
+        /// Cache entries written in one CacheManager instance SHALL survive
+        /// a store close/reopen. With the wall-clock freshness model
+        /// (introduced April 18 2026), a subsequent CacheManager reading
+        /// the same database SHALL see the entry as fresh (within TTL) and
+        /// return a Dedup hit on the very first read — this is the whole
+        /// point of the cross-process fix. Previous behavior (Fresh on
+        /// first read after restart) was a bug that silently disabled the
+        /// dedup feature in production.
         #[test]
         fn prop_cache_persistence_across_sessions(
             content in proptest::collection::vec(any::<u8>(), 1..=500usize),
@@ -836,46 +972,49 @@ mod tests {
             // Session 1: populate the cache.
             {
                 let store = SessionStore::open_or_create(&db_path).unwrap();
-                let cm = CacheManager::new(store, u64::MAX);
+                // Explicit long TTL so tests don't race with wall-clock drift.
+                let cm = CacheManager::with_ref_age_duration(
+                    store,
+                    u64::MAX,
+                    Duration::from_secs(3600),
+                );
                 let pipeline = make_pipeline();
 
                 let r = cm.get_or_compress(path, &content, &pipeline).unwrap();
                 prop_assert!(
                     matches!(r, CacheResult::Fresh { .. }),
-                    "first read should be a miss"
+                    "first-ever read should be a miss"
                 );
             }
-            // Store is dropped here — connection closed, ref tracker lost.
 
             // Session 2: reopen the same database file.
             {
                 let store = SessionStore::open_or_create(&db_path).unwrap();
-                let cm = CacheManager::new(store, u64::MAX);
+                let cm = CacheManager::with_ref_age_duration(
+                    store,
+                    u64::MAX,
+                    Duration::from_secs(3600),
+                );
                 let pipeline = make_pipeline();
 
-                // First read in new session: cache entry exists in SQLite but
-                // ref tracker is empty (process restarted). Returns Fresh to
-                // re-send content since we can't know if the LLM still has it.
-                let r1 = cm.get_or_compress(path, &content, &pipeline).unwrap();
-                prop_assert!(
-                    matches!(r1, CacheResult::Fresh { .. }),
-                    "first read after restart should re-send (ref tracker empty)"
-                );
-
-                // Second read in same session: ref was recorded by the first
-                // read, so now it's a Dedup hit.
-                let r2 = cm.get_or_compress(path, &content, &pipeline).unwrap();
-                match r2 {
+                // First read in the new session MUST dedup. The entry was
+                // just written (within TTL), so the wall-clock freshness
+                // check finds it fresh. This is what makes sqz's dedup
+                // actually work across shell-hook invocations.
+                let r = cm.get_or_compress(path, &content, &pipeline).unwrap();
+                match r {
                     CacheResult::Dedup { token_cost, .. } => {
                         prop_assert_eq!(
                             token_cost, 13,
-                            "second read in same session should be dedup hit"
+                            "first read after restart must be a 13-token dedup ref"
                         );
                     }
                     CacheResult::Fresh { .. } | CacheResult::Delta { .. } => {
                         prop_assert!(
                             false,
-                            "second read should be a dedup hit after re-send"
+                            "first read after restart must dedup — this was the \
+                             April 18 bug and its fix is the whole reason this \
+                             test exists"
                         );
                     }
                 }
