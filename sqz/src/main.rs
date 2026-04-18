@@ -38,7 +38,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Install shell hooks and create default presets.
-    Init,
+    Init {
+        /// Skip confirmation prompt and install everything.
+        #[arg(long, short)]
+        yes: bool,
+    },
 
     /// Compress text from stdin or a positional argument.
     Compress {
@@ -183,7 +187,7 @@ fn main() {
             }
         }
 
-        Some(Command::Init) => cmd_init(),
+        Some(Command::Init { yes }) => cmd_init(yes),
         Some(Command::Compress { text, mode, verify }) => cmd_compress(text, &mode, verify),
         Some(Command::Export { session_id }) => cmd_export(&session_id),
         Some(Command::Import { file }) => cmd_import(&file),
@@ -206,49 +210,131 @@ fn main() {
 // ── Command implementations ───────────────────────────────────────────────
 
 /// `sqz init` — detect shell, install hook, create default preset.
-fn cmd_init() {
+fn cmd_init(skip_confirm: bool) {
+    use std::io::Write;
+
     let hook = ShellHook::detect();
-    println!("[sqz] detected shell: {:?}", hook);
-
-    match hook.install() {
-        Ok(true) => println!("[sqz] hook installed to {}", hook.rc_path().display()),
-        Ok(false) => println!("[sqz] hook already present in {}", hook.rc_path().display()),
-        Err(e) => {
-            // Requirement 1.5: log error and continue without aborting.
-            eprintln!("[sqz] warning: {e}");
-            eprintln!("[sqz] shell hook installation failed; output will pass uncompressed.");
-        }
-    }
-
-    // Install shell completions
-    install_completions(&hook);
-
-    // Create default preset directory and file.
+    let rc_path = hook.rc_path();
     let preset_dir = default_preset_dir();
-    if let Err(e) = std::fs::create_dir_all(&preset_dir) {
-        eprintln!("[sqz] warning: could not create preset dir {}: {e}", preset_dir.display());
-    } else {
-        let preset_path = preset_dir.join("default.toml");
-        if !preset_path.exists() {
-            match std::fs::write(&preset_path, DEFAULT_PRESET_TOML) {
-                Ok(()) => println!("[sqz] default preset written to {}", preset_path.display()),
-                Err(e) => eprintln!("[sqz] warning: could not write preset: {e}"),
-            }
-        } else {
-            println!("[sqz] default preset already exists at {}", preset_path.display());
-        }
-    }
-
-    // Install AI tool hooks (Claude Code, Cursor, Windsurf, Cline)
+    let preset_path = preset_dir.join("default.toml");
     let sqz_path = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sqz".to_string());
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let installed_tools = sqz_engine::install_tool_hooks(&project_dir, &sqz_path);
-    if !installed_tools.is_empty() {
-        println!("[sqz] AI tool hooks installed for: {}", installed_tools.join(", "));
+
+    // ── Phase 1: Build the plan ──────────────────────────────────────
+
+    let mut plan: Vec<(String, String, bool)> = Vec::new(); // (path, action, is_new)
+
+    // Shell hook
+    let rc_exists = rc_path.exists();
+    let rc_has_hook = rc_exists && std::fs::read_to_string(&rc_path)
+        .map(|s| s.contains(hook.sentinel()))
+        .unwrap_or(false);
+    if !rc_has_hook {
+        plan.push((
+            rc_path.display().to_string(),
+            if rc_exists { "append shell hook".to_string() } else { "create with shell hook".to_string() },
+            !rc_exists,
+        ));
     }
 
+    // Default preset
+    if !preset_path.exists() {
+        plan.push((
+            preset_path.display().to_string(),
+            "create default preset".to_string(),
+            true,
+        ));
+    }
+
+    // AI tool hooks
+    let tool_configs = sqz_engine::generate_hook_configs(&sqz_path);
+    for config in &tool_configs {
+        let full_path = project_dir.join(&config.config_path);
+        if !full_path.exists() {
+            plan.push((
+                full_path.display().to_string(),
+                format!("{} hook config", config.tool_name),
+                true,
+            ));
+        }
+    }
+
+    // ── Phase 2: Show the plan ───────────────────────────────────────
+
+    if plan.is_empty() {
+        println!("[sqz] everything is already set up. Nothing to do.");
+        return;
+    }
+
+    println!("[sqz] detected shell: {:?}", hook);
+    println!();
+    println!("The following files will be modified:");
+    println!();
+    for (path, action, is_new) in &plan {
+        let tag = if *is_new { "create" } else { "modify" };
+        println!("  [{tag}] {path}");
+        println!("         {action}");
+    }
+    println!();
+
+    // ── Phase 3: Ask for confirmation ────────────────────────────────
+
+    if !skip_confirm {
+        print!("Do you want to continue? [Y/n] ");
+        let _ = std::io::stdout().flush();
+
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() {
+            eprintln!("[sqz] could not read input, aborting.");
+            std::process::exit(1);
+        }
+        let answer = answer.trim().to_lowercase();
+        if !answer.is_empty() && answer != "y" && answer != "yes" {
+            println!("[sqz] aborted.");
+            return;
+        }
+    }
+
+    // ── Phase 4: Execute the plan ────────────────────────────────────
+
+    // Shell hook
+    if !rc_has_hook {
+        match hook.install() {
+            Ok(true) => println!("[sqz] ✓ hook installed to {}", rc_path.display()),
+            Ok(false) => println!("[sqz] ✓ hook already present in {}", rc_path.display()),
+            Err(e) => {
+                eprintln!("[sqz] ✗ warning: {e}");
+                eprintln!("  shell hook installation failed; output will pass uncompressed.");
+            }
+        }
+    } else {
+        println!("[sqz] ✓ shell hook already present in {}", rc_path.display());
+    }
+
+    // Shell completions (silent, non-critical)
+    install_completions(&hook);
+
+    // Default preset
+    if let Err(e) = std::fs::create_dir_all(&preset_dir) {
+        eprintln!("[sqz] ✗ warning: could not create preset dir {}: {e}", preset_dir.display());
+    } else if !preset_path.exists() {
+        match std::fs::write(&preset_path, DEFAULT_PRESET_TOML) {
+            Ok(()) => println!("[sqz] ✓ default preset written to {}", preset_path.display()),
+            Err(e) => eprintln!("[sqz] ✗ warning: could not write preset: {e}"),
+        }
+    } else {
+        println!("[sqz] ✓ default preset already exists at {}", preset_path.display());
+    }
+
+    // AI tool hooks
+    let installed_tools = sqz_engine::install_tool_hooks(&project_dir, &sqz_path);
+    for tool in &installed_tools {
+        println!("[sqz] ✓ {} hook installed", tool);
+    }
+
+    println!();
     println!("[sqz] init complete. Restart your shell or source the RC file.");
 }
 
