@@ -55,3 +55,14 @@ sqz-source.zip
 
 # Gradle wrapper jar (downloaded on first run by gradlew script)
 jetbrains-plugin/gradle/wrapper/gradle-wrapper.jar
+
+# sqz init outputs (created when testing sqz in its own workspace).
+# These are meant to be written into USER projects that install sqz,
+# not into sqz's own source tree. They contain machine-specific paths.
+#
+# Note: .claude/, .clinerules/, .gemini/, opencode.json are already
+# tracked in this repo from older sqz dev iterations. They're not
+# ignored here so you can still see changes to them. If you want them
+# gone, delete and commit the removal separately.
+.cursor/
+.windsurfrules
