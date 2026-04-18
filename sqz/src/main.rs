@@ -112,8 +112,12 @@ enum Command {
         port: u16,
     },
 
-    /// Remove sqz shell hooks from the RC file.
-    Uninstall,
+    /// Remove sqz shell hooks and AI tool configs.
+    Uninstall {
+        /// Skip confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
+    },
 
     /// Show a full compression stats report for a session.
     Stats {
@@ -197,7 +201,7 @@ fn main() {
         Some(Command::Tee { action }) => cmd_tee(action),
         Some(Command::Dashboard { port }) => cmd_dashboard(port),
         Some(Command::Proxy { port }) => cmd_proxy(port),
-        Some(Command::Uninstall) => cmd_uninstall(),
+        Some(Command::Uninstall { yes }) => cmd_uninstall(yes),
         Some(Command::Stats { session_id }) => cmd_stats(session_id),
         Some(Command::Gain { days }) => cmd_gain(days),
         Some(Command::Discover { days }) => cmd_discover(days),
@@ -745,7 +749,7 @@ fn cmd_proxy(port: u16) {
 }
 
 /// `sqz uninstall` — remove sqz shell hooks and AI tool configs.
-fn cmd_uninstall() {
+fn cmd_uninstall(skip_confirm: bool) {
     use std::io::Write;
 
     let hook = ShellHook::detect();
@@ -763,18 +767,15 @@ fn cmd_uninstall() {
         files_to_remove.push((rc_path.display().to_string(), true));
     }
 
-    // AI tool configs created by sqz init
+    // AI tool configs — use the same source of truth as init
+    // to avoid install/uninstall path drift.
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let tool_paths = [
-        ".claude/settings.local.json",
-        ".cursor/hooks.json",
-        ".windsurf/hooks.json",
-        ".clinerules/hooks/PreToolUse",
-        ".gemini/settings.json",
-        "opencode.json",
-    ];
-    for path in &tool_paths {
-        let full = project_dir.join(path);
+    let sqz_path_str = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "sqz".to_string());
+    let tool_configs = sqz_engine::generate_hook_configs(&sqz_path_str);
+    for config in &tool_configs {
+        let full = project_dir.join(&config.config_path);
         if full.exists() {
             files_to_remove.push((full.display().to_string(), true));
         }
@@ -791,17 +792,19 @@ fn cmd_uninstall() {
     }
     println!();
 
-    print!("Do you want to continue? [Y/n] ");
-    let _ = std::io::stdout().flush();
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        eprintln!("[sqz] could not read input, aborting.");
-        std::process::exit(1);
-    }
-    let answer = answer.trim().to_lowercase();
-    if !answer.is_empty() && answer != "y" && answer != "yes" {
-        println!("[sqz] aborted.");
-        return;
+    if !skip_confirm {
+        print!("Do you want to continue? [Y/n] ");
+        let _ = std::io::stdout().flush();
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).is_err() {
+            eprintln!("[sqz] could not read input, aborting.");
+            std::process::exit(1);
+        }
+        let answer = answer.trim().to_lowercase();
+        if !answer.is_empty() && answer != "y" && answer != "yes" {
+            println!("[sqz] aborted.");
+            return;
+        }
     }
 
     // Remove shell hook
@@ -814,8 +817,8 @@ fn cmd_uninstall() {
     }
 
     // Remove AI tool configs
-    for path in &tool_paths {
-        let full = project_dir.join(path);
+    for config in &tool_configs {
+        let full = project_dir.join(&config.config_path);
         if full.exists() {
             match std::fs::remove_file(&full) {
                 Ok(()) => println!("[sqz] ✓ removed {}", full.display()),

@@ -260,9 +260,12 @@ pub fn install_hook_to_file(
 
 /// Remove the sqz hook block from `path`.
 ///
-/// Finds the start sentinel and end sentinel, removing everything between
-/// them (inclusive). Uses paired markers to avoid accidentally deleting
-/// unrelated content that happens to follow the hook block.
+/// Strategy:
+/// 1. If the file has the end sentinel (new installs with paired markers),
+///    remove everything between start and end sentinels (inclusive).
+/// 2. If no end sentinel exists (old installs before paired markers),
+///    fall back to removing from the start sentinel to the next blank line.
+///    This matches the pre-M-2 behavior and won't eat unrelated content.
 pub fn uninstall_hook_from_file(path: &Path, sentinel: &str) -> Result<bool, HookError> {
     if !path.exists() {
         return Ok(false);
@@ -278,34 +281,49 @@ pub fn uninstall_hook_from_file(path: &Path, sentinel: &str) -> Result<bool, Hoo
     }
 
     let end_sentinel = "# sqz — end of auto-installed block";
+    let has_end_marker = content.contains(end_sentinel);
 
-    // Remove the hook block: from the start sentinel to the end sentinel (inclusive)
     let mut result = Vec::new();
     let mut in_hook = false;
     let mut removed = false;
 
     for line in content.lines() {
-        if line.contains(sentinel) && !line.contains("end of") {
+        if !in_hook && line.contains(sentinel) && !line.contains("end of") {
             in_hook = true;
             removed = true;
             continue;
         }
         if in_hook {
-            if line.contains(end_sentinel) {
-                in_hook = false;
-                continue; // skip the end sentinel line too
+            if has_end_marker {
+                // New install: look for the end sentinel
+                if line.contains(end_sentinel) {
+                    in_hook = false;
+                    continue;
+                }
+            } else {
+                // Old install (no end marker): stop at blank line.
+                // This is the safe fallback — only removes up to the next
+                // blank line, preserving any user content below.
+                if line.trim().is_empty() {
+                    in_hook = false;
+                    continue;
+                }
             }
             continue; // skip hook body lines
         }
         result.push(line);
     }
 
-    // Fallback: if no end sentinel found (old installs), stop at blank line
-    // This handles upgrades from the old format gracefully.
-
     if removed {
+        if !has_end_marker {
+            eprintln!(
+                "[sqz] note: old-format hook in {} (no end marker). \
+                 Removed up to the next blank line. Run `sqz init` to \
+                 install the new paired-marker format.",
+                path.display()
+            );
+        }
         let mut output = result.join("\n");
-        // Clean up any double blank lines left behind
         while output.contains("\n\n\n") {
             output = output.replace("\n\n\n", "\n\n");
         }
@@ -438,6 +456,75 @@ mod tests {
         // Original content preserved
         let content = fs::read_to_string(&rc).unwrap();
         assert!(content.contains("some existing content"));
+    }
+
+    #[test]
+    fn test_uninstall_old_format_without_end_marker() {
+        // Simulates a user who installed sqz before paired markers were added.
+        // Their RC file has the start sentinel but NO end sentinel.
+        // Uninstall must stop at the blank line, not eat everything below.
+        let dir = TempDir::new().unwrap();
+        let rc = tmp_rc(&dir, ".bashrc");
+        let sentinel = "# sqz — context intelligence layer (auto-installed)";
+
+        let old_format_content = concat!(
+            "# existing user config\n",
+            "export EDITOR=vim\n",
+            "\n",
+            "# sqz — context intelligence layer (auto-installed)\n",
+            "sqz_run() {\n",
+            "    \"$@\" 2>&1 | SQZ_CMD=\"$*\" sqz compress\n",
+            "}\n",
+            "\n",
+            "# user config below sqz block — MUST be preserved\n",
+            "export PATH=$PATH:/usr/local/bin\n",
+            "alias ll='ls -la'\n",
+        );
+        fs::write(&rc, old_format_content).unwrap();
+
+        let removed = uninstall_hook_from_file(&rc, sentinel).unwrap();
+        assert!(removed, "should remove old-format hook");
+
+        let after = fs::read_to_string(&rc).unwrap();
+        assert!(!after.contains(sentinel), "sentinel should be gone");
+        assert!(!after.contains("sqz_run"), "hook body should be gone");
+        // Critical: user content below the blank line MUST be preserved
+        assert!(after.contains("export PATH"), "user PATH config must survive: {after}");
+        assert!(after.contains("alias ll"), "user alias must survive: {after}");
+        assert!(after.contains("export EDITOR"), "user EDITOR config must survive: {after}");
+    }
+
+    #[test]
+    fn test_uninstall_new_format_with_end_marker() {
+        let dir = TempDir::new().unwrap();
+        let rc = tmp_rc(&dir, ".bashrc");
+        let sentinel = "# sqz — context intelligence layer (auto-installed)";
+
+        // New format: has both start and end markers
+        let new_format_content = concat!(
+            "# existing user config\n",
+            "export EDITOR=vim\n",
+            "\n",
+            "# sqz — context intelligence layer (auto-installed)\n",
+            "sqz_run() {\n",
+            "    \"$@\" 2>&1 | SQZ_CMD=\"$*\" sqz compress\n",
+            "}\n",
+            "# sqz — end of auto-installed block\n",
+            "# user config directly after end marker — no blank line\n",
+            "export PATH=$PATH:/usr/local/bin\n",
+        );
+        fs::write(&rc, new_format_content).unwrap();
+
+        let removed = uninstall_hook_from_file(&rc, sentinel).unwrap();
+        assert!(removed);
+
+        let after = fs::read_to_string(&rc).unwrap();
+        assert!(!after.contains(sentinel));
+        assert!(!after.contains("sqz_run"));
+        assert!(!after.contains("end of auto-installed"));
+        // User content directly after end marker must be preserved
+        assert!(after.contains("export PATH"), "content after end marker must survive: {after}");
+        assert!(after.contains("export EDITOR"), "content before hook must survive: {after}");
     }
 
     #[test]
