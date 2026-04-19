@@ -153,18 +153,29 @@ impl CacheManager {
 
     /// Notify the cache that a context compaction has occurred.
     ///
-    /// Marks an in-memory compaction timestamp so any cache entry whose
-    /// `accessed_at` predates the marker is considered stale. Combined with
-    /// the wall-clock TTL check, this forces re-sending of full content
-    /// after a compaction rather than returning a potentially-dangling ref.
+    /// Persists a compaction timestamp into the session store so any cache
+    /// entry whose `accessed_at` predates the marker is considered stale
+    /// by **every subsequent sqz process**, not just this one. The shell-
+    /// hook invocation model means this method is typically called from a
+    /// short-lived `sqz hook precompact` process, and the check runs in a
+    /// different `sqz compress` process milliseconds later.
     ///
     /// Call this when:
     /// - The harness signals a compaction event (PreCompact hook)
     /// - A session is resumed after being idle
     /// - The user runs `sqz compact`
     pub fn notify_compaction(&self) {
-        self.compaction_marker.set(Some(chrono::Utc::now()));
+        let now = chrono::Utc::now();
+        self.compaction_marker.set(Some(now));
         self.ref_tracker.borrow_mut().clear();
+        // Persist the marker so other sqz processes see the invalidation.
+        // Silently swallow a write error: losing the marker means some
+        // refs may survive the compaction and show as dedup hits in the
+        // next few calls — annoying, not wrong (the agent still receives
+        // valid content; it just sees a short-ref it has to resolve).
+        let _ = self
+            .store
+            .set_metadata("last_compaction_at", &now.to_rfc3339());
     }
 
     /// Check if a dedup ref for the given hash is still fresh (likely still
@@ -174,16 +185,32 @@ impl CacheManager {
     /// turn counter. This works across sqz process invocations: shell hooks
     /// spawn a new sqz process per intercepted command, so any in-memory
     /// counter would reset every time. The database survives.
+    ///
+    /// The compaction marker is read from SQLite on every check so that
+    /// a `sqz hook precompact` call from another process immediately
+    /// invalidates refs in the current process. Without the persistent
+    /// read, the invalidation would only affect the process that called
+    /// notify_compaction — which is never the same process that serves
+    /// dedup hits.
     fn is_ref_fresh(&self, hash: &str) -> bool {
         let accessed = match self.store.get_cache_entry_accessed_at(hash) {
             Ok(Some(ts)) => ts,
             _ => return false,
         };
-        // A post-compaction access: the entry's accessed_at is earlier than
-        // our compaction marker, so this ref predates the compaction event.
+        // In-memory compaction marker (set in this process).
         if let Some(marker) = self.compaction_marker.get() {
             if accessed < marker {
                 return false;
+            }
+        }
+        // Persistent compaction marker — set by `sqz hook precompact` in
+        // a different process. Without this read the in-memory marker is
+        // never consulted because each hook invocation is a fresh process.
+        if let Ok(Some(raw)) = self.store.get_metadata("last_compaction_at") {
+            if let Ok(marker) = raw.parse::<chrono::DateTime<chrono::Utc>>() {
+                if accessed < marker {
+                    return false;
+                }
             }
         }
         let age = (chrono::Utc::now() - accessed)
@@ -783,7 +810,57 @@ mod tests {
         }
     }
 
-    // ── Property-based tests ──────────────────────────────────────────────────
+    #[test]
+    fn compaction_from_one_process_invalidates_refs_in_another() {
+        // Regression for the PreCompact hook wiring: the host harness
+        // (e.g. Claude Code) runs `sqz hook precompact` in a short-lived
+        // process to signal auto-compaction. The actual dedup serving runs
+        // in a DIFFERENT sqz process (the shell hook). notify_compaction
+        // must persist through SQLite so the second process sees it.
+        //
+        // Before the fix, compaction_marker was Cell<Option<DateTime>>
+        // in memory only — the precompact process set it, exited, the
+        // state was lost. Next shell-hook process started with a clean
+        // marker, served stale refs to the agent, and the agent saw a
+        // §ref:HASH§ pointing at content no longer in its context.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cache.db");
+        let pipeline = make_pipeline();
+        let content = b"content that needs stale-marking after compaction";
+        let path = Path::new("file.txt");
+        let ttl = Duration::from_secs(3600);
+
+        // Process A: populate the cache so the content is dedup-eligible.
+        {
+            let store = SessionStore::open_or_create(&db_path).unwrap();
+            let cm = CacheManager::with_ref_age_duration(store, u64::MAX, ttl);
+            cm.get_or_compress(path, content, &pipeline).unwrap();
+        }
+        // Sleep so the compaction marker is strictly after the touch.
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Process B: simulates `sqz hook precompact`. Just calls
+        // notify_compaction and exits. No reads.
+        {
+            let store = SessionStore::open_or_create(&db_path).unwrap();
+            let cm = CacheManager::with_ref_age_duration(store, u64::MAX, ttl);
+            cm.notify_compaction();
+        }
+
+        // Process C: simulates the next `sqz compress` shell-hook call.
+        // Reads the same content. MUST re-send Fresh, not return a ref
+        // the agent can no longer resolve.
+        {
+            let store = SessionStore::open_or_create(&db_path).unwrap();
+            let cm = CacheManager::with_ref_age_duration(store, u64::MAX, ttl);
+            let result = cm.get_or_compress(path, content, &pipeline).unwrap();
+            assert!(
+                matches!(result, CacheResult::Fresh { .. }),
+                "post-compaction read from a fresh process must re-send Fresh; \
+                 returning Dedup would be a dangling-ref bug"
+            );
+        }
+    }
 
     use proptest::prelude::*;
 

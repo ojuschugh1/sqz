@@ -307,8 +307,18 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
 
     vec![
         // Claude Code — goes in .claude/settings.local.json (nested format)
-        // Includes PreToolUse for Bash compression AND SessionStart compact
-        // for re-injecting context after compaction.
+        // Three hooks, each addressing a different concern:
+        //
+        //   PreToolUse:   compress Bash tool output before the agent sees it
+        //                 (matcher "Bash" keeps other tools untouched)
+        //   PreCompact:   mark sqz's dedup refs stale before Claude Code
+        //                 summarises older turns. Otherwise our §ref:HASH§
+        //                 tokens would outlive the content they pointed at,
+        //                 leading to dangling refs the agent can't resolve.
+        //                 Documented by Anthropic at
+        //                 docs.anthropic.com/en/docs/claude-code/hooks-guide.
+        //   SessionStart: if the session was resumed via /compact, re-inject
+        //                 sqz's session guide (handled by `sqz resume`).
         ToolHookConfig {
             tool_name: "Claude Code".to_string(),
             config_path: PathBuf::from(".claude/settings.local.json"),
@@ -322,6 +332,16 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
           {{
             "type": "command",
             "command": "{sqz_path} hook claude"
+          }}
+        ]
+      }}
+    ],
+    "PreCompact": [
+      {{
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "{sqz_path} hook precompact"
           }}
         ]
       }}
@@ -810,6 +830,34 @@ mod tests {
              for every agent interaction");
         assert!(cursor.config_content.contains("sqz"),
             "Cursor rule body should mention sqz");
+    }
+
+    #[test]
+    fn test_claude_config_includes_precompact_hook() {
+        // The PreCompact hook is what keeps sqz's dedup refs from dangling
+        // after Claude Code auto-compacts. Without this entry, cached refs
+        // can point at content the LLM no longer has in context.
+        // Documented at docs.anthropic.com/en/docs/claude-code/hooks-guide.
+        let configs = generate_hook_configs("sqz");
+        let claude = configs.iter().find(|c| c.tool_name == "Claude Code").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&claude.config_content)
+            .expect("Claude Code config must be valid JSON");
+
+        let precompact = parsed["hooks"]["PreCompact"]
+            .as_array()
+            .expect("PreCompact hook array must be present");
+        assert!(
+            !precompact.is_empty(),
+            "PreCompact must have at least one registered hook"
+        );
+
+        let cmd = precompact[0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command field must be a string");
+        assert!(
+            cmd.ends_with(" hook precompact"),
+            "PreCompact hook should invoke `sqz hook precompact`; got: {cmd}"
+        );
     }
 
     // ── Issue #2: Windows path escaping in hook configs ───────────────

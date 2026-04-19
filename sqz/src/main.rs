@@ -1173,6 +1173,31 @@ fn cmd_hook(tool: &str) {
         return;
     }
 
+    // Special case: PreCompact hooks are not tool-call rewriters. They fire
+    // before the host harness compacts its context window. When that happens
+    // our cached §ref:HASH§ tokens may point at content the LLM no longer
+    // has in context, so we mark every ref stale. Next read of the same
+    // content re-sends the full compressed body instead of a dangling ref.
+    //
+    // Documented by Anthropic at
+    // https://docs.anthropic.com/en/docs/claude-code/hooks-guide —
+    // PreCompact fires with matcher "manual" or "auto" depending on whether
+    // the user ran /compact or the 95% auto-trigger fired.
+    if tool == "precompact" {
+        match SqzEngine::new() {
+            Ok(engine) => {
+                engine.cache_manager().notify_compaction();
+                eprintln!("[sqz] precompact: marked cached refs stale");
+            }
+            Err(e) => {
+                // Don't block the host: log and return a benign empty JSON.
+                eprintln!("[sqz] precompact: engine init failed: {e}");
+            }
+        }
+        println!("{{}}");
+        return;
+    }
+
     let result = match tool {
         "opencode" => sqz_engine::process_opencode_hook(&input),
         "cursor" => sqz_engine::process_hook_cursor(&input),

@@ -97,6 +97,16 @@ CREATE TABLE IF NOT EXISTS known_files (
     path        TEXT PRIMARY KEY,
     added_at    TEXT NOT NULL
 );
+
+-- Small key/value store for engine-wide state that needs to persist across
+-- short-lived sqz processes (each shell-hook invocation is a new process).
+-- Initially used only for the last_compaction_at marker: cache entries with
+-- `accessed_at < last_compaction_at` are treated as stale even if still
+-- within the normal TTL. See cache_manager.rs for the freshness model.
+CREATE TABLE IF NOT EXISTS metadata (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL
+);
 "#;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -446,6 +456,31 @@ impl SessionStore {
             params![now, hash],
         )?;
         Ok(())
+    }
+
+    /// Set a metadata key/value. Persists across sqz process boundaries
+    /// (each shell-hook invocation is a short-lived process).
+    pub fn set_metadata(&self, key: &str, value: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Get a metadata value. Returns `None` if the key has never been set.
+    pub fn get_metadata(&self, key: &str) -> Result<Option<String>> {
+        let result: rusqlite::Result<String> = self.db.query_row(
+            "SELECT value FROM metadata WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(SqzError::SessionStore(e)),
+        }
     }
 
     /// Log a compression event for cumulative stats tracking.
