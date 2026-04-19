@@ -484,151 +484,60 @@ impl McpServer {
 // ── Default tool definitions ──────────────────────────────────────────────────
 
 /// Returns the default set of MCP tool definitions registered at startup.
-/// Each tool includes:
+///
+/// The sole advertised tool is `compress`: hand it arbitrary text or JSON and
+/// it returns the sqz-compressed version. This is the only thing
+/// `handle_tool_call` actually does — it does NOT read or write files, does
+/// NOT execute commands, etc. Earlier releases (≤0.8.0) advertised fake
+/// `read_file`, `write_file`, `edit_file`, `execute_command`, `list_directory`,
+/// `search_files`, `create_directory`, and `delete_file` tools whose
+/// implementation only compressed the input JSON and threw the "result" away.
+/// That shadowed the host's real file tools and led to silent write failures
+/// when an LLM picked the sqz-mcp impostor instead of OpenCode's native
+/// `write` tool (reported in issue #5).
+///
+/// Each tool entry includes:
 /// - `input_schema`: JSON Schema for the tool's input parameters
 /// - `compression_transforms`: exactly what sqz does to this tool's output
 pub fn default_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
-            id: "read_file".to_string(),
-            name: "Read File".to_string(),
-            description: "Read the contents of a file from the filesystem. Returns file content as text.".to_string(),
+            id: "compress".to_string(),
+            name: "Compress Text".to_string(),
+            description: "Compress arbitrary text or JSON through the sqz \
+                pipeline. Returns a compressed string that preserves semantic \
+                content (filenames, identifiers, URLs, version numbers) \
+                byte-exact while collapsing repetitive patterns, stripping \
+                ANSI codes, folding diff context, and deduplicating content \
+                seen earlier in the session. Use this tool to shrink large \
+                tool outputs before re-sending them to the model. It does NOT \
+                read or write files, execute commands, or perform any I/O — \
+                it is a pure text transform."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute or relative file path" }
+                    "text": {
+                        "type": "string",
+                        "description": "The text or serialized JSON to compress."
+                    }
                 },
-                "required": ["path"]
+                "required": ["text"]
             }),
             compression_transforms: vec![
-                "sha256_cache: re-reads cost ~13 tokens if content unchanged".to_string(),
-                "ast_extract: code files → signatures only (functions, classes, types)".to_string(),
-                "ansi_strip: removes color codes".to_string(),
-                "truncate_strings: strings > 500 chars are truncated with '...'".to_string(),
-            ],
-            ..Default::default()
-        },
-        ToolDefinition {
-            id: "write_file".to_string(),
-            name: "Write File".to_string(),
-            description: "Write or overwrite a file on the filesystem with the provided content.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "File path to write" },
-                    "content": { "type": "string", "description": "Content to write" }
-                },
-                "required": ["path", "content"]
-            }),
-            compression_transforms: vec![
-                "passthrough: write confirmations are short, no compression applied".to_string(),
-            ],
-            ..Default::default()
-        },
-        ToolDefinition {
-            id: "search_files".to_string(),
-            name: "Search Files".to_string(),
-            description: "Search for files matching a pattern or containing specific text content.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "Search pattern or text" },
-                    "path": { "type": "string", "description": "Directory to search in" }
-                },
-                "required": ["pattern"]
-            }),
-            compression_transforms: vec![
-                "condense: repeated identical match lines collapsed to max 3".to_string(),
-                "path_shorten: common path prefixes replaced with ~/".to_string(),
-                "git_diff_fold: unchanged context lines folded if output is diff-like".to_string(),
-            ],
-            ..Default::default()
-        },
-        ToolDefinition {
-            id: "list_directory".to_string(),
-            name: "List Directory".to_string(),
-            description: "List the contents of a directory, showing files and subdirectories.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Directory path to list" }
-                },
-                "required": ["path"]
-            }),
-            compression_transforms: vec![
-                "path_shorten: common path prefixes replaced with ~/".to_string(),
-                "condense: repeated permission/ownership patterns collapsed".to_string(),
-            ],
-            ..Default::default()
-        },
-        ToolDefinition {
-            id: "execute_command".to_string(),
-            name: "Execute Command".to_string(),
-            description: "Execute a shell command and return its stdout and stderr output.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "Shell command to execute" },
-                    "cwd": { "type": "string", "description": "Working directory (optional)" }
-                },
-                "required": ["command"]
-            }),
-            compression_transforms: vec![
+                "sha256_cache: repeat inputs within the session return a ~13-token §ref:HASH§ token".to_string(),
+                "ast_extract: recognised source code collapses to signatures only".to_string(),
                 "ansi_strip: removes color/formatting codes".to_string(),
-                "condense: repeated output lines collapsed to max 3".to_string(),
+                "condense: repeated identical lines collapsed to max 3 occurrences".to_string(),
                 "git_diff_fold: diff output has unchanged context lines folded".to_string(),
                 "log_fold: repeated log lines with timestamps folded to [xN]".to_string(),
+                "path_shorten: common path prefixes replaced with ~/".to_string(),
+                "truncate_strings: strings > 500 chars are truncated with '...'".to_string(),
                 "safe_fallback: error/warning lines always preserved verbatim".to_string(),
-            ],
-            ..Default::default()
-        },
-        ToolDefinition {
-            id: "edit_file".to_string(),
-            name: "Edit File".to_string(),
-            description: "Apply targeted edits to a file by replacing specific text sections.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "File path to edit" },
-                    "old_str": { "type": "string", "description": "Text to replace" },
-                    "new_str": { "type": "string", "description": "Replacement text" }
-                },
-                "required": ["path", "old_str", "new_str"]
-            }),
-            compression_transforms: vec![
-                "passthrough: edit confirmations are short, no compression applied".to_string(),
-            ],
-            ..Default::default()
-        },
-        ToolDefinition {
-            id: "create_directory".to_string(),
-            name: "Create Directory".to_string(),
-            description: "Create a new directory at the specified path.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Directory path to create" }
-                },
-                "required": ["path"]
-            }),
-            compression_transforms: vec![
-                "passthrough: directory creation confirmations are short".to_string(),
-            ],
-            ..Default::default()
-        },
-        ToolDefinition {
-            id: "delete_file".to_string(),
-            name: "Delete File".to_string(),
-            description: "Delete a file or empty directory from the filesystem.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Path to delete" }
-                },
-                "required": ["path"]
-            }),
-            compression_transforms: vec![
-                "passthrough: deletion confirmations are short".to_string(),
+                "preservation_verifier: path-like and identifier tokens are \
+                 checked for byte-exact survival; compression is discarded if \
+                 coverage drops below 85%"
+                    .to_string(),
             ],
             ..Default::default()
         },
@@ -680,13 +589,13 @@ mod tests {
         });
 
         let req = ToolCallRequest {
-            tool_id: "read_file".to_string(),
+            tool_id: "compress".to_string(),
             input: input.clone(),
             intent: None,
         };
 
         let resp = server.handle_tool_call(req).expect("handle_tool_call");
-        assert_eq!(resp.tool_id, "read_file");
+        assert_eq!(resp.tool_id, "compress");
         assert!(!resp.output.is_empty(), "output should not be empty");
         assert!(resp.tokens_original > 0, "tokens_original should be > 0");
     }
@@ -697,12 +606,12 @@ mod tests {
     fn test_handle_tool_call_preserves_tool_id() {
         let (mut server, _dir) = make_server();
         let req = ToolCallRequest {
-            tool_id: "execute_command".to_string(),
-            input: serde_json::json!({ "cmd": "ls -la" }),
+            tool_id: "compress".to_string(),
+            input: serde_json::json!({ "text": "ls -la output here" }),
             intent: None,
         };
         let resp = server.handle_tool_call(req).expect("handle_tool_call");
-        assert_eq!(resp.tool_id, "execute_command");
+        assert_eq!(resp.tool_id, "compress");
     }
 
     /// Test list_tools returns all tools when no intent is provided.
@@ -714,14 +623,35 @@ mod tests {
         assert_eq!(tools.len(), default_tool_definitions().len());
     }
 
-    /// Test list_tools with intent filters to 3-5 tools.
+    /// Test list_tools with intent filters to a non-empty subset.
     /// Validates: Requirements 3.1
+    ///
+    /// With the single-tool `compress`-only registry the intent-based
+    /// ranker may legitimately return zero tools (no tool clears the
+    /// similarity threshold and the default_tools list is empty in the
+    /// default preset). The contract this test enforces is:
+    ///   - the call doesn't error
+    ///   - the returned set size never exceeds the registered set
+    ///   - an empty intent returns everything (intent is optional)
     #[test]
     fn test_list_tools_with_intent_filters() {
         let (server, _dir) = make_server();
-        let tools = server.list_tools(Some("read file contents from filesystem")).expect("list_tools");
-        assert!(tools.len() >= 1, "should return at least 1 tool");
-        assert!(tools.len() <= 8, "should not return more tools than registered");
+        let registered = default_tool_definitions().len();
+
+        let tools = server
+            .list_tools(Some("compress arbitrary text through the sqz pipeline"))
+            .expect("list_tools with intent should not error");
+        assert!(
+            tools.len() <= registered,
+            "filtered list must not exceed registered count ({registered})"
+        );
+
+        let tools = server.list_tools(Some("")).expect("empty intent = all tools");
+        assert_eq!(
+            tools.len(),
+            registered,
+            "empty intent is treated as `no intent` and returns every tool"
+        );
     }
 
     /// Test tool selector re-evaluation latency < 500ms.
@@ -890,7 +820,7 @@ complexity_threshold = 0.4
     #[test]
     fn test_jsonrpc_tools_call() {
         let (mut server, _dir) = make_server();
-        let line = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/tmp/test.txt"}}}"#;
+        let line = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"compress","arguments":{"text":"lorem ipsum dolor sit amet"}}}"#;
         let resp = server.handle_jsonrpc_line(line);
         assert!(resp.error.is_none(), "tools/call should not error: {:?}", resp.error);
         let result = resp.result.expect("tools/call should have result");
@@ -999,5 +929,81 @@ complexity_threshold = 0.4
                 tool.get("outputSchema")
             );
         }
+    }
+
+    /// Regression for the silent-write-failure bug reported as a follow-up
+    /// to issue #5.
+    ///
+    /// Before the fix sqz-mcp advertised `read_file`, `write_file`,
+    /// `edit_file`, `execute_command`, `list_directory`, `search_files`,
+    /// `create_directory`, and `delete_file` — but `handle_tool_call`
+    /// only ran sqz compression on the input JSON and returned a
+    /// compressed string. No file was ever written, no command ever
+    /// executed. When a host like OpenCode exposed both its native
+    /// `write` tool and sqz-mcp's fake `write_file`, the LLM sometimes
+    /// picked the impostor and the user's file edits silently vanished.
+    ///
+    /// The tools list MUST NOT contain any tool whose name implies
+    /// side-effecting behaviour we cannot deliver. This test enumerates
+    /// the specific impostor names and asserts none of them are present.
+    #[test]
+    fn test_tools_list_has_no_io_impostor_tools() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        let resp = server.handle_jsonrpc_line(line);
+        let tools = resp.result.unwrap().get("tools").cloned().unwrap();
+        let names: Vec<String> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+
+        // These names describe side effects sqz-mcp cannot actually
+        // perform. Re-introducing any of them without a real impl
+        // would bring the silent-write bug back.
+        const FORBIDDEN: &[&str] = &[
+            "read_file",
+            "write_file",
+            "edit_file",
+            "execute_command",
+            "list_directory",
+            "search_files",
+            "create_directory",
+            "delete_file",
+        ];
+
+        for forbidden in FORBIDDEN {
+            assert!(
+                !names.iter().any(|n| n == forbidden),
+                "sqz-mcp must not advertise {forbidden} — that name implies \
+                 I/O we cannot perform and shadows the host's real tool. \
+                 See the silent-write bug follow-up to issue #5. \
+                 Tools registered: {names:?}"
+            );
+        }
+    }
+
+    /// The sqz-mcp server exists to compress text. The default tool set
+    /// must include exactly one tool whose name communicates that honestly.
+    /// This complements the impostor test by asserting what SHOULD be
+    /// there, so removing the compress tool by accident also fails.
+    #[test]
+    fn test_default_tools_advertise_compress_tool() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        let resp = server.handle_jsonrpc_line(line);
+        let tools = resp.result.unwrap().get("tools").cloned().unwrap();
+        let names: Vec<String> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+
+        assert!(
+            names.iter().any(|n| n == "compress"),
+            "default tools must include `compress`; got {names:?}"
+        );
     }
 }

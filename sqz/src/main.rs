@@ -781,6 +781,19 @@ fn cmd_uninstall(skip_confirm: bool) {
         }
     }
 
+    // OpenCode user-level TypeScript plugin. Unlike the other tool
+    // configs this lives at `~/.config/opencode/plugins/sqz.ts`, outside
+    // any project — so `generate_hook_configs` doesn't produce an entry
+    // for it. But it MUST be removed too: OpenCode loads the plugin on
+    // startup regardless of what `opencode.json` says. Users reported
+    // (follow-up to issue #5) that disabling sqz in config did nothing
+    // because the plugin file kept running.
+    let opencode_plugin = sqz_engine::opencode_plugin_path();
+    let opencode_plugin_exists = opencode_plugin.exists();
+    if opencode_plugin_exists {
+        files_to_remove.push((opencode_plugin.display().to_string(), true));
+    }
+
     if files_to_remove.is_empty() {
         println!("[sqz] nothing to uninstall — no sqz files found.");
         return;
@@ -824,6 +837,17 @@ fn cmd_uninstall(skip_confirm: bool) {
                 Ok(()) => println!("[sqz] ✓ removed {}", full.display()),
                 Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", full.display()),
             }
+        }
+    }
+
+    // Remove the OpenCode user-level plugin file if it was present.
+    if opencode_plugin_exists {
+        match std::fs::remove_file(&opencode_plugin) {
+            Ok(()) => println!("[sqz] ✓ removed {}", opencode_plugin.display()),
+            Err(e) => eprintln!(
+                "[sqz] ✗ could not remove {}: {e}",
+                opencode_plugin.display()
+            ),
         }
     }
 

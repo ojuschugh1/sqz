@@ -54,16 +54,54 @@ export const SqzPlugin = async (ctx: any) => {{
     return ["bash", "shell", "terminal", "run_shell_command"].includes(tool.toLowerCase());
   }}
 
+  // Detect that a command has already been wrapped by sqz. Before this
+  // guard was in place OpenCode could call the hook twice on the same
+  // command (for retried tool calls, or when a previous rewrite was
+  // echoed back to the agent and the agent re-submitted it) and each
+  // pass would prepend another `SQZ_CMD=$base` prefix, producing monsters
+  // like `SQZ_CMD=SQZ_CMD=ddev SQZ_CMD=ddev ddev exec ...` (reported as
+  // a follow-up to issue #5). We skip if any of these markers appear:
+  //   * the case-insensitive substring "sqz_cmd=" or "sqz compress"
+  //     (covers the tail of prior wraps regardless of case)
+  //   * a leading `VAR=` assignment that starts with SQZ_
+  //     (defensive catch-all for exotic wrap variants)
+  //   * the base command itself is sqz or sqz-mcp (running sqz directly
+  //     — compressing sqz's own output is pointless and causes loops)
+  function isAlreadyWrapped(cmd: string): boolean {{
+    const lowered = cmd.toLowerCase();
+    if (lowered.includes("sqz_cmd=")) return true;
+    if (lowered.includes("sqz compress")) return true;
+    if (lowered.includes("| sqz ") || lowered.includes("| sqz\t")) return true;
+    if (/^\s*SQZ_[A-Z0-9_]+=/.test(cmd)) return true;
+    const base = extractBaseCmd(cmd);
+    if (base === "sqz" || base === "sqz-mcp" || base === "sqz.exe") return true;
+    return false;
+  }}
+
+  // Extract the base command name defensively. If the command has
+  // leading env-var assignments (VAR=val VAR2=val2 actual_cmd arg1),
+  // skip past them so the base is `actual_cmd` — not `VAR=val`.
+  function extractBaseCmd(cmd: string): string {{
+    const tokens = cmd.split(/\s+/).filter(t => t.length > 0);
+    for (const tok of tokens) {{
+      // A token is an env assignment if it matches NAME=VALUE where NAME
+      // is a valid env var identifier. Skip it and keep looking.
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) continue;
+      return tok.split("/").pop() ?? "unknown";
+    }}
+    return "unknown";
+  }}
+
   return {{
     "tool.execute.before": async (input: any, output: any) => {{
       const tool = input.tool ?? "";
       if (!shouldIntercept(tool)) return;
 
       const cmd = output.args?.command ?? "";
-      if (!cmd || cmd.includes("sqz") || isInteractive(cmd)) return;
+      if (!cmd || isAlreadyWrapped(cmd) || isInteractive(cmd)) return;
 
       // Rewrite: pipe through sqz compress
-      const base = cmd.split(/\s+/)[0]?.split("/").pop() ?? "unknown";
+      const base = extractBaseCmd(cmd);
       output.args.command = `SQZ_CMD=${{base}} ${{cmd}} 2>&1 | ${{SQZ_PATH}} compress`;
     }},
   }};
@@ -186,6 +224,85 @@ pub fn update_opencode_config(project_dir: &Path) -> Result<bool> {
     }
 }
 
+/// Return `true` if `command` has already been wrapped by an earlier sqz
+/// hook pass (or otherwise contains an sqz invocation we should skip).
+/// Used by `process_opencode_hook` and the equivalent TS guard in
+/// `generate_opencode_plugin` to prevent double-wrapping.
+///
+/// Checks for any of:
+/// - case-insensitive `sqz_cmd=` (prior-wrap prefix)
+/// - case-insensitive `sqz compress` (prior-wrap tail)
+/// - case-insensitive `| sqz ` or `| sqz\t` (any sqz subcommand pipe)
+/// - a leading `SQZ_*=...` env assignment
+/// - the base command itself is `sqz`/`sqz-mcp` (running sqz directly)
+fn is_already_wrapped(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    if lowered.contains("sqz_cmd=") {
+        return true;
+    }
+    if lowered.contains("sqz compress") {
+        return true;
+    }
+    if lowered.contains("| sqz ") || lowered.contains("| sqz\t") {
+        return true;
+    }
+    // Leading `SQZ_*=...` assignment.
+    let trimmed = command.trim_start();
+    if let Some(eq_idx) = trimmed.find('=') {
+        let name = &trimmed[..eq_idx];
+        if name.starts_with("SQZ_")
+            && !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        {
+            return true;
+        }
+    }
+    // Running sqz or sqz-mcp directly (e.g. `sqz stats`, `sqz-mcp --help`).
+    let base = extract_base_cmd(command);
+    if base == "sqz" || base == "sqz-mcp" || base == "sqz.exe" {
+        return true;
+    }
+    false
+}
+
+/// Extract the base command name from a shell command string, skipping any
+/// leading `VAR=value` env-var assignments. Mirrors `extractBaseCmd` in the
+/// TS plugin — without this, a command like
+/// `FOO=bar BAZ=qux make test` would pick `FOO=bar` as the base, which is
+/// nonsense (and caused the recursive `SQZ_CMD=SQZ_CMD=...` reported as a
+/// follow-up to issue #5).
+fn extract_base_cmd(command: &str) -> &str {
+    for tok in command.split_whitespace() {
+        if is_env_assignment(tok) {
+            continue;
+        }
+        return tok.rsplit('/').next().unwrap_or("unknown");
+    }
+    "unknown"
+}
+
+/// Return `true` if `token` has the shape `NAME=VALUE` where `NAME` is a
+/// valid env-var identifier (letters/digits/underscores, starting with a
+/// letter or underscore). Empty token → `false`.
+fn is_env_assignment(token: &str) -> bool {
+    let eq = match token.find('=') {
+        Some(i) => i,
+        None => return false,
+    };
+    if eq == 0 {
+        return false;
+    }
+    let name = &token[..eq];
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Process an OpenCode `tool.execute.before` hook invocation.
 ///
 /// OpenCode's hook format differs from Claude Code / Cursor:
@@ -223,18 +340,14 @@ pub fn process_opencode_hook(input: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if command.is_empty() || command.contains("sqz") {
+    if command.is_empty() || is_already_wrapped(command) {
         return Ok(input.to_string());
     }
 
-    // Check for interactive commands
-    let base = command
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .rsplit('/')
-        .next()
-        .unwrap_or("");
+    // Determine the base command name. Skip leading VAR=VALUE assignments
+    // so an operator-prefixed command like `FOO=bar make test` still picks
+    // `make` as the base instead of `FOO=bar`.
+    let base = extract_base_cmd(command);
 
     if matches!(
         base,
@@ -250,13 +363,7 @@ pub fn process_opencode_hook(input: &str) -> Result<String> {
     }
 
     // Rewrite the command
-    let base_cmd = command
-        .split_whitespace()
-        .next()
-        .unwrap_or("unknown")
-        .rsplit('/')
-        .next()
-        .unwrap_or("unknown");
+    let base_cmd = base;
 
     let escaped_base = if base_cmd
         .chars()
@@ -333,14 +440,11 @@ mod tests {
         assert!(content.contains("--watch"));
     }
 
-    #[test]
-    fn test_generate_opencode_plugin_has_sqz_guard() {
-        let content = generate_opencode_plugin("sqz");
-        assert!(
-            content.contains(r#"cmd.includes("sqz")"#),
-            "should skip commands already containing sqz"
-        );
-    }
+    // Note: the older `test_generate_opencode_plugin_has_sqz_guard` was
+    // replaced by `test_generate_opencode_plugin_has_double_wrap_guard`
+    // (defined further below). The old assertion codified a too-broad
+    // guard (`cmd.includes("sqz")`) that the runaway-prefix fix had to
+    // tighten — keeping it would pin the bug in place.
 
     #[test]
     fn test_process_opencode_hook_rewrites_bash() {
@@ -463,5 +567,145 @@ mod tests {
 
         let result = update_opencode_config(dir.path()).unwrap();
         assert!(!result, "should skip if sqz already present");
+    }
+
+    // ── Issue #5 follow-up: runaway SQZ_CMD= prefix ───────────────────
+
+    /// Regression for the runaway-prefix report on issue #5.
+    ///
+    /// The user observed `SQZ_CMD=SQZ_CMD=ddev SQZ_CMD=ddev ddev exec ...`
+    /// in OpenCode's output — the plugin/hook wrapped a command that had
+    /// already been wrapped by a prior pass. Before the fix,
+    /// `process_opencode_hook`'s guard was only `command.contains("sqz")`
+    /// which missed the uppercase `SQZ_CMD=` prefix and let the wrap
+    /// accumulate.
+    #[test]
+    fn test_process_opencode_hook_skips_already_wrapped_sqz_cmd_prefix() {
+        let input = r#"{"tool":"bash","args":{"command":"SQZ_CMD=ddev ddev exec --dir=/var/www/html php -v 2>&1 | /home/user/.cargo/bin/sqz compress"}}"#;
+        let result = process_opencode_hook(input).unwrap();
+        assert_eq!(
+            result, input,
+            "already-wrapped command must pass through unchanged; \
+             otherwise each pass accumulates another SQZ_CMD= prefix"
+        );
+    }
+
+    /// Guard must be case-insensitive: `SQZ_CMD=` contains no lowercase
+    /// `sqz` and the old `command.contains("sqz")` check missed it.
+    #[test]
+    fn test_process_opencode_hook_guard_is_case_insensitive() {
+        let input = r#"{"tool":"bash","args":{"command":"SQZ_CMD=git git status"}}"#;
+        let result = process_opencode_hook(input).unwrap();
+        assert_eq!(
+            result, input,
+            "uppercase SQZ_CMD= prefix must short-circuit the wrap"
+        );
+    }
+
+    /// When a user command begins with legitimate env-var assignments
+    /// (e.g. `FOO=bar make test`) the base command should be `make`,
+    /// not `FOO=bar`. The old implementation picked `FOO=bar` and
+    /// produced `SQZ_CMD=FOO=bar` wraps.
+    #[test]
+    fn test_process_opencode_hook_skips_leading_env_assignments_for_base() {
+        let input = r#"{"tool":"bash","args":{"command":"FOO=bar BAZ=qux make test"}}"#;
+        let result = process_opencode_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let cmd = parsed["args"]["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("SQZ_CMD=make"),
+            "base command must be `make`, not `FOO=bar`; got: {cmd}"
+        );
+        assert!(
+            cmd.contains("FOO=bar BAZ=qux make test"),
+            "original command must be preserved: {cmd}"
+        );
+    }
+
+    /// Running sqz directly (e.g. `sqz stats`) must not be wrapped.
+    #[test]
+    fn test_process_opencode_hook_skips_bare_sqz_invocation() {
+        for cmd in ["sqz stats", "sqz gain", "/usr/local/bin/sqz compress"] {
+            let input = format!(
+                r#"{{"tool":"bash","args":{{"command":"{cmd}"}}}}"#
+            );
+            let result = process_opencode_hook(&input).unwrap();
+            assert_eq!(
+                result, input,
+                "sqz-invoking command `{cmd}` must not be rewrapped"
+            );
+        }
+    }
+
+    /// The generated TypeScript plugin must carry the same hardened
+    /// guard the Rust hook has. We can't run the TS from Rust tests,
+    /// but we can assert the generated source contains the key markers.
+    #[test]
+    fn test_generate_opencode_plugin_has_double_wrap_guard() {
+        let content = generate_opencode_plugin("sqz");
+        assert!(
+            content.contains("function isAlreadyWrapped(cmd: string): boolean"),
+            "generated plugin must define isAlreadyWrapped helper"
+        );
+        assert!(
+            content.contains(r#"lowered.includes("sqz_cmd=")"#),
+            "plugin must check for the SQZ_CMD= prior-wrap prefix"
+        );
+        assert!(
+            content.contains(r#"lowered.includes("sqz compress")"#),
+            "plugin must check for the `sqz compress` prior-wrap tail"
+        );
+        assert!(
+            content.contains("isAlreadyWrapped(cmd)"),
+            "plugin hook body must call isAlreadyWrapped on the command"
+        );
+        assert!(
+            content.contains("function extractBaseCmd(cmd: string): string"),
+            "plugin must define extractBaseCmd that skips env assignments"
+        );
+        assert!(
+            content.contains("extractBaseCmd(cmd)"),
+            "plugin hook body must use extractBaseCmd, not raw split"
+        );
+    }
+
+    // ── Unit tests for the helper functions ──────────────────────────
+
+    #[test]
+    fn test_is_already_wrapped_detects_all_marker_shapes() {
+        assert!(is_already_wrapped("SQZ_CMD=git git status"));
+        assert!(is_already_wrapped("sqz_cmd=git git status"));
+        assert!(is_already_wrapped("git status | sqz compress"));
+        assert!(is_already_wrapped("git status 2>&1 | /path/sqz compress"));
+        assert!(is_already_wrapped("ls -la | sqz compress-stream"));
+        assert!(is_already_wrapped("sqz stats"));
+        assert!(is_already_wrapped("/usr/local/bin/sqz gain"));
+        assert!(is_already_wrapped("SQZ_FOO=bar cmd"));
+        assert!(!is_already_wrapped("git status"));
+        assert!(!is_already_wrapped("grep sqz logfile.txt"));
+        assert!(!is_already_wrapped("cargo test --package my-sqz-crate"));
+    }
+
+    #[test]
+    fn test_extract_base_cmd_skips_env_assignments() {
+        assert_eq!(extract_base_cmd("make test"), "make");
+        assert_eq!(extract_base_cmd("FOO=bar make test"), "make");
+        assert_eq!(extract_base_cmd("FOO=bar BAZ=qux make test"), "make");
+        assert_eq!(extract_base_cmd("/usr/bin/git status"), "git");
+        assert_eq!(extract_base_cmd(""), "unknown");
+        assert_eq!(extract_base_cmd("FOO=bar"), "unknown");
+    }
+
+    #[test]
+    fn test_is_env_assignment() {
+        assert!(is_env_assignment("FOO=bar"));
+        assert!(is_env_assignment("FOO="));
+        assert!(is_env_assignment("_underscore=1"));
+        assert!(is_env_assignment("MixedCase_1=x"));
+        assert!(!is_env_assignment("=bar"));
+        assert!(!is_env_assignment("FOO"));
+        assert!(!is_env_assignment("--flag=value"));
+        assert!(!is_env_assignment("123=value"));
+        assert!(!is_env_assignment("FOO BAR=baz"));
     }
 }
