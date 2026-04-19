@@ -401,13 +401,31 @@ impl McpServer {
                 match self.list_tools(intent.as_deref()) {
                     Ok(tools) => {
                         let tool_list: Vec<Value> = tools.iter().map(|t| {
-                            serde_json::json!({
+                            // `outputSchema` is optional per the MCP spec
+                            // (2025-06-18). When present, its root `type`
+                            // MUST be `"object"` — not `"string"` or any
+                            // other scalar. OpenCode (and other strict
+                            // clients) validate this and will disable the
+                            // whole server on a violation (reported in
+                            // issue #5). We therefore omit the field
+                            // entirely when it's unset (null) and only
+                            // propagate it when a caller has supplied a
+                            // proper object-shaped schema.
+                            let mut tool_json = serde_json::json!({
                                 "name": t.id,
                                 "description": t.description,
                                 "inputSchema": t.input_schema,
-                                "outputSchema": t.output_schema,
                                 "sqz:transforms": t.compression_transforms,
-                            })
+                            });
+                            if !t.output_schema.is_null() {
+                                if let Some(obj) = tool_json.as_object_mut() {
+                                    obj.insert(
+                                        "outputSchema".to_string(),
+                                        t.output_schema.clone(),
+                                    );
+                                }
+                            }
+                            tool_json
                         }).collect();
                         JsonRpcResponse::ok(req.id, serde_json::json!({ "tools": tool_list }))
                     }
@@ -482,16 +500,13 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"]
             }),
-            output_schema: serde_json::json!({
-                "type": "string",
-                "description": "File content, possibly compressed. Code files return AST signatures only. Re-reads of unchanged files return a ~13-token cache reference token (§ref:HASH§)."
-            }),
             compression_transforms: vec![
                 "sha256_cache: re-reads cost ~13 tokens if content unchanged".to_string(),
                 "ast_extract: code files → signatures only (functions, classes, types)".to_string(),
                 "ansi_strip: removes color codes".to_string(),
                 "truncate_strings: strings > 500 chars are truncated with '...'".to_string(),
             ],
+            ..Default::default()
         },
         ToolDefinition {
             id: "write_file".to_string(),
@@ -505,13 +520,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path", "content"]
             }),
-            output_schema: serde_json::json!({
-                "type": "string",
-                "description": "Write confirmation message. Not compressed — confirmations are short."
-            }),
             compression_transforms: vec![
                 "passthrough: write confirmations are short, no compression applied".to_string(),
             ],
+            ..Default::default()
         },
         ToolDefinition {
             id: "search_files".to_string(),
@@ -525,15 +537,12 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["pattern"]
             }),
-            output_schema: serde_json::json!({
-                "type": "string",
-                "description": "Search results with file:line:content format. Repeated identical lines collapsed. Common path prefixes replaced with ~/."
-            }),
             compression_transforms: vec![
                 "condense: repeated identical match lines collapsed to max 3".to_string(),
                 "path_shorten: common path prefixes replaced with ~/".to_string(),
                 "git_diff_fold: unchanged context lines folded if output is diff-like".to_string(),
             ],
+            ..Default::default()
         },
         ToolDefinition {
             id: "list_directory".to_string(),
@@ -546,14 +555,11 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"]
             }),
-            output_schema: serde_json::json!({
-                "type": "string",
-                "description": "Directory listing. Common path prefixes replaced with ~/. Repeated permission patterns collapsed."
-            }),
             compression_transforms: vec![
                 "path_shorten: common path prefixes replaced with ~/".to_string(),
                 "condense: repeated permission/ownership patterns collapsed".to_string(),
             ],
+            ..Default::default()
         },
         ToolDefinition {
             id: "execute_command".to_string(),
@@ -567,10 +573,6 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["command"]
             }),
-            output_schema: serde_json::json!({
-                "type": "string",
-                "description": "Command stdout+stderr. ANSI codes stripped. Repeated lines collapsed. Diff output has context lines folded. Error/warning lines always preserved verbatim."
-            }),
             compression_transforms: vec![
                 "ansi_strip: removes color/formatting codes".to_string(),
                 "condense: repeated output lines collapsed to max 3".to_string(),
@@ -578,6 +580,7 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 "log_fold: repeated log lines with timestamps folded to [xN]".to_string(),
                 "safe_fallback: error/warning lines always preserved verbatim".to_string(),
             ],
+            ..Default::default()
         },
         ToolDefinition {
             id: "edit_file".to_string(),
@@ -592,13 +595,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path", "old_str", "new_str"]
             }),
-            output_schema: serde_json::json!({
-                "type": "string",
-                "description": "Edit confirmation message. Not compressed — confirmations are short."
-            }),
             compression_transforms: vec![
                 "passthrough: edit confirmations are short, no compression applied".to_string(),
             ],
+            ..Default::default()
         },
         ToolDefinition {
             id: "create_directory".to_string(),
@@ -611,13 +611,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"]
             }),
-            output_schema: serde_json::json!({
-                "type": "string",
-                "description": "Directory creation confirmation. Not compressed."
-            }),
             compression_transforms: vec![
                 "passthrough: directory creation confirmations are short".to_string(),
             ],
+            ..Default::default()
         },
         ToolDefinition {
             id: "delete_file".to_string(),
@@ -630,13 +627,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["path"]
             }),
-            output_schema: serde_json::json!({
-                "type": "string",
-                "description": "Deletion confirmation. Not compressed."
-            }),
             compression_transforms: vec![
                 "passthrough: deletion confirmations are short".to_string(),
             ],
+            ..Default::default()
         },
     ]
 }
@@ -920,5 +914,90 @@ complexity_threshold = 0.4
         let resp = server.handle_jsonrpc_line("not json at all {{{");
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32700);
+    }
+
+    /// Regression for issue #5: OpenCode's MCP client rejects any tool whose
+    /// `outputSchema.type` is not the literal string `"object"`. Before the
+    /// fix, every default tool advertised `outputSchema = {type:"string"}`
+    /// and OpenCode disabled the whole server during tool discovery.
+    ///
+    /// This test asserts two invariants that together prevent the bug from
+    /// coming back:
+    ///   1. If `outputSchema` is present on any tool, its root `type` is
+    ///      `"object"` (MCP 2025-06-18 spec requirement).
+    ///   2. `inputSchema` is always present with `type: "object"` (the spec
+    ///      requires this — absent it, MCP validators reject the tool too).
+    #[test]
+    fn test_tools_list_outputschema_is_valid_object_or_absent() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        let resp = server.handle_jsonrpc_line(line);
+        assert!(resp.error.is_none(), "tools/list errored: {:?}", resp.error);
+
+        let tools = resp.result
+            .expect("tools/list must have result")
+            .get("tools")
+            .cloned()
+            .expect("result must have tools array");
+        let tools = tools.as_array().expect("tools must be an array");
+        assert!(!tools.is_empty(), "no tools registered");
+
+        for tool in tools {
+            let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+
+            // inputSchema is required and must be an object-typed schema.
+            let input_type = tool
+                .get("inputSchema")
+                .and_then(|s| s.get("type"))
+                .and_then(|t| t.as_str());
+            assert_eq!(
+                input_type,
+                Some("object"),
+                "tool {name}: inputSchema.type must be \"object\", got {input_type:?}"
+            );
+
+            // outputSchema is optional. When present its root type MUST be
+            // "object" per MCP 2025-06-18. The previous implementation
+            // emitted "string" here — OpenCode's validator saw it as an
+            // invalid_value error and dropped every tool from the server.
+            if let Some(out) = tool.get("outputSchema") {
+                // `null` is equivalent to absent — our response builder
+                // should have omitted the key entirely, but assert that
+                // too in case serialization ever reinstates null.
+                if !out.is_null() {
+                    let out_type = out.get("type").and_then(|t| t.as_str());
+                    assert_eq!(
+                        out_type,
+                        Some("object"),
+                        "tool {name}: outputSchema.type must be \"object\" \
+                         per MCP spec; got {out_type:?}. This is the \
+                         exact bug OpenCode reported in issue #5."
+                    );
+                }
+            }
+        }
+    }
+
+    /// Complement to the above: by default none of the built-in tools
+    /// should advertise an outputSchema (none of them return
+    /// structuredContent, so there's nothing to validate). This catches
+    /// a regression where someone adds `output_schema: json!(...)` to a
+    /// default tool without also making tools/call emit structuredContent.
+    #[test]
+    fn test_default_tools_omit_outputschema() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        let resp = server.handle_jsonrpc_line(line);
+        let tools = resp.result.unwrap().get("tools").cloned().unwrap();
+        for tool in tools.as_array().unwrap() {
+            let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            assert!(
+                tool.get("outputSchema").is_none(),
+                "default tool {name} unexpectedly has outputSchema: \
+                 {:?}. Remove it, or make tools/call also emit \
+                 structuredContent matching the schema (MCP 2025-06-18).",
+                tool.get("outputSchema")
+            );
+        }
     }
 }

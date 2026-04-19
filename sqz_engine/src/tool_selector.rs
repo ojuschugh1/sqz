@@ -15,7 +15,15 @@ pub struct ToolDefinition {
     /// JSON Schema for the tool's input parameters.
     #[serde(default)]
     pub input_schema: serde_json::Value,
-    /// JSON Schema describing the structure of the compressed output.
+    /// Optional JSON Schema describing the structure of a tool's structured
+    /// output (see MCP spec `outputSchema`).
+    ///
+    /// Per the MCP 2025-06-18 specification, when present this schema's root
+    /// `type` MUST be `"object"` and servers MUST return `structuredContent`
+    /// matching the schema. Leave as `Value::Null` (the default) when the
+    /// tool returns plain text via the `content` field — strict clients such
+    /// as OpenCode validate this and will disable the whole server if a
+    /// scalar-typed schema is advertised (reported in issue #5).
     #[serde(default)]
     pub output_schema: serde_json::Value,
     /// Description of what sqz does to this tool's output.
