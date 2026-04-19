@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"tools": {"listChanged": false}` per MCP 2024-11-05 spec. OpenCode and other
   compliant clients were interpreting the empty object as "no tools" and skipping
   `tools/list`. Regression test added.
+- **MCP `tools/list` outputSchema (issue #5)** — all 8 tools declared
+  `outputSchema: {type: "string"}` which violates the MCP spec (root type must be
+  `"object"` when present). OpenCode rejected all tools during discovery. Fix:
+  dropped outputSchema entirely since all tools return plain text via
+  `content[{type:"text"}]`, not structured content. Two regression tests added.
 - **Windows path escaping in hook configs (issue #2)** — `std::env::current_exe()`
   returns backslash paths on Windows. These were interpolated raw into JSON/TS
   string literals, producing invalid JSON. Added `json_escape_string_value()` helper
@@ -49,8 +54,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
-- 986 tests total (up from 947 in 0.6.0), 0 new failures
+- 1010 tests total (up from 947 in 0.6.0), 0 new failures
 - 1 pre-existing flaky proptest in `api_proxy` (SQLite temp file race, unrelated)
+
+### Also in this release
+
+- **PreCompact hook** — invalidates dedup refs before context compaction so stale
+  references don't survive into the next context window.
+- **Dedup freshness persistence** — dedup hit tracking now persists across sqz
+  processes via SQLite, so `sqz stats` reflects real savings.
+- **Dedup stats logging** — dedup hits are now logged so `sqz stats` shows them.
+- **Preservation-token verifier** — catches silent identifier rewrites during
+  compression (e.g., function names mangled by abbreviation).
+- **Cursor downgraded to rules-based guidance** — Cursor cannot rewrite commands
+  via hooks; switched to `.cursorrules` prompt-level guidance.
+- **Windows install docs** — pointed Windows users at prebuilt binary paths.
 
 ## [0.6.0] — 2026-04-17
 

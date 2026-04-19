@@ -72,11 +72,26 @@ The dedup cache is where the real savings live. Single-command compression range
 
 ## Install
 
+**Prebuilt binaries** (no compiler required — works on every platform):
+
 ```sh
-cargo install sqz-cli
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.ps1 | iex
+
+# Any platform via npm
+npm install -g sqz-cli
 ```
 
-Then:
+**Build from source** (`cargo install sqz-cli`) works too, but needs a C toolchain:
+
+- Linux: `build-essential` (apt) or equivalent
+- macOS: Xcode Command Line Tools (`xcode-select --install`)
+- **Windows: Visual Studio Build Tools with the "Desktop development with C++" workload.** Without these, `cargo install` fails with `linker link.exe not found`. If you don't already have them, use the PowerShell or npm install above instead.
+
+Then initialize:
 
 ```sh
 sqz init
