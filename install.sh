@@ -43,8 +43,15 @@ detect_platform() {
             esac
             ;;
         MINGW*|MSYS*|CYGWIN*|Windows_NT)
-            PLATFORM="x86_64-pc-windows-msvc"
-            BINARY="sqz.exe"
+            echo "Detected Windows under $OS. install.sh only supports Unix archives (.tar.gz);" >&2
+            echo "the Windows release is a .zip. Run the PowerShell installer instead:" >&2
+            echo "" >&2
+            echo "  irm https://raw.githubusercontent.com/${REPO}/main/install.ps1 | iex" >&2
+            echo "" >&2
+            echo "Or use npm (works on all platforms, downloads the prebuilt binary):" >&2
+            echo "" >&2
+            echo "  npm install -g sqz-cli" >&2
+            exit 1
             ;;
         *)
             echo "Unsupported operating system: $OS" >&2
