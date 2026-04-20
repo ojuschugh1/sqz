@@ -214,3 +214,13 @@ cargo build --release
 - [Benchmark: sqz vs rtk](docs/benchmark-vs-rtk.md)
 - [Discord](https://discord.gg/j8EEyH5dSB)
 - [Changelog](CHANGELOG.md)
+
+## Star History
+
+<a href="https://star-history.com/#ojuschugh1/sqz&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ojuschugh1/sqz&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ojuschugh1/sqz&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ojuschugh1/sqz&type=Date" width="600" />
+ </picture>
+</a>
