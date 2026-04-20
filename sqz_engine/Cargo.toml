@@ -17,6 +17,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }
 toml = { workspace = true }
+# toml_edit is already in the tree via toml 0.8. Pull it in directly so
+# we can round-trip a user's ~/.codex/config.toml while preserving their
+# comments and key order — plain `toml` loses both on re-serialize.
+toml_edit = "0.22"
 sha2 = { workspace = true }
 chrono = { workspace = true }
 tree-sitter = "0.22"

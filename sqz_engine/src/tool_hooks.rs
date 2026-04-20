@@ -521,6 +521,32 @@ not on PATH, run commands normally.
             ),
             scope: HookScope::Project,
         },
+        // Codex (openai/codex) — no stable per-tool-call hook, only a
+        // turn-end `notify` that fires after the agent is done and can't
+        // rewrite tool output. Native integration is therefore two-part:
+        //
+        //   1. AGENTS.md at project root — prompt-level guidance telling
+        //      Codex to pipe shell output through `sqz compress`. This is
+        //      the same approach RTK uses for Codex and the shape Codex
+        //      expects (the cross-tool AGENTS.md standard).
+        //   2. ~/.codex/config.toml user-level [mcp_servers.sqz] — Codex
+        //      merges this with any existing entries. Handled specially
+        //      in `install_tool_hooks` via `install_codex_mcp_config`.
+        //
+        // The config_content below is the AGENTS.md guidance block; it
+        // is only used as a placeholder for the (project-level) file and
+        // for surfacing the "create AGENTS.md" line in the install plan.
+        // The actual install goes through
+        // `crate::codex_integration::install_agents_md_guidance` so
+        // pre-existing AGENTS.md files are appended to, not clobbered.
+        ToolHookConfig {
+            tool_name: "Codex".to_string(),
+            config_path: PathBuf::from("AGENTS.md"),
+            config_content: crate::codex_integration::agents_md_guidance_block(
+                sqz_path_raw,
+            ),
+            scope: HookScope::Project,
+        },
     ]
 }
 
@@ -553,6 +579,25 @@ pub fn install_tool_hooks(project_dir: &Path, sqz_path: &str) -> Vec<String> {
                     // Non-fatal — leave OpenCode out of the installed
                     // list and continue with other tools.
                 }
+            }
+            continue;
+        }
+
+        // Codex has the same merge-not-clobber concern on two fronts:
+        // the project-level AGENTS.md (may contain unrelated user
+        // content) and the USER-level ~/.codex/config.toml (may contain
+        // other MCP servers). Both go through the surgical helpers.
+        if config.tool_name == "Codex" {
+            let agents_changed = crate::codex_integration::install_agents_md_guidance(
+                project_dir, sqz_path,
+            )
+            .unwrap_or(false);
+            let mcp_changed = crate::codex_integration::install_codex_mcp_config()
+                .unwrap_or(false);
+            if (agents_changed || mcp_changed)
+                && !installed.iter().any(|n| n == "Codex")
+            {
+                installed.push("Codex".to_string());
             }
             continue;
         }

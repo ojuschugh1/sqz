@@ -59,6 +59,7 @@ pub mod benchmarks;
 pub mod bpe_compressor;
 pub mod cascade_compressor;
 pub mod cmd_formatters;
+pub mod codex_integration;
 pub mod compression_quality;
 pub mod confidence_router;
 pub mod context_evictor;
@@ -146,6 +147,12 @@ pub use opencode_plugin::{
     opencode_config_has_comments,
     remove_sqz_from_opencode_config, strip_jsonc_comments,
     process_opencode_hook, opencode_plugin_path,
+};
+pub use codex_integration::{
+    agents_md_guidance_block, agents_md_path,
+    codex_config_path,
+    install_agents_md_guidance, install_codex_mcp_config,
+    remove_agents_md_guidance, remove_codex_mcp_config,
 };
 pub use token_pruner::{TokenPruner, PrunerConfig, PruneResult};
 pub use tool_selector::{ToolDefinition, ToolSelector};

@@ -293,6 +293,38 @@ fn cmd_init(skip_confirm: bool) {
             continue;
         }
 
+        // Codex has two install surfaces and neither is a simple
+        // "write file if missing": AGENTS.md is append-in-place, and
+        // ~/.codex/config.toml is a user-level TOML we merge with
+        // toml_edit. Show both in the plan so the user knows what
+        // sqz init will touch.
+        if config.tool_name == "Codex" {
+            let agents_path = sqz_engine::agents_md_path(&project_dir);
+            let agents_exists = agents_path.exists();
+            plan.push((
+                agents_path.display().to_string(),
+                if agents_exists {
+                    "Codex guidance (append to existing AGENTS.md)".to_string()
+                } else {
+                    "Codex guidance (create AGENTS.md)".to_string()
+                },
+                !agents_exists,
+            ));
+
+            let codex_toml = sqz_engine::codex_config_path();
+            let codex_toml_exists = codex_toml.exists();
+            plan.push((
+                codex_toml.display().to_string(),
+                if codex_toml_exists {
+                    "Codex MCP registration (merge [mcp_servers.sqz] into existing config)".to_string()
+                } else {
+                    "Codex MCP registration (create user-level config.toml)".to_string()
+                },
+                !codex_toml_exists,
+            ));
+            continue;
+        }
+
         let full_path = project_dir.join(&config.config_path);
         if !full_path.exists() {
             plan.push((
@@ -824,6 +856,12 @@ fn cmd_uninstall(skip_confirm: bool) {
         if config.tool_name == "OpenCode" {
             continue;
         }
+        // Codex is also surgical (AGENTS.md is append-only, not a sqz
+        // file; ~/.codex/config.toml may hold other MCP servers).
+        // Handled in dedicated cleanup blocks further down.
+        if config.tool_name == "Codex" {
+            continue;
+        }
         let full = project_dir.join(&config.config_path);
         if full.exists() {
             files_to_remove.push((full.display().to_string(), true));
@@ -844,6 +882,29 @@ fn cmd_uninstall(skip_confirm: bool) {
         .map(|p| p.display().to_string());
     if let Some(path) = &opencode_config_display {
         files_to_remove.push((format!("{path} (sqz entries only)"), true));
+    }
+
+    // Codex project-level AGENTS.md: surgically strip the sqz block
+    // while preserving any other rules the user added. See
+    // codex_integration::remove_agents_md_guidance.
+    let agents_md = sqz_engine::agents_md_path(&project_dir);
+    let agents_md_exists = agents_md.exists();
+    if agents_md_exists {
+        files_to_remove.push((
+            format!("{} (sqz guidance block only)", agents_md.display()),
+            true,
+        ));
+    }
+
+    // Codex user-level ~/.codex/config.toml: remove [mcp_servers.sqz]
+    // while preserving any other MCP servers the user registered.
+    let codex_toml = sqz_engine::codex_config_path();
+    let codex_toml_exists = codex_toml.exists();
+    if codex_toml_exists {
+        files_to_remove.push((
+            format!("{} ([mcp_servers.sqz] only)", codex_toml.display()),
+            true,
+        ));
     }
 
     // OpenCode user-level TypeScript plugin. Unlike the other tool
@@ -900,6 +961,10 @@ fn cmd_uninstall(skip_confirm: bool) {
         if config.tool_name == "OpenCode" {
             continue;
         }
+        // Codex is also surgical — AGENTS.md and ~/.codex/config.toml.
+        if config.tool_name == "Codex" {
+            continue;
+        }
         let full = project_dir.join(&config.config_path);
         if full.exists() {
             match std::fs::remove_file(&full) {
@@ -954,6 +1019,60 @@ fn cmd_uninstall(skip_confirm: bool) {
                 "[sqz] ✗ could not remove {}: {e}",
                 opencode_plugin.display()
             ),
+        }
+    }
+
+    // Surgically strip sqz's block from Codex's project AGENTS.md.
+    // Leaves any user-authored rules intact.
+    if agents_md_exists {
+        match sqz_engine::remove_agents_md_guidance(&project_dir) {
+            Ok(Some((path, true))) => {
+                if path.exists() {
+                    println!("[sqz] ✓ removed sqz block from {}", path.display());
+                } else {
+                    println!("[sqz] ✓ removed {}", path.display());
+                }
+            }
+            Ok(Some((path, false))) => {
+                println!("[sqz] ✓ no sqz block found in {}", path.display());
+            }
+            Ok(None) => { /* path disappeared between discovery and now — fine */ }
+            Err(e) => {
+                eprintln!(
+                    "[sqz] ✗ could not clean up {}: {e}",
+                    agents_md.display()
+                );
+            }
+        }
+    }
+
+    // Surgically remove [mcp_servers.sqz] from ~/.codex/config.toml.
+    // Other MCP servers and comments are preserved by toml_edit.
+    if codex_toml_exists {
+        match sqz_engine::remove_codex_mcp_config() {
+            Ok(Some((path, true))) => {
+                if path.exists() {
+                    println!(
+                        "[sqz] ✓ removed [mcp_servers.sqz] from {}",
+                        path.display()
+                    );
+                } else {
+                    println!("[sqz] ✓ removed {}", path.display());
+                }
+            }
+            Ok(Some((path, false))) => {
+                println!(
+                    "[sqz] ✓ no [mcp_servers.sqz] entry found in {}",
+                    path.display()
+                );
+            }
+            Ok(None) => { /* file disappeared between discovery and now */ }
+            Err(e) => {
+                eprintln!(
+                    "[sqz] ✗ could not clean up {}: {e}",
+                    codex_toml.display()
+                );
+            }
         }
     }
 
