@@ -8,7 +8,11 @@
 /// OpenCode requires a TypeScript file that exports a factory function.
 ///
 /// Plugin path: `~/.config/opencode/plugins/sqz.ts`
-/// Config path: `opencode.json` (project root) — adds `"plugin": ["sqz"]`
+/// Config path: `opencode.json` OR `opencode.jsonc` in the project root.
+/// The installer (`update_opencode_config`) discovers either variant and
+/// merges sqz's entries into whichever exists; a fresh install defaults
+/// to `opencode.json`. See issue #6 for the reason the installer must
+/// look past the `.json` extension.
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +33,7 @@ pub fn generate_opencode_plugin(sqz_path: &str) -> String {
  *
  * Intercepts shell commands and pipes output through sqz for token savings.
  * Install: copy to ~/.config/opencode/plugins/sqz.ts
- * Config:  add "plugin": ["sqz"] to opencode.json
+ * Config:  add "plugin": ["sqz"] to opencode.json or opencode.jsonc
  */
 
 export const SqzPlugin = async (ctx: any) => {{
@@ -152,76 +156,363 @@ pub fn install_opencode_plugin(sqz_path: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Update the project's `opencode.json` to reference the sqz plugin.
+/// Locate an existing OpenCode project config. Returns the path to
+/// `opencode.jsonc` if present, else `opencode.json` if present, else
+/// `None`. Prefers `.jsonc` because a user who bothered to write a
+/// comment-annotated config is more invested in it, and sqz must not
+/// silently create a parallel `.json` that would leave the `.jsonc`
+/// looking un-updated (reported in issue #6).
+pub fn find_opencode_config(project_dir: &Path) -> Option<PathBuf> {
+    let jsonc = project_dir.join("opencode.jsonc");
+    if jsonc.exists() {
+        return Some(jsonc);
+    }
+    let json = project_dir.join("opencode.json");
+    if json.exists() {
+        return Some(json);
+    }
+    None
+}
+
+/// Return `true` if the user's OpenCode project config is a `.jsonc`
+/// file that contains comments. Callers use this to decide whether to
+/// warn the user that sqz's upcoming merge will drop those comments
+/// (serde_json round-trips discard them).
+pub fn opencode_config_has_comments(project_dir: &Path) -> bool {
+    let path = match find_opencode_config(project_dir) {
+        Some(p) => p,
+        None => return false,
+    };
+    if path.extension().map(|e| e != "jsonc").unwrap_or(true) {
+        return false;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    strip_jsonc_comments(&content) != content
+}
+
+/// Strip JSONC-style comments from `src` while preserving string literals
+/// byte-exact. Handles:
+/// - `// line comments` through end-of-line
+/// - `/* block comments */` (non-nested, which matches standard JSONC)
+/// - Escape-aware string parsing so `"//"` inside a string is not stripped
 ///
-/// If `opencode.json` exists, adds `"sqz"` to the `"plugin"` array.
-/// If it doesn't exist, creates a minimal config with the plugin reference.
-///
-/// Returns `true` if the config was created/updated, `false` if sqz was
-/// already listed.
-pub fn update_opencode_config(project_dir: &Path) -> Result<bool> {
-    let config_path = project_dir.join("opencode.json");
+/// Returns a string suitable for `serde_json::from_str`. Does not
+/// attempt to preserve or round-trip the comments — callers that need
+/// to write the file back must be explicit about losing comments.
+pub fn strip_jsonc_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    let len = bytes.len();
 
-    if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path).map_err(|e| {
-            crate::error::SqzError::Other(format!("failed to read opencode.json: {e}"))
-        })?;
+    while i < len {
+        let b = bytes[i];
 
-        // Parse existing config
-        let mut config: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-            crate::error::SqzError::Other(format!("failed to parse opencode.json: {e}"))
-        })?;
-
-        // Check if sqz is already in the plugin array
-        if let Some(plugins) = config.get("plugin").and_then(|v| v.as_array()) {
-            if plugins.iter().any(|v| v.as_str() == Some("sqz")) {
-                return Ok(false); // Already configured
+        // Enter a string literal: copy verbatim until the matching close
+        // quote, honouring backslash escapes.
+        if b == b'"' {
+            out.push('"');
+            i += 1;
+            while i < len {
+                let c = bytes[i];
+                out.push(c as char);
+                if c == b'\\' && i + 1 < len {
+                    // Preserve the escape and the escaped char together.
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                if c == b'"' {
+                    break;
+                }
             }
+            continue;
         }
 
-        // Add sqz to the plugin array
-        let plugins = config
-            .as_object_mut()
-            .ok_or_else(|| crate::error::SqzError::Other("opencode.json is not an object".into()))?
-            .entry("plugin")
-            .or_insert_with(|| serde_json::json!([]));
-
-        if let Some(arr) = plugins.as_array_mut() {
-            arr.push(serde_json::json!("sqz"));
+        // Line comment: skip through newline (but keep the newline so
+        // line numbers line up for error messages).
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
         }
 
+        // Block comment: skip through `*/`.
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                // Preserve newlines so line numbers still line up.
+                if bytes[i] == b'\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            // Skip the terminating `*/` if we found it; tolerate
+            // unterminated comments by exiting the loop.
+            if i + 1 < len {
+                i += 2;
+            }
+            continue;
+        }
+
+        out.push(b as char);
+        i += 1;
+    }
+
+    out
+}
+
+/// Update an existing `opencode.json`/`opencode.jsonc`, or create a
+/// fresh `opencode.json`, so that sqz's plugin and MCP server are
+/// registered. Idempotent.
+///
+/// If a `.jsonc` file exists, it is read with comment-stripping, merged,
+/// and written back WITHOUT the comments — we can't losslessly round-trip
+/// comments through serde_json. The caller is warned via the return
+/// value's second field so `sqz init` can surface the fact.
+///
+/// If both files exist for some reason (OpenCode merges both), the
+/// `.jsonc` is treated as authoritative (per `find_opencode_config`).
+///
+/// Returns `(updated, comments_lost)` where `updated` is true if any
+/// change was written to disk, and `comments_lost` is true if sqz had
+/// to drop comments from a `.jsonc` during the merge.
+pub fn update_opencode_config(project_dir: &Path) -> Result<bool> {
+    let (updated, _) = update_opencode_config_detailed(project_dir)?;
+    Ok(updated)
+}
+
+/// Like `update_opencode_config` but also reports whether comments had
+/// to be dropped from a JSONC file during the merge. Used by the `sqz
+/// init` CLI to print a warning.
+pub fn update_opencode_config_detailed(project_dir: &Path) -> Result<(bool, bool)> {
+    // Desired shape of sqz's entry in the merged config.
+    fn sqz_mcp_value() -> serde_json::Value {
+        serde_json::json!({
+            "type": "local",
+            "command": ["sqz-mcp", "--transport", "stdio"]
+        })
+    }
+
+    if let Some(existing_path) = find_opencode_config(project_dir) {
+        let is_jsonc = existing_path
+            .extension()
+            .map(|e| e == "jsonc")
+            .unwrap_or(false);
+        let content = std::fs::read_to_string(&existing_path).map_err(|e| {
+            crate::error::SqzError::Other(format!(
+                "failed to read {}: {e}",
+                existing_path.display()
+            ))
+        })?;
+
+        let parseable = if is_jsonc {
+            strip_jsonc_comments(&content)
+        } else {
+            content.clone()
+        };
+
+        // Detect whether comments were present — relevant for
+        // comments_lost reporting only if we end up mutating the file.
+        let had_comments = is_jsonc && parseable != content;
+
+        // Parse existing config.
+        let mut config: serde_json::Value = serde_json::from_str(&parseable).map_err(|e| {
+            crate::error::SqzError::Other(format!(
+                "failed to parse {}: {e}",
+                existing_path.display()
+            ))
+        })?;
+
+        let obj = config.as_object_mut().ok_or_else(|| {
+            crate::error::SqzError::Other(format!(
+                "{} root is not a JSON object",
+                existing_path.display()
+            ))
+        })?;
+
+        let mut changed = false;
+
+        // Merge `plugin`: add "sqz" if not present. Create the array if
+        // the key is missing; preserve the user's existing entries.
+        let plugin_entry = obj.entry("plugin").or_insert_with(|| serde_json::json!([]));
+        if let Some(arr) = plugin_entry.as_array_mut() {
+            let has_sqz = arr.iter().any(|v| v.as_str() == Some("sqz"));
+            if !has_sqz {
+                arr.push(serde_json::json!("sqz"));
+                changed = true;
+            }
+        } else {
+            // `plugin` exists but isn't an array — bail rather than
+            // silently clobber a user's weird-but-valid config.
+            return Err(crate::error::SqzError::Other(format!(
+                "{} has a `plugin` field that is not an array; \
+                 refusing to modify it automatically",
+                existing_path.display()
+            )));
+        }
+
+        // Merge `mcp.sqz`: add our MCP server entry if not present.
+        let mcp_entry = obj.entry("mcp").or_insert_with(|| serde_json::json!({}));
+        if let Some(mcp_obj) = mcp_entry.as_object_mut() {
+            if !mcp_obj.contains_key("sqz") {
+                mcp_obj.insert("sqz".to_string(), sqz_mcp_value());
+                changed = true;
+            }
+            // If the entry exists we do NOT overwrite — the user may
+            // have tuned it. That's the idempotent-merge contract.
+        } else {
+            return Err(crate::error::SqzError::Other(format!(
+                "{} has an `mcp` field that is not an object; \
+                 refusing to modify it automatically",
+                existing_path.display()
+            )));
+        }
+
+        if !changed {
+            return Ok((false, false));
+        }
+
+        // Serialize and write back to the SAME file (whether .json or
+        // .jsonc). We do not migrate .jsonc to .json or vice versa.
         let updated = serde_json::to_string_pretty(&config).map_err(|e| {
-            crate::error::SqzError::Other(format!("failed to serialize opencode.json: {e}"))
+            crate::error::SqzError::Other(format!("failed to serialize config: {e}"))
+        })?;
+        std::fs::write(&existing_path, format!("{updated}\n")).map_err(|e| {
+            crate::error::SqzError::Other(format!(
+                "failed to write {}: {e}",
+                existing_path.display()
+            ))
         })?;
 
-        std::fs::write(&config_path, format!("{updated}\n")).map_err(|e| {
-            crate::error::SqzError::Other(format!("failed to write opencode.json: {e}"))
-        })?;
-
-        Ok(true)
+        Ok((true, had_comments))
     } else {
-        // Create a minimal opencode.json with sqz plugin + MCP
+        // Fresh install: create opencode.json with both plugin and MCP.
         let config = serde_json::json!({
             "$schema": "https://opencode.ai/config.json",
             "mcp": {
-                "sqz": {
-                    "type": "local",
-                    "command": ["sqz-mcp", "--transport", "stdio"]
-                }
+                "sqz": sqz_mcp_value()
             },
             "plugin": ["sqz"]
         });
-
         let content = serde_json::to_string_pretty(&config).map_err(|e| {
             crate::error::SqzError::Other(format!("failed to serialize opencode.json: {e}"))
         })?;
-
-        std::fs::write(&config_path, format!("{content}\n")).map_err(|e| {
+        let path = project_dir.join("opencode.json");
+        std::fs::write(&path, format!("{content}\n")).map_err(|e| {
             crate::error::SqzError::Other(format!("failed to write opencode.json: {e}"))
         })?;
-
-        Ok(true)
+        Ok((true, false))
     }
+}
+
+/// Remove sqz's entries from an existing `opencode.json`/`opencode.jsonc`
+/// without deleting the whole file. Removes `mcp.sqz` and any `"sqz"`
+/// entry from `plugin`. If this leaves `mcp` or `plugin` empty the keys
+/// are dropped too. Returns `(path, changed)` — `changed` is `false`
+/// when neither sqz entry was present.
+///
+/// Callers are expected to honour a `.jsonc` file's comments losing
+/// fidelity on write: we parse with comment-stripping and emit as plain
+/// JSON. The file keeps its original extension so OpenCode keeps reading
+/// it. If the resulting config is completely empty (or would be the
+/// near-empty shape we'd create from scratch), we remove the file
+/// entirely since that's the cleaner uninstall state.
+pub fn remove_sqz_from_opencode_config(project_dir: &Path) -> Result<Option<(PathBuf, bool)>> {
+    let path = match find_opencode_config(project_dir) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let is_jsonc = path.extension().map(|e| e == "jsonc").unwrap_or(false);
+    let raw = std::fs::read_to_string(&path).map_err(|e| {
+        crate::error::SqzError::Other(format!("failed to read {}: {e}", path.display()))
+    })?;
+    let parseable = if is_jsonc {
+        strip_jsonc_comments(&raw)
+    } else {
+        raw.clone()
+    };
+    let mut config: serde_json::Value = match serde_json::from_str(&parseable) {
+        Ok(v) => v,
+        Err(_) => {
+            // Can't parse — be conservative and leave it alone.
+            return Ok(Some((path, false)));
+        }
+    };
+
+    let mut changed = false;
+
+    if let Some(obj) = config.as_object_mut() {
+        // Drop `"sqz"` from `plugin[]`.
+        if let Some(plugin) = obj.get_mut("plugin").and_then(|v| v.as_array_mut()) {
+            let before = plugin.len();
+            plugin.retain(|v| v.as_str() != Some("sqz"));
+            if plugin.len() != before {
+                changed = true;
+            }
+            // Drop the whole `plugin` key if it's now empty.
+            if plugin.is_empty() {
+                obj.remove("plugin");
+            }
+        }
+
+        // Drop `mcp.sqz`, and drop `mcp` itself if that was the only key.
+        if let Some(mcp) = obj.get_mut("mcp").and_then(|v| v.as_object_mut()) {
+            if mcp.remove("sqz").is_some() {
+                changed = true;
+            }
+            if mcp.is_empty() {
+                obj.remove("mcp");
+            }
+        }
+    }
+
+    if !changed {
+        return Ok(Some((path, false)));
+    }
+
+    // If the remaining config is empty or nearly-so, just remove the file.
+    // (A bare `{}` or `{ "$schema": "..." }` is what sqz's own
+    // first-install would leave behind, and the user clearly doesn't
+    // want sqz here — so nuking the sqz-authored shell is correct.)
+    let essentially_empty = match config.as_object() {
+        Some(obj) => {
+            obj.is_empty()
+                || (obj.len() == 1
+                    && obj.get("$schema").and_then(|v| v.as_str())
+                        == Some("https://opencode.ai/config.json"))
+        }
+        None => false,
+    };
+
+    if essentially_empty {
+        std::fs::remove_file(&path).map_err(|e| {
+            crate::error::SqzError::Other(format!(
+                "failed to remove {}: {e}",
+                path.display()
+            ))
+        })?;
+        return Ok(Some((path, true)));
+    }
+
+    // Otherwise write back the pruned config. This loses any comments
+    // a `.jsonc` had; the caller should surface that fact to the user.
+    let updated = serde_json::to_string_pretty(&config).map_err(|e| {
+        crate::error::SqzError::Other(format!("failed to serialize config: {e}"))
+    })?;
+    std::fs::write(&path, format!("{updated}\n")).map_err(|e| {
+        crate::error::SqzError::Other(format!(
+            "failed to write {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(Some((path, true)))
 }
 
 /// Return `true` if `command` has already been wrapped by an earlier sqz
@@ -559,14 +850,52 @@ mod tests {
     fn test_update_opencode_config_skips_if_present() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("opencode.json");
+        // A complete sqz install has BOTH the plugin entry and the MCP
+        // server entry. Writing only `plugin[]` leaves the MCP server
+        // unregistered; the updated merger considers this incomplete
+        // and will add the missing `mcp.sqz` key. A truly idempotent
+        // "nothing to do" state requires both pieces to be present.
         std::fs::write(
             &config_path,
-            r#"{"plugin":["sqz"]}"#,
+            r#"{
+  "plugin": ["sqz"],
+  "mcp": {
+    "sqz": {
+      "type": "local",
+      "command": ["sqz-mcp", "--transport", "stdio"]
+    }
+  }
+}"#,
         )
         .unwrap();
 
         let result = update_opencode_config(dir.path()).unwrap();
-        assert!(!result, "should skip if sqz already present");
+        assert!(
+            !result,
+            "complete install (plugin + mcp.sqz) must be idempotent"
+        );
+    }
+
+    /// Companion to the above: when only `plugin[\"sqz\"]` is present
+    /// the merger must add the missing `mcp.sqz` entry — before the
+    /// issue #6 fix the updater only ever touched the plugin array,
+    /// leaving MCP registration to chance.
+    #[test]
+    fn test_update_opencode_config_adds_missing_mcp_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("opencode.json");
+        std::fs::write(&config_path, r#"{"plugin":["sqz"]}"#).unwrap();
+
+        let changed = update_opencode_config(dir.path()).unwrap();
+        assert!(changed, "must report that mcp.sqz was added");
+
+        let after = std::fs::read_to_string(&config_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(
+            parsed["mcp"]["sqz"]["type"].as_str(),
+            Some("local"),
+            "mcp.sqz must be populated with the default server entry"
+        );
     }
 
     // ── Issue #5 follow-up: runaway SQZ_CMD= prefix ───────────────────
@@ -707,5 +1036,318 @@ mod tests {
         assert!(!is_env_assignment("--flag=value"));
         assert!(!is_env_assignment("123=value"));
         assert!(!is_env_assignment("FOO BAR=baz"));
+    }
+
+    // ── Issue #6: opencode.jsonc support ─────────────────────────────
+
+    /// Regression for issue #6 (@Icaruk). When a user has
+    /// `opencode.jsonc` (OpenCode supports both `.json` and `.jsonc`),
+    /// sqz init must MERGE into it rather than creating a parallel
+    /// `opencode.json`. Before the fix `find_opencode_config` didn't
+    /// exist and `update_opencode_config` was hardcoded to the `.json`
+    /// path, so users with `.jsonc` ended up with two configs.
+    #[test]
+    fn test_update_merges_into_existing_jsonc() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonc = dir.path().join("opencode.jsonc");
+        std::fs::write(
+            &jsonc,
+            r#"{
+  // user's own config with a comment
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4-5",
+  /* another comment */
+  "plugin": ["other-plugin"]
+}
+"#,
+        )
+        .unwrap();
+
+        let changed = update_opencode_config(dir.path()).unwrap();
+        assert!(changed, "must merge sqz entries into the existing .jsonc");
+
+        // The .jsonc file is the one we wrote back to — NOT a new .json.
+        assert!(jsonc.exists(), "original .jsonc must still exist");
+        assert!(
+            !dir.path().join("opencode.json").exists(),
+            "must not create a parallel opencode.json alongside .jsonc \
+             (that's the issue #6 bug)"
+        );
+
+        let after = std::fs::read_to_string(&jsonc).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
+        let plugins = parsed["plugin"].as_array().unwrap();
+        assert!(
+            plugins.iter().any(|v| v.as_str() == Some("sqz")),
+            "plugin[] must contain sqz after merge"
+        );
+        assert!(
+            plugins.iter().any(|v| v.as_str() == Some("other-plugin")),
+            "pre-existing plugin entries must be preserved"
+        );
+        assert_eq!(
+            parsed["model"].as_str(),
+            Some("anthropic/claude-sonnet-4-5"),
+            "unrelated user keys must survive the merge"
+        );
+        assert_eq!(
+            parsed["mcp"]["sqz"]["type"].as_str(),
+            Some("local"),
+            "mcp.sqz must be registered"
+        );
+    }
+
+    /// Detailed variant: comments_lost must be reported when we
+    /// rewrite a `.jsonc` that had comments. Callers (sqz init) use
+    /// this to warn the user.
+    #[test]
+    fn test_update_opencode_config_detailed_reports_comments_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonc = dir.path().join("opencode.jsonc");
+        std::fs::write(
+            &jsonc,
+            r#"{
+  // comment to be dropped
+  "plugin": ["other"]
+}
+"#,
+        )
+        .unwrap();
+
+        let (changed, comments_lost) =
+            update_opencode_config_detailed(dir.path()).unwrap();
+        assert!(changed);
+        assert!(
+            comments_lost,
+            "merger must report that comments were dropped from .jsonc"
+        );
+    }
+
+    /// When no existing config is present, we still default to
+    /// creating `opencode.json` (not `.jsonc`). The `.jsonc` variant
+    /// is the user's choice to make; we don't force it.
+    #[test]
+    fn test_update_creates_plain_json_when_nothing_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        update_opencode_config(dir.path()).unwrap();
+        assert!(dir.path().join("opencode.json").exists());
+        assert!(!dir.path().join("opencode.jsonc").exists());
+    }
+
+    /// `find_opencode_config` prefers `.jsonc` when both exist.
+    #[test]
+    fn test_find_opencode_config_prefers_jsonc() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("opencode.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("opencode.jsonc"), "{}").unwrap();
+        let found = find_opencode_config(dir.path()).unwrap();
+        assert_eq!(
+            found.file_name().unwrap(),
+            "opencode.jsonc",
+            "must prefer the .jsonc variant when both exist — the user \
+             is maintaining .jsonc for its comment support"
+        );
+    }
+
+    #[test]
+    fn test_find_opencode_config_returns_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(find_opencode_config(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_opencode_config_has_comments_detects_jsonc_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("opencode.jsonc"),
+            "// a line comment\n{\"plugin\":[]}\n",
+        )
+        .unwrap();
+        assert!(opencode_config_has_comments(dir.path()));
+    }
+
+    #[test]
+    fn test_opencode_config_has_comments_ignores_plain_json() {
+        let dir = tempfile::tempdir().unwrap();
+        // The fake `//` is inside a JSON string — NOT a comment.
+        std::fs::write(
+            dir.path().join("opencode.json"),
+            r#"{"url":"http://example.com"}"#,
+        )
+        .unwrap();
+        assert!(!opencode_config_has_comments(dir.path()));
+    }
+
+    // ── JSONC comment stripper ───────────────────────────────────────
+
+    #[test]
+    fn test_strip_jsonc_comments_removes_line_comments() {
+        let src = "{\n  // leading comment\n  \"a\": 1 // trailing\n}";
+        let stripped = strip_jsonc_comments(src);
+        assert!(!stripped.contains("leading comment"));
+        assert!(!stripped.contains("trailing"));
+        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(parsed["a"], 1);
+    }
+
+    #[test]
+    fn test_strip_jsonc_comments_removes_block_comments() {
+        let src = "{\n  /* block\n     comment */\n  \"a\": 1\n}";
+        let stripped = strip_jsonc_comments(src);
+        assert!(!stripped.contains("block"));
+        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(parsed["a"], 1);
+    }
+
+    #[test]
+    fn test_strip_jsonc_comments_preserves_strings() {
+        // The `//` inside the URL must NOT be treated as a line comment,
+        // and the `/* ... */` pattern inside the string must NOT be
+        // treated as a block comment. This is the classic JSONC parser
+        // bug — we want to prove our stripper is string-aware.
+        let src = r#"{"url": "http://example.com", "re": "/* not a comment */"}"#;
+        let stripped = strip_jsonc_comments(src);
+        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(parsed["url"], "http://example.com");
+        assert_eq!(parsed["re"], "/* not a comment */");
+    }
+
+    #[test]
+    fn test_strip_jsonc_comments_preserves_escaped_quote_in_string() {
+        let src = r#"{"s": "a\"//b"}"#;
+        let stripped = strip_jsonc_comments(src);
+        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(parsed["s"], r#"a"//b"#);
+    }
+
+    #[test]
+    fn test_strip_jsonc_comments_tolerates_unterminated_block() {
+        // We don't want to panic or infinite-loop on malformed input.
+        let src = "{\"a\":1 /* never ends";
+        let _ = strip_jsonc_comments(src); // should return without panic
+    }
+
+    // ── Surgical uninstall ───────────────────────────────────────────
+
+    /// Regression for the uninstall-wipes-user-config concern tied to
+    /// issue #6. Before this change `sqz uninstall` called
+    /// `remove_file` on the entire `opencode.json`, destroying any
+    /// user config that had been merged with sqz's entries. The
+    /// surgical helper keeps the file, removes only sqz's keys.
+    #[test]
+    fn test_remove_sqz_preserves_other_user_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("opencode.json");
+        std::fs::write(
+            &config,
+            r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4-5",
+  "plugin": ["other-plugin", "sqz"],
+  "mcp": {
+    "sqz": { "type": "local", "command": ["sqz-mcp"] },
+    "jira": { "type": "remote", "url": "https://jira.example.com/mcp" }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let (path, changed) =
+            remove_sqz_from_opencode_config(dir.path()).unwrap().unwrap();
+        assert_eq!(path, config);
+        assert!(changed, "must report that sqz entries were removed");
+        assert!(
+            config.exists(),
+            "file must NOT be deleted — only sqz's entries removed"
+        );
+
+        let after = std::fs::read_to_string(&config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
+        let plugins = parsed["plugin"].as_array().unwrap();
+        assert!(!plugins.iter().any(|v| v.as_str() == Some("sqz")));
+        assert!(plugins.iter().any(|v| v.as_str() == Some("other-plugin")));
+        let mcp = parsed["mcp"].as_object().unwrap();
+        assert!(!mcp.contains_key("sqz"), "mcp.sqz must be gone");
+        assert!(mcp.contains_key("jira"), "mcp.jira must survive");
+        assert_eq!(
+            parsed["model"].as_str(),
+            Some("anthropic/claude-sonnet-4-5"),
+            "unrelated keys must survive"
+        );
+    }
+
+    /// If the file was CREATED by sqz (just $schema + sqz entries),
+    /// removing sqz's entries should delete the whole file since
+    /// there's nothing else the user wanted to keep.
+    #[test]
+    fn test_remove_sqz_deletes_file_when_nothing_else_remains() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("opencode.json");
+        // This is exactly the shape sqz writes on fresh install.
+        std::fs::write(
+            &config,
+            r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "sqz": { "type": "local", "command": ["sqz-mcp", "--transport", "stdio"] }
+  },
+  "plugin": ["sqz"]
+}
+"#,
+        )
+        .unwrap();
+
+        let (_, changed) =
+            remove_sqz_from_opencode_config(dir.path()).unwrap().unwrap();
+        assert!(changed);
+        assert!(
+            !config.exists(),
+            "file with only $schema + sqz entries must be removed"
+        );
+    }
+
+    /// When there's nothing to uninstall (no config present), the
+    /// surgical helper returns None rather than erroring.
+    #[test]
+    fn test_remove_sqz_returns_none_when_config_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = remove_sqz_from_opencode_config(dir.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    /// Surgical uninstall against a .jsonc file: strips comments on
+    /// read, writes back as plain JSON (to the same .jsonc path).
+    #[test]
+    fn test_remove_sqz_from_jsonc_drops_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonc = dir.path().join("opencode.jsonc");
+        std::fs::write(
+            &jsonc,
+            r#"{
+  // user's comment
+  "model": "x",
+  "plugin": ["sqz", "other"]
+}
+"#,
+        )
+        .unwrap();
+
+        let (path, changed) =
+            remove_sqz_from_opencode_config(dir.path()).unwrap().unwrap();
+        assert_eq!(path, jsonc);
+        assert!(changed);
+        assert!(path.exists(), "jsonc file kept because `model` and `other` remain");
+
+        let after = std::fs::read_to_string(&jsonc).unwrap();
+        assert!(
+            !after.contains("// user's comment"),
+            "comments are dropped by the serde_json round-trip; \
+             documented in update_opencode_config_detailed"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
+        let plugins = parsed["plugin"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0], "other");
     }
 }

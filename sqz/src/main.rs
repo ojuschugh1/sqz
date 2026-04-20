@@ -254,7 +254,45 @@ fn cmd_init(skip_confirm: bool) {
 
     // AI tool hooks
     let tool_configs = sqz_engine::generate_hook_configs(&sqz_path);
+    // Cache whether the existing OpenCode .jsonc would lose comments
+    // during the merge — surface it in the plan below and again after
+    // install as a nudge.
+    let opencode_existing = sqz_engine::find_opencode_config(&project_dir);
+    let opencode_jsonc_has_comments =
+        sqz_engine::opencode_config_has_comments(&project_dir);
     for config in &tool_configs {
+        // OpenCode is special: the installer merges into whichever of
+        // opencode.json / opencode.jsonc already exists, rather than
+        // blindly creating a parallel opencode.json. Report the
+        // accurate target in the plan.
+        if config.tool_name == "OpenCode" {
+            match &opencode_existing {
+                Some(path) => {
+                    // Existing file — we'll merge sqz entries into it.
+                    let note = if opencode_jsonc_has_comments {
+                        format!(
+                            "{} hook config (merge sqz entries — comments in .jsonc \
+                             will be dropped)",
+                            config.tool_name
+                        )
+                    } else {
+                        format!("{} hook config (merge sqz entries)", config.tool_name)
+                    };
+                    plan.push((path.display().to_string(), note, false));
+                }
+                None => {
+                    // No existing config — we'll create a fresh opencode.json.
+                    let full_path = project_dir.join(&config.config_path);
+                    plan.push((
+                        full_path.display().to_string(),
+                        format!("{} hook config", config.tool_name),
+                        true,
+                    ));
+                }
+            }
+            continue;
+        }
+
         let full_path = project_dir.join(&config.config_path);
         if !full_path.exists() {
             plan.push((
@@ -332,7 +370,9 @@ fn cmd_init(skip_confirm: bool) {
         println!("[sqz] ✓ default preset already exists at {}", preset_path.display());
     }
 
-    // AI tool hooks
+    // AI tool hooks — merge/install runs after the user confirms.
+    // The plan above already flagged any `.jsonc` comments-will-be-lost
+    // concern so the user could Ctrl-C before we got here.
     let installed_tools = sqz_engine::install_tool_hooks(&project_dir, &sqz_path);
     for tool in &installed_tools {
         println!("[sqz] ✓ {} hook installed", tool);
@@ -775,10 +815,35 @@ fn cmd_uninstall(skip_confirm: bool) {
         .unwrap_or_else(|_| "sqz".to_string());
     let tool_configs = sqz_engine::generate_hook_configs(&sqz_path_str);
     for config in &tool_configs {
+        // OpenCode's config is merged in place by `install_tool_hooks`
+        // (via `update_opencode_config_detailed`) rather than written
+        // as a standalone sqz file. Wiping the whole file would
+        // destroy unrelated user config that was merged into
+        // `opencode.json`/`opencode.jsonc`. Discover + handle it
+        // separately below.
+        if config.tool_name == "OpenCode" {
+            continue;
+        }
         let full = project_dir.join(&config.config_path);
         if full.exists() {
             files_to_remove.push((full.display().to_string(), true));
         }
+    }
+
+    // OpenCode project config (opencode.json OR opencode.jsonc): sqz
+    // will surgically remove its own `mcp.sqz` entry and the `"sqz"`
+    // entry from `plugin[]`, leaving any other config intact. If the
+    // resulting file is empty or only contains the default $schema
+    // line that sqz itself wrote on first install, the file is
+    // removed entirely. This replaces the pre-issue-#6 behaviour of
+    // wiping the whole file — which would have destroyed user config
+    // merged in at `sqz init` time.
+    let opencode_config = sqz_engine::find_opencode_config(&project_dir);
+    let opencode_config_display = opencode_config
+        .as_ref()
+        .map(|p| p.display().to_string());
+    if let Some(path) = &opencode_config_display {
+        files_to_remove.push((format!("{path} (sqz entries only)"), true));
     }
 
     // OpenCode user-level TypeScript plugin. Unlike the other tool
@@ -831,11 +896,52 @@ fn cmd_uninstall(skip_confirm: bool) {
 
     // Remove AI tool configs
     for config in &tool_configs {
+        // OpenCode is handled separately below (surgical edit).
+        if config.tool_name == "OpenCode" {
+            continue;
+        }
         let full = project_dir.join(&config.config_path);
         if full.exists() {
             match std::fs::remove_file(&full) {
                 Ok(()) => println!("[sqz] ✓ removed {}", full.display()),
                 Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", full.display()),
+            }
+        }
+    }
+
+    // Surgically remove sqz entries from the OpenCode project config.
+    if opencode_config.is_some() {
+        match sqz_engine::remove_sqz_from_opencode_config(&project_dir) {
+            Ok(Some((path, true))) => {
+                // Either the file was rewritten without sqz's keys, or
+                // it was deleted because nothing else remained. The
+                // remove_sqz helper handles both paths; we just report
+                // what ended up on disk.
+                if path.exists() {
+                    println!(
+                        "[sqz] ✓ removed sqz entries from {}",
+                        path.display()
+                    );
+                } else {
+                    println!("[sqz] ✓ removed {}", path.display());
+                }
+            }
+            Ok(Some((path, false))) => {
+                println!(
+                    "[sqz] ✓ no sqz entries found in {}",
+                    path.display()
+                );
+            }
+            Ok(None) => {
+                // Shouldn't happen — we only enter this branch when
+                // find_opencode_config returned Some during discovery.
+            }
+            Err(e) => {
+                if let Some(path) = &opencode_config_display {
+                    eprintln!("[sqz] ✗ could not clean up {path}: {e}");
+                } else {
+                    eprintln!("[sqz] ✗ could not clean up OpenCode config: {e}");
+                }
             }
         }
     }

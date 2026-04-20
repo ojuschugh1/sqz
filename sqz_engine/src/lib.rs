@@ -142,6 +142,9 @@ pub use mdl_selector::{select_stages, profile_content, ContentProfile, MdlSelect
 pub use tool_hooks::{process_hook, process_hook_cursor, process_hook_gemini, process_hook_windsurf, generate_hook_configs, install_tool_hooks, ToolHookConfig, HookScope, HookPlatform};
 pub use opencode_plugin::{
     generate_opencode_plugin, install_opencode_plugin, update_opencode_config,
+    update_opencode_config_detailed, find_opencode_config,
+    opencode_config_has_comments,
+    remove_sqz_from_opencode_config, strip_jsonc_comments,
     process_opencode_hook, opencode_plugin_path,
 };
 pub use token_pruner::{TokenPruner, PrunerConfig, PruneResult};

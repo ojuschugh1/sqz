@@ -497,10 +497,13 @@ not on PATH, run commands normally.
             scope: HookScope::Project,
         },
         // OpenCode — TypeScript plugin at ~/.config/opencode/plugins/sqz.ts
-        // plus opencode.json config in project root. Unlike other tools,
-        // OpenCode uses a TS plugin (not JSON hooks), so we generate a
-        // placeholder config here and the actual plugin is installed
-        // separately via install_opencode_plugin().
+        // plus a config file in project root (opencode.json or
+        // opencode.jsonc). Unlike other tools, OpenCode uses a TS
+        // plugin (not JSON hooks). The `config_path` below is the
+        // fresh-install default; `install_tool_hooks` detects a
+        // pre-existing `.jsonc` and merges into it instead. The actual
+        // plugin (sqz.ts) is installed separately via
+        // `install_opencode_plugin()`.
         ToolHookConfig {
             tool_name: "OpenCode".to_string(),
             config_path: PathBuf::from("opencode.json"),
@@ -523,12 +526,37 @@ not on PATH, run commands normally.
 
 /// Install hook configs for detected AI tools in the given project directory.
 ///
+/// Install hook configs for detected AI tools in the given project directory.
+///
 /// Returns the list of tools that were configured.
 pub fn install_tool_hooks(project_dir: &Path, sqz_path: &str) -> Vec<String> {
     let configs = generate_hook_configs(sqz_path);
     let mut installed = Vec::new();
 
     for config in &configs {
+        // OpenCode config files are special: they live alongside the
+        // user's own config and must be *merged* rather than clobbered.
+        // The placeholder `config_content` is only used on a fresh
+        // install; `update_opencode_config_detailed` handles both the
+        // create-new and merge-into-existing cases, AND picks the
+        // right file extension (opencode.jsonc vs opencode.json) —
+        // fixes issue #6 where the old write-if-missing logic created
+        // a parallel `opencode.json` next to an existing `.jsonc`.
+        if config.tool_name == "OpenCode" {
+            match crate::opencode_plugin::update_opencode_config_detailed(project_dir) {
+                Ok((updated, _comments_lost)) => {
+                    if updated && !installed.iter().any(|n| n == "OpenCode") {
+                        installed.push("OpenCode".to_string());
+                    }
+                }
+                Err(_e) => {
+                    // Non-fatal — leave OpenCode out of the installed
+                    // list and continue with other tools.
+                }
+            }
+            continue;
+        }
+
         let full_path = project_dir.join(&config.config_path);
 
         // Don't overwrite existing hook configs
@@ -548,7 +576,11 @@ pub fn install_tool_hooks(project_dir: &Path, sqz_path: &str) -> Vec<String> {
         }
     }
 
-    // Also install the OpenCode TypeScript plugin (user-level)
+    // Also install the OpenCode TypeScript plugin (user-level). The
+    // config merge above has already put OpenCode in `installed` if it
+    // wrote anything, so this call only matters for machines where no
+    // project config existed — we still want the user-level plugin so
+    // future OpenCode sessions see sqz.
     if let Ok(true) = crate::opencode_plugin::install_opencode_plugin(sqz_path) {
         if !installed.iter().any(|n| n == "OpenCode") {
             installed.push("OpenCode".to_string());
