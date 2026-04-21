@@ -102,21 +102,20 @@ jobs:
           set -eu
           TARGET="${{ matrix.target }}"
           VERSION="${GITHUB_REF_NAME}"
+          STAGING="$(mktemp -d)"
           ASSETS=""
           for BINARY in sqz sqz-mcp; do
             ARCHIVE="${BINARY}-${VERSION}-${TARGET}.tar.gz"
-            # Stage the binary in the workspace root so the tarball has
-            # the binary at its root (no nested directory).
             if [ -f "target/${TARGET}/release/${BINARY}" ]; then
-              cp "target/${TARGET}/release/${BINARY}" "${BINARY}"
-              tar -czf "${ARCHIVE}" "${BINARY}"
-              rm "${BINARY}"
+              cp "target/${TARGET}/release/${BINARY}" "${STAGING}/${BINARY}"
+              tar -czf "${ARCHIVE}" -C "${STAGING}" "${BINARY}"
+              rm "${STAGING}/${BINARY}"
               ASSETS="${ASSETS}${ASSETS:+$'\n'}${ARCHIVE}"
             else
               echo "::warning::Binary ${BINARY} not found for ${TARGET}, skipping"
             fi
           done
-          # Space-separated ASSET_LIST is used by the upload step.
+          rm -rf "${STAGING}"
           {
             echo "ASSET_LIST<<EOF"
             echo "${ASSETS}"
