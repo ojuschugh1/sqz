@@ -14,6 +14,16 @@
 </p>
 
 <p align="center">
+  <sub>
+    <strong>Real session stats:</strong>
+    3,003 compressions ·
+    <strong>178,442 tokens saved</strong> ·
+    24.7% avg reduction · up to
+    <strong>92%</strong> with dedup
+  </sub>
+</p>
+
+<p align="center">
   <a href="https://crates.io/crates/sqz-cli"><img src="https://img.shields.io/crates/v/sqz-cli?logo=rust&logoColor=white&label=crates.io&color=e6522c" alt="Crates.io"></a>
   <a href="https://www.npmjs.com/package/sqz-cli"><img src="https://img.shields.io/npm/v/sqz-cli?logo=npm&logoColor=white&label=npm&color=cb3837" alt="npm"></a>
   <a href="https://pypi.org/project/sqz/"><img src="https://img.shields.io/pypi/v/sqz?logo=python&logoColor=white&label=PyPI&color=3775a9" alt="PyPI"></a>
@@ -49,6 +59,31 @@ Total:         6,000 tokens     Total:         ~826 tokens (86% saved)
 
 ## Token Savings
 
+> **24.7%** average reduction across 3,003 real compressions ·
+> **92%** saved on repeated file reads ·
+> **86%** on shell/git output ·
+> **13-token** refs for cached content
+
+One developer's week, measured from actual `sqz gain` output:
+
+```
+$ sqz gain
+sqz token savings (last 7 days)
+──────────────────────────────────────────────────
+  04-13 │                              │   2,329 saved
+  04-14 │                              │       0 saved
+  04-15 │███                           │  12,954 saved
+  04-16 │██                            │   9,223 saved
+  04-17 │████                          │  14,752 saved
+  04-18 │██████████████████████████████│ 105,569 saved
+  04-19 │████████                      │  30,882 saved
+  04-20 │█                             │   4,334 saved
+──────────────────────────────────────────────────
+  Total: 3,003 compressions, 178,442 tokens saved (24.7% avg reduction)
+```
+
+### Per-command compression
+
 Single-command compression (measured via `cargo test -p sqz-engine benchmarks`):
 
 | Content | Before | After | Saved |
@@ -60,15 +95,17 @@ Single-command compression (measured via `cargo test -p sqz-engine benchmarks`):
 | Prose/docs | 124 | 121 | **2%** |
 | Stack trace (safe mode) | 82 | 82 | **0%** |
 
-Session-level savings (with dedup cache across repeated reads):
+### Session-level with dedup
+
+Where the real savings live — the cache sends each file once, repeats cost 13 tokens:
 
 | Scenario | Without sqz | With sqz | Saved |
 |---|---:|---:|---:|
-| Same file read 5x | 10,000 | 826 | **92%** |
-| Same JSON response 3x | 192 | 79 | **59%** |
+| Same file read 5× | 10,000 | 826 | **92%** |
+| Same JSON response 3× | 192 | 79 | **59%** |
 | Test-fix-test cycle (3 runs) | 15,000 | 5,186 | **65%** |
 
-The dedup cache is where the real savings live. Single-command compression ranges from 2-58% depending on content. Repeated reads drop to 13 tokens each.
+Single-command compression ranges from 2–58% depending on content. Repeated reads drop to 13 tokens each. Your mileage will vary with how repetitive your tool calls are — agentic sessions with many file re-reads see the biggest wins.
 
 ## Install
 
@@ -94,8 +131,20 @@ npm install -g sqz-cli
 Then initialize:
 
 ```sh
-sqz init
+sqz init --global     # hooks apply to every project on this machine
+# or
+sqz init              # hooks apply to just this project (.claude/settings.local.json)
 ```
+
+`--global` writes to `~/.claude/settings.json` (the user scope per the
+[Anthropic scope table](https://docs.claude.com/en/docs/claude-code/settings)),
+so the sqz hook fires in every Claude Code session on this machine. This is
+the common case on first install. Your existing `permissions`, `env`,
+`statusLine`, and unrelated hooks in `~/.claude/settings.json` are
+preserved — sqz merges its entries rather than overwriting.
+
+Plain `sqz init` (project scope) is useful when you want sqz active only
+inside one repo.
 
 That's it. Shell hooks installed, AI tool hooks configured.
 
@@ -135,7 +184,8 @@ What doesn't get compressed:
 ## CLI
 
 ```sh
-sqz init              # Install hooks
+sqz init --global     # Install hooks for every project on this machine
+sqz init              # Install hooks for just this project
 sqz compress <text>   # Compress (or pipe from stdin)
 sqz compact           # Evict stale context to free tokens
 sqz gain              # Show daily token savings
@@ -146,19 +196,26 @@ sqz hook claude       # Process a PreToolUse hook
 sqz proxy --port 8080 # API proxy (compresses full request payloads)
 ```
 
-## Track Your Savings
+## Track Your Own Savings
+
+Run `sqz gain` in your shell any time to see your own daily breakdown (see the
+Token Savings section above for what the output looks like), and `sqz stats`
+for the full cumulative report:
 
 ```sh
-$ sqz gain
-sqz token savings (last 7 days)
-──────────────────────────────────────────────────
-  04-13 │█████                         │ 2329 saved
-  04-14 │                              │ 0 saved
-  04-15 │██████████████████████████████│ 12954 saved
-  04-16 │████████████                  │ 5532 saved
-──────────────────────────────────────────────────
-  Total: 1178 compressions, 19214 tokens saved
+$ sqz stats
+┌─────────────────────────┬──────────────────┐
+│           sqz compression stats            │
+├─────────────────────────┼──────────────────┤
+│ Total compressions      │            3,003 │
+│ Tokens saved            │          178,442 │
+│ Avg reduction           │            24.7% │
+│ Cache entries           │               43 │
+│ Cache size              │          39.1 KB │
+└─────────────────────────┴──────────────────┘
 ```
+
+Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves your machine.
 
 ## How Compression Works
 

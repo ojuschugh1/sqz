@@ -5,6 +5,54 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-04-21
+
+### Added
+
+- **`sqz init --global` / `-g`** — installs Claude Code hooks to user-scope
+  `~/.claude/settings.json` so compression works across all projects without
+  per-repo setup. Merges with existing user settings (preserves permissions,
+  env, statusLine, unrelated hooks). Following RTK's model and Anthropic's
+  official scope table (Managed > Local > Project > User).
+- **Native OpenAI Codex integration** — `sqz init` now configures Codex via
+  `~/.codex/config.toml` MCP server entry.
+- **Release workflow ships sqz-mcp** — both `sqz` and `sqz-mcp` binaries are
+  now built and packaged for all 5 platforms. npm/pip/curl installers updated
+  to install both (sqz-mcp is optional — soft failure if tarball missing).
+
+### Fixed
+
+- **npm install silent failure** — the postinstall script expected sqz-mcp
+  tarballs that weren't in the release. Now handles missing sqz-mcp gracefully
+  and rejects tarballs that unpack as directories instead of binaries.
+- **`sqz init` project-scope was invisible across projects** — hooks written to
+  `.claude/settings.local.json` only applied inside that one repo. `--global`
+  is now the recommended first-install path (documented in README).
+- **OpenCode plugin double-wrap** — `SQZ_CMD=SQZ_CMD=ddev ...` runaway prefix
+  from issue #5 follow-up. Added `isAlreadyWrapped()` guard checking for
+  `SQZ_CMD=`, `sqz compress`, pipe-to-sqz, and bare sqz invocations.
+- **OpenCode plugin env-var base extraction** — `FOO=bar make test` now picks
+  `make` as the base command, not `FOO=bar`.
+- **MCP `tools/list` outputSchema** (issue #5) — dropped invalid
+  `outputSchema: {type: "string"}` from all tools. OpenCode's validator
+  requires `type: "object"` when present; our tools return plain text so
+  outputSchema is now omitted entirely.
+
+### Changed
+
+- `sqz uninstall` now also cleans up user-scope Claude Code settings
+  (`~/.claude/settings.json`), removing only sqz entries and preserving
+  everything else.
+- README updated: `--global` is the recommended install path, Star History
+  chart added.
+
+### Testing
+
+- 1062 tests total, 0 failures
+- 8 new tests for global install: fresh install, merge semantics, idempotency,
+  stale-hook upgrade, uninstall preserves user config, uninstall deletes
+  sqz-only files, no-op on missing, refuses corrupted JSON
+
 ## [0.9.0] — 2026-04-20
 
 ## [0.8.0] — 2026-04-19
