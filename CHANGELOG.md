@@ -5,6 +5,17 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] — 2026-04-21
+
+### Fixed
+
+- **CI: Exclude sqz-wasm from native builds** — `sqz-wasm` depends on
+  `wasm-bindgen` which can't compile for non-wasm targets. The release
+  workflow now uses `--bin sqz --bin sqz-mcp` (single command, two binaries)
+  instead of building the full workspace. Benchmarks use `--exclude sqz-wasm`.
+  Docs use `--exclude sqz-wasm`. This was the root cause of v1.0.0, v1.0.1,
+  and v1.0.2 build failures on Linux and macOS.
+
 ## [1.0.2] — 2026-04-21
 
 ### Fixed

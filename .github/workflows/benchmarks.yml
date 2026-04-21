@@ -42,6 +42,6 @@ jobs:
           RUST_BACKTRACE: 1
 
       - name: Run full test suite (regression gate)
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude sqz-wasm
         env:
           RUST_BACKTRACE: 1

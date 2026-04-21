@@ -83,11 +83,11 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} --bin sqz --bin sqz-mcp
 
       - name: Build (native)
         if: "!matrix.cross"
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --bin sqz --bin sqz-mcp
 
       # ── Package ────────────────────────────────────────────────────────────
       #
