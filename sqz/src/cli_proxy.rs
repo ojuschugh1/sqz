@@ -83,6 +83,37 @@ struct CacheEntry {
     tokens_original: u32,
 }
 
+/// Per-call options for [`CliProxy::intercept_output_with_options`].
+///
+/// Designed to grow: today it only carries `no_cache`, but future flags
+/// (think: `disable_abbreviator`, `plain_text_only`, `rate_limit_refs`)
+/// will live here too. Builder-lite pattern so callers that want the
+/// default path stay on the short-form `intercept_output`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InterceptOptions {
+    /// Skip both L1 and L2 dedup lookups. The compression pipeline still
+    /// runs; the 13-token `§ref:…§` shortcut never fires. Useful for
+    /// models that can't parse inline refs (reported for GLM 5.1 on
+    /// Synthetic).
+    pub no_cache: bool,
+}
+
+impl InterceptOptions {
+    /// Build an `InterceptOptions` reflecting the current environment.
+    ///
+    /// Today this only looks at `SQZ_NO_DEDUP`. Any value other than "0"
+    /// or an empty string flips `no_cache` on — matches the pattern
+    /// other sqz env vars use. Leaves the door open to more env vars
+    /// later (e.g. `SQZ_MODEL_PROFILE=conservative` in a follow-up).
+    pub fn from_env() -> Self {
+        let no_cache = match std::env::var("SQZ_NO_DEDUP") {
+            Ok(v) => !v.is_empty() && v != "0",
+            Err(_) => false,
+        };
+        Self { no_cache }
+    }
+}
+
 pub struct CliProxy {
     engine: SqzEngine,
     /// In-memory L1 dedup cache (fast hash → seen).
@@ -130,6 +161,31 @@ impl CliProxy {
     /// On any compression error the original `output` is returned unchanged
     /// and the error is logged to stderr (Requirement 1.5 fallback).
     pub fn intercept_output(&self, cmd: &str, output: &str) -> String {
+        self.intercept_output_with_options(cmd, output, InterceptOptions::default())
+    }
+
+    /// Variant of [`intercept_output`] that lets the caller disable the
+    /// dedup cache on a per-call basis.
+    ///
+    /// Added after SquireNed reported on the Synthetic discord that
+    /// GLM 5.1 hits a thrash loop when served a `§ref:…§` token it
+    /// can't parse. `InterceptOptions { no_cache: true }` skips both
+    /// L1 and L2 dedup lookups so the agent gets the full compressed
+    /// output every time — strictly more tokens, strictly less
+    /// ambiguous. Callers still benefit from per-command formatters
+    /// and the compression pipeline; this flag only disables the
+    /// 13-token `§ref§` shortcut.
+    ///
+    /// The flag is also honoured via the `SQZ_NO_DEDUP=1` environment
+    /// variable so that shell hooks and agent tools can flip it
+    /// without any plumbing change. See `cmd_compress` in main.rs for
+    /// the env parsing.
+    pub fn intercept_output_with_options(
+        &self,
+        cmd: &str,
+        output: &str,
+        opts: InterceptOptions,
+    ) -> String {
         // Always track file reads for cross-command context refs,
         // even if the content is a dedup hit (the file is still "known").
         self.track_file(cmd, output);
@@ -140,7 +196,7 @@ impl CliProxy {
 
         // Step 1: L1 in-memory dedup check (fast path)
         let fast_hash = content_hash(output);
-        if self.l1_cache.borrow().contains(&fast_hash) {
+        if !opts.no_cache && self.l1_cache.borrow().contains(&fast_hash) {
             // L1 hit — check L2 persistent cache for the actual ref
             if let Ok(Some(inline_ref)) = self.engine.cache_manager().check_dedup(output.as_bytes()) {
                 eprintln!("[sqz] dedup hit: {} (L1+L2)", inline_ref);
@@ -150,12 +206,14 @@ impl CliProxy {
         }
 
         // Step 2: L2 persistent SHA-256 dedup check (survives restarts)
-        if let Ok(Some(inline_ref)) = self.engine.cache_manager().check_dedup(output.as_bytes()) {
-            // Promote to L1 for faster future lookups
-            self.l1_cache.borrow_mut().insert(fast_hash);
-            eprintln!("[sqz] dedup hit: {} (L2)", inline_ref);
-            self.log_dedup_hit(cmd, output);
-            return inline_ref;
+        if !opts.no_cache {
+            if let Ok(Some(inline_ref)) = self.engine.cache_manager().check_dedup(output.as_bytes()) {
+                // Promote to L1 for faster future lookups
+                self.l1_cache.borrow_mut().insert(fast_hash);
+                eprintln!("[sqz] dedup hit: {} (L2)", inline_ref);
+                self.log_dedup_hit(cmd, output);
+                return inline_ref;
+            }
         }
 
         // Step 3: Try per-command formatter

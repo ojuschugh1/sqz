@@ -81,7 +81,13 @@ END;
 CREATE TABLE IF NOT EXISTS cache_entries (
     hash        TEXT PRIMARY KEY,
     data        TEXT NOT NULL,
-    accessed_at TEXT NOT NULL
+    accessed_at TEXT NOT NULL,
+    -- Raw pre-compression bytes so `sqz expand <prefix>` can serve
+    -- truly uncompressed content to agents that cannot parse
+    -- `§ref:…§` dedup tokens. Nullable because the column was added
+    -- in an additive migration; rows written before that migration
+    -- (or via callers that don't have the original bytes) have NULL.
+    original    BLOB
 );
 
 CREATE TABLE IF NOT EXISTS compression_log (
@@ -112,7 +118,26 @@ CREATE TABLE IF NOT EXISTS metadata (
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub(crate) fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    // Additive migration: add `original` BLOB column to cache_entries if
+    // it does not yet exist. Stores the raw pre-compression bytes so
+    // `sqz expand <prefix>` can return truly uncompressed content when
+    // an agent cannot parse `§ref:…§` tokens (reported on-list by
+    // SquireNed for GLM 5.1). `NULL` for rows written by older sqz
+    // versions — `expand` treats those as "original unavailable, fall
+    // back to the compressed blob" so users don't get spurious errors
+    // on pre-migration data.
+    //
+    // Using pragma_table_info rather than a version table because the
+    // rest of sqz does the same — this is the first additive migration.
+    let has_original: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('cache_entries') WHERE name = 'original'")?
+        .query_row([], |_| Ok(()))
+        .is_ok();
+    if !has_original {
+        conn.execute("ALTER TABLE cache_entries ADD COLUMN original BLOB", [])?;
+    }
+    Ok(())
 }
 
 fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
@@ -345,16 +370,68 @@ impl SessionStore {
     // ── Cache entries ─────────────────────────────────────────────────────────
 
     /// Persist a cache entry keyed by content hash.
+    ///
+    /// Stores both the compressed JSON (`data`) used for dedup-hit
+    /// responses AND the raw uncompressed bytes (`original`) so that
+    /// `sqz expand <prefix>` can serve truly uncompressed content. See
+    /// [`save_cache_entry_with_original`] for the original-aware version;
+    /// this convenience wrapper exists for callers that do not (yet)
+    /// have the pre-compression bytes handy. Rows written through this
+    /// path leave `original` as `NULL`, and `expand` will degrade to
+    /// returning the compressed blob with a note.
     pub fn save_cache_entry(&self, hash: &str, compressed: &CompressedContent) -> Result<()> {
+        self.save_cache_entry_with_original(hash, compressed, None)
+    }
+
+    /// Persist a cache entry with both compressed and original content.
+    ///
+    /// `original` must be the exact bytes that produced `compressed`, so
+    /// that `expand` is a true inverse of dedup. We store the raw bytes
+    /// (not the UTF-8 string) because command output may include
+    /// non-UTF-8 sequences — storing the text would lose them.
+    pub fn save_cache_entry_with_original(
+        &self,
+        hash: &str,
+        compressed: &CompressedContent,
+        original: Option<&[u8]>,
+    ) -> Result<()> {
         let data = serde_json::to_string(compressed)?;
         let now = Utc::now().to_rfc3339();
         self.db.execute(
-            r#"INSERT INTO cache_entries (hash, data, accessed_at)
-               VALUES (?1, ?2, ?3)
-               ON CONFLICT(hash) DO UPDATE SET data = excluded.data, accessed_at = excluded.accessed_at"#,
-            params![hash, data, now],
+            r#"INSERT INTO cache_entries (hash, data, accessed_at, original)
+               VALUES (?1, ?2, ?3, ?4)
+               ON CONFLICT(hash) DO UPDATE
+                   SET data = excluded.data,
+                       accessed_at = excluded.accessed_at,
+                       -- Don't overwrite a previously-stored `original`
+                       -- with NULL. Older callers (that go through
+                       -- save_cache_entry rather than the _with_original
+                       -- variant) shouldn't erase the expand-able bytes.
+                       original = COALESCE(excluded.original, original)"#,
+            params![hash, data, now, original],
         )?;
         Ok(())
+    }
+
+    /// Retrieve the stored original bytes for a cached hash, if the
+    /// caller populated them via `save_cache_entry_with_original`.
+    ///
+    /// Returns `Ok(None)` for missing entries AND for entries that were
+    /// saved by an older call site that did not pass `original`. The
+    /// caller should fall back to the compressed blob in the latter case
+    /// and surface a note to the user so they know this specific entry
+    /// wasn't round-trippable.
+    pub fn get_cache_entry_original(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        let result: rusqlite::Result<Option<Vec<u8>>> = self.db.query_row(
+            "SELECT original FROM cache_entries WHERE hash = ?1",
+            params![hash],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(v) => Ok(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(SqzError::SessionStore(e)),
+        }
     }
 
     /// Delete a cache entry by content hash.
@@ -406,6 +483,72 @@ impl SessionStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(SqzError::SessionStore(e)),
         }
+    }
+
+    /// Look up a cache entry by a **prefix** of the content hash.
+    ///
+    /// The inline dedup refs we hand to the LLM carry only the first 16
+    /// hex chars of the SHA-256 (`§ref:<16-hex>§`), so when an agent runs
+    /// `sqz expand <prefix>` we need to resolve those 16 chars back to the
+    /// full 64-char key. Uses `LIKE 'prefix%'` with an index-friendly
+    /// anchored pattern so the query stays O(log n) on the primary key.
+    ///
+    /// Returns `Ok(Some((full_hash, entry)))` on unique match.
+    /// Returns `Ok(None)` if no entries match.
+    /// Returns `Err(_)` if the prefix is ambiguous (2+ matches) — the
+    /// caller should tell the user to use a longer prefix. 16-hex
+    /// collisions are astronomically unlikely (one in 2^64) but we
+    /// refuse to guess rather than quietly serve a surprise file.
+    ///
+    /// The prefix is validated as lowercase hex. Non-hex input returns
+    /// `None` without touching the database — this is how we handle the
+    /// common user-error case of pasting the ref with the `§` markers
+    /// still attached (they get rejected before we query SQLite).
+    pub fn get_cache_entry_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<(String, CompressedContent)>> {
+        // Reject anything that isn't pure lowercase hex. The inline refs
+        // we emit are always lowercase so there's no reason to case-fold
+        // here; accidentally matching uppercase input would also match
+        // unrelated entries if someone hand-crafted a collision.
+        if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+            return Ok(None);
+        }
+        let pattern = format!("{prefix}%");
+        let mut stmt = self
+            .db
+            .prepare("SELECT hash, data FROM cache_entries WHERE hash LIKE ?1 LIMIT 2")?;
+        let mut rows = stmt.query(params![pattern])?;
+
+        let first = match rows.next()? {
+            Some(r) => {
+                let hash: String = r.get(0)?;
+                let data: String = r.get(1)?;
+                (hash, data)
+            }
+            None => return Ok(None),
+        };
+
+        // Two or more hits — refuse. Prefix ambiguity is user-recoverable:
+        // rerun with a longer prefix. Matching one arbitrarily would be
+        // a silent data surprise.
+        if rows.next()?.is_some() {
+            return Err(SqzError::Other(format!(
+                "cache: prefix '{prefix}' matches multiple entries — use a longer prefix"
+            )));
+        }
+        drop(rows);
+        drop(stmt);
+
+        // Touch accessed_at for LRU tracking — symmetric with get_cache_entry.
+        let now = Utc::now().to_rfc3339();
+        let _ = self.db.execute(
+            "UPDATE cache_entries SET accessed_at = ?1 WHERE hash = ?2",
+            params![now, first.0],
+        );
+        let entry: CompressedContent = serde_json::from_str(&first.1)?;
+        Ok(Some((first.0, entry)))
     }
 
     /// Read the `accessed_at` timestamp for a cached hash without updating

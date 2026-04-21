@@ -120,9 +120,29 @@ Do NOT pipe output for:
 If `sqz` is not on PATH, run commands normally.
 
 The `sqz-mcp` MCP server is also available — Codex reads it from
-`~/.codex/config.toml` under `[mcp_servers.sqz]`. Call the `compress`
-tool directly when you want to compress an already-captured text blob
-rather than piping a fresh shell command.
+`~/.codex/config.toml` under `[mcp_servers.sqz]`. It exposes three
+tools: `compress` (the default pipeline), `passthrough` (return text
+unchanged — the escape hatch below), and `expand` (resolve a
+`§ref:HASH§` token back to the original bytes).
+
+## Escape hatch — when sqz output confuses you
+
+If you see a `§ref:HASH§` token and can't parse it, or compressed
+output is leading you to make lots of small retries instead of one
+big request, use one of these:
+
+- **`{sqz_path} expand <prefix>`** — resolve a dedup ref back to the
+  original bytes. Accepts bare hex (`sqz expand a1b2c3d4`) or the full
+  token pasted verbatim (`sqz expand §ref:a1b2c3d4§`).
+- **`SQZ_NO_DEDUP=1`** — set this env var for one command to disable
+  dedup: `SQZ_NO_DEDUP=1 git status 2>&1 | sqz compress`. You'll get
+  the full compressed output with no `§ref:…§` tokens.
+- **`--no-cache`** — same opt-out as a CLI flag:
+  `git status 2>&1 | sqz compress --no-cache`.
+
+If you're using the MCP server, the `passthrough` tool returns raw
+text and the `expand` tool resolves refs — call them when you need
+data sqz hasn't touched.
 
 {end}
 ",

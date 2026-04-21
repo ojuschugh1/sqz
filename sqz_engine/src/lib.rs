@@ -159,7 +159,7 @@ pub use tool_selector::{ToolDefinition, ToolSelector};
 pub use budget_tracker::{
     AgentBudget, BudgetTracker, BudgetWarning, UsagePrediction, UsageReport,
 };
-pub use cache_manager::{CacheManager, CacheResult};
+pub use cache_manager::{CacheManager, CacheResult, ExpandResult};
 pub use correction_log::ContextWindow;
 pub use crp_engine::{CrpEngine, CrpLevel};
 pub use cost_calculator::{

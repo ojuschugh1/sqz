@@ -305,6 +305,34 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
     let sqz_path_json = json_escape_string_value(sqz_path);
     let sqz_path = &sqz_path_json;
 
+    // Escape-hatch paragraph shared across every markdown-style rules
+    // file (Cursor/Windsurf/Cline). Documents the three ways an agent
+    // can opt out of compression when it can't parse sqz's output.
+    // Reported by SquireNed on Synthetic: GLM 5.1 loops on `§ref:…§`
+    // dedup tokens. Visible-in-every-rules-file so any agent reading
+    // the rules sees the escape hatch, not just the one that hit the
+    // loop.
+    let escape_hatch = format!(
+        r#"## Escape hatch — when sqz output confuses the agent
+
+If you see a `§ref:HASH§` token in tool output and can't parse it, or if
+compressed output is making it harder to work (loops, repeated tiny
+requests), you have three ways out:
+
+- **`{sqz_path_raw} expand <prefix>`** — resolve a ref back to the
+  original bytes. Accepts the bare hex prefix (`sqz expand a1b2c3d4`)
+  or the full token pasted verbatim (`sqz expand §ref:a1b2c3d4§`).
+- **`SQZ_NO_DEDUP=1`** — set this env var (e.g. `SQZ_NO_DEDUP=1 git
+  status 2>&1 | sqz compress`) to disable dedup for that one command.
+  Strictly more tokens, strictly less ambiguous.
+- **`--no-cache`** — the same opt-out as a CLI flag:
+  `git status 2>&1 | sqz compress --no-cache`.
+
+Use these when you genuinely need raw data. The default compressed
+path is still what you want for most output."#,
+    );
+    let escape_hatch = &escape_hatch;
+
     vec![
         // Claude Code — goes in .claude/settings.local.json (nested format)
         // Three hooks, each addressing a different concern:
@@ -409,6 +437,8 @@ Do NOT pipe output for:
 - Short commands whose output is already a few lines
 
 If `sqz` is not on PATH, run commands normally.
+
+{escape_hatch}
 "#
             ),
             scope: HookScope::Project,
@@ -439,6 +469,8 @@ paths, and identifiers (typically 60-90% token reduction on verbose
 commands). Skip short commands, interactive commands (vim, ssh, python),
 and commands with shell operators (`&&`, `||`, `;`, `>`, `<`). If sqz is
 not on PATH, run commands normally.
+
+{escape_hatch}
 "#
             ),
             scope: HookScope::Project,
@@ -469,6 +501,8 @@ paths, and identifiers (typically 60-90% token reduction on verbose
 commands). Skip short commands, interactive commands (vim, ssh, python),
 and commands with shell operators (`&&`, `||`, `;`, `>`, `<`). If sqz is
 not on PATH, run commands normally.
+
+{escape_hatch}
 "#
             ),
             scope: HookScope::Project,

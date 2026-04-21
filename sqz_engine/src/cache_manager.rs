@@ -38,6 +38,35 @@ pub enum CacheResult {
     Fresh { output: CompressedContent },
 }
 
+/// Result of resolving a dedup-ref prefix via
+/// [`CacheManager::expand_prefix`].
+///
+/// Two shapes because not every stored entry can be round-tripped to the
+/// raw bytes: cache entries written before the `original` column was
+/// introduced (or by a code path that didn't thread originals through)
+/// fall into `CompressedOnly`. The CLI uses this to pick a message for
+/// the user.
+#[derive(Debug, Clone)]
+pub enum ExpandResult {
+    /// Full pre-compression bytes available — this is what `sqz expand`
+    /// was invented to return.
+    Original {
+        /// Full 64-hex SHA-256 of the original content. Lets callers
+        /// print `expanded a1b2c3d4 (full hash a1b2c3d4…)`.
+        hash: String,
+        /// The raw bytes the agent asked to see.
+        bytes: Vec<u8>,
+    },
+    /// Only the compressed form is stored. Agent still gets legible
+    /// output; the CLI attaches a note so the user knows why re-running
+    /// uncompressed may be worthwhile.
+    CompressedOnly {
+        hash: String,
+        /// Compressed text as served to the LLM originally.
+        compressed: String,
+    },
+}
+
 /// Tracks when a dedup ref was last sent, so we can detect staleness.
 ///
 /// Historically used for an in-memory per-process turn counter; now kept
@@ -283,7 +312,9 @@ impl CacheManager {
             };
             let preset = Preset::default();
             let compressed = pipeline.compress(&text, &ctx, &preset)?;
-            self.store.save_cache_entry(&hash, &compressed)?;
+            // Persist the raw bytes so `sqz expand <prefix>` can round-trip.
+            self.store
+                .save_cache_entry_with_original(&hash, &compressed, Some(content))?;
             self.record_ref_sent(&hash);
 
             let token_cost = (delta_result.delta_text.len() / 4) as u32;
@@ -299,7 +330,8 @@ impl CacheManager {
         };
         let preset = Preset::default();
         let compressed = pipeline.compress(&text, &ctx, &preset)?;
-        self.store.save_cache_entry(&hash, &compressed)?;
+        self.store
+            .save_cache_entry_with_original(&hash, &compressed, Some(content))?;
         // Record that this content was sent at the current turn
         self.record_ref_sent(&hash);
 
@@ -361,15 +393,60 @@ impl CacheManager {
     /// SHA-256 hash of the original content.
     ///
     /// Also records the ref as sent at the current turn for compaction tracking.
+    /// Persists `original_content` alongside `compressed` so that
+    /// `sqz expand <prefix>` can recover the raw bytes for agents that
+    /// cannot parse `§ref:…§` dedup tokens.
     pub fn store_compressed(
         &self,
         original_content: &[u8],
         compressed: &CompressedContent,
     ) -> Result<()> {
         let hash = Self::sha256_hex(original_content);
-        self.store.save_cache_entry(&hash, compressed)?;
+        self.store
+            .save_cache_entry_with_original(&hash, compressed, Some(original_content))?;
         self.record_ref_sent(&hash);
         Ok(())
+    }
+
+    /// Resolve a hex prefix (the 16-char tail of a `§ref:<prefix>§` token,
+    /// or any longer hex string pasted by a user) to the cached content.
+    ///
+    /// Designed for the `sqz expand <prefix>` CLI: the agent sees a ref
+    /// token it can't parse, runs `sqz expand a1b2c3d4e5f6g7h8`, and gets
+    /// back the raw bytes that produced the ref. This is the
+    /// user-visible escape hatch SquireNed asked for.
+    ///
+    /// Three outcomes:
+    ///
+    /// * `Ok(Some(Original))` — the original bytes were captured when
+    ///   the entry was stored (new cache entries from v0.10.0+ always
+    ///   capture the original). Write `bytes` to stdout.
+    /// * `Ok(Some(CompressedOnly))` — the entry exists but its `original`
+    ///   column is `NULL` (pre-migration data). We still return the
+    ///   compressed form — always legible, always useful — and the CLI
+    ///   surfaces a note that tells the user to re-run their original
+    ///   command with `--no-cache` to capture a truly uncompressed copy.
+    /// * `Ok(None)` — no entry matches. Usually means the ref was
+    ///   truncated from a different sqz database (a different machine,
+    ///   a wiped `~/.sqz/sessions.db`, etc.).
+    /// * `Err(_)` — prefix was ambiguous or the DB is broken. The error
+    ///   carries a user-readable message explaining what went wrong.
+    ///
+    /// Touches `accessed_at` on hit (consistent with `get_cache_entry`).
+    pub fn expand_prefix(&self, prefix: &str) -> Result<Option<ExpandResult>> {
+        let Some((hash, compressed_entry)) = self.store.get_cache_entry_by_prefix(prefix)? else {
+            return Ok(None);
+        };
+
+        // Prefer the original bytes when we have them — that's the
+        // whole point of this feature.
+        if let Some(bytes) = self.store.get_cache_entry_original(&hash)? {
+            return Ok(Some(ExpandResult::Original { hash, bytes }));
+        }
+        Ok(Some(ExpandResult::CompressedOnly {
+            hash,
+            compressed: compressed_entry.data,
+        }))
     }
 
     /// Invalidate the cache entry for `path` if its current content is known.
@@ -767,6 +844,202 @@ mod tests {
         assert_eq!(cm.current_turn(), 1);
         cm.advance_turn();
         assert_eq!(cm.current_turn(), 2);
+    }
+
+    // ── Expand feature tests ────────────────────────────────────────────
+
+    #[test]
+    fn expand_returns_original_bytes_for_new_entry() {
+        // New cache entries (written after the `original` column migration)
+        // must always round-trip back to the exact bytes the agent sent.
+        // This is the core guarantee `sqz expand` exists to provide.
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        let path = Path::new("x.txt");
+        let content = b"hello\nworld\nthis is the original\n";
+
+        // Seed the cache by running the content through get_or_compress.
+        let first = cm.get_or_compress(path, content, &pipeline).unwrap();
+        let CacheResult::Fresh { .. } = first else {
+            panic!("first read should be a Fresh miss, got something else");
+        };
+
+        // Find the ref prefix by doing a second read (which dedups).
+        let second = cm.get_or_compress(path, content, &pipeline).unwrap();
+        let inline_ref = match second {
+            CacheResult::Dedup { inline_ref, .. } => inline_ref,
+            _ => panic!("second read should dedup"),
+        };
+
+        // Strip the `§ref:` / `§` wrappers to get the raw prefix.
+        let prefix = inline_ref
+            .strip_prefix("§ref:")
+            .and_then(|s| s.strip_suffix('§'))
+            .expect("unexpected ref format");
+
+        let result = cm.expand_prefix(prefix).unwrap().expect("expand hit expected");
+        match result {
+            ExpandResult::Original { bytes, hash } => {
+                assert_eq!(bytes, content, "expand must return exact original bytes");
+                assert!(
+                    hash.starts_with(prefix),
+                    "returned full hash {hash} must start with prefix {prefix}"
+                );
+                assert_eq!(hash.len(), 64, "full SHA-256 must be 64 hex chars");
+            }
+            ExpandResult::CompressedOnly { .. } => {
+                panic!("new cache entries must carry the original bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn expand_prefix_rejects_nonhex_input() {
+        // Agents paste all sorts of things — ref tokens with the §'s still
+        // attached, mixed-case hashes, stray whitespace. The store layer
+        // normalises most of this but we also want to reject obvious
+        // garbage without touching SQLite.
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        assert!(cm.expand_prefix("").unwrap().is_none(), "empty prefix is no-match");
+        assert!(cm.expand_prefix("not a hex").unwrap().is_none());
+        assert!(cm.expand_prefix("ABCDEF").unwrap().is_none(), "uppercase hex should not match (sqz emits lowercase)");
+        assert!(cm.expand_prefix("g0g0g0").unwrap().is_none());
+    }
+
+    #[test]
+    fn expand_prefix_returns_none_for_unknown_prefix() {
+        // Very common in practice: agent pastes a ref from a different
+        // machine, a different sqz install, or after a cache wipe.
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        // Seed one entry.
+        let _ = cm
+            .get_or_compress(
+                Path::new("y.txt"),
+                b"some cached content that won't match the prefix below",
+                &pipeline,
+            )
+            .unwrap();
+        assert!(
+            cm.expand_prefix("0000000000000000").unwrap().is_none(),
+            "prefix that matches nothing must return None, not error"
+        );
+    }
+
+    #[test]
+    fn expand_prefix_errors_on_ambiguous_match() {
+        // Two entries whose hashes both start with the same hex prefix
+        // must be detected and reported. The caller is expected to
+        // surface "use a longer prefix" — we don't want to silently
+        // pick one.
+        let (store, _dir) = in_memory_store();
+        // Hand-craft two entries with prefixes that collide on "ab".
+        let compressed = crate::types::CompressedContent {
+            data: "compressed-a".to_string(),
+            tokens_compressed: 1,
+            tokens_original: 10,
+            stages_applied: vec![],
+            compression_ratio: 0.1,
+            provenance: Default::default(),
+            verify: None,
+        };
+        store
+            .save_cache_entry_with_original(
+                &format!("ab{}", "0".repeat(62)),
+                &compressed,
+                Some(b"content a"),
+            )
+            .unwrap();
+        store
+            .save_cache_entry_with_original(
+                &format!("ab{}", "1".repeat(62)),
+                &compressed,
+                Some(b"content b"),
+            )
+            .unwrap();
+
+        let cm = CacheManager::new(store, u64::MAX);
+        // Unambiguous 3-char prefixes resolve:
+        let ok_a = cm.expand_prefix(&format!("ab{}", "0")).unwrap().unwrap();
+        assert!(matches!(ok_a, ExpandResult::Original { .. }));
+        // Ambiguous 2-char prefix errors out.
+        let err = cm.expand_prefix("ab").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("multiple entries") || msg.contains("longer prefix"),
+            "ambiguity error should mention multiple matches / longer prefix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn expand_returns_compressed_only_for_pre_migration_entry() {
+        // Entries written via `save_cache_entry` (without the `_with_original`
+        // suffix) leave the `original` column NULL. Expand must still return
+        // something useful — the compressed blob — with a note (handled by
+        // the CLI). Here we assert the engine returns the right variant.
+        let (store, _dir) = in_memory_store();
+        let compressed = crate::types::CompressedContent {
+            data: "the compressed version".to_string(),
+            tokens_compressed: 4,
+            tokens_original: 100,
+            stages_applied: vec!["condense".to_string()],
+            compression_ratio: 0.04,
+            provenance: Default::default(),
+            verify: None,
+        };
+        // Deliberately use the legacy save_cache_entry (no original).
+        let hash = format!("deadbeef{}", "0".repeat(56));
+        store.save_cache_entry(&hash, &compressed).unwrap();
+
+        let cm = CacheManager::new(store, u64::MAX);
+        let result = cm
+            .expand_prefix("deadbeef")
+            .unwrap()
+            .expect("deadbeef prefix should match");
+        match result {
+            ExpandResult::CompressedOnly { compressed, hash: h } => {
+                assert_eq!(compressed, "the compressed version");
+                assert_eq!(h, hash);
+            }
+            ExpandResult::Original { .. } => {
+                panic!("legacy entry without original bytes should return CompressedOnly");
+            }
+        }
+    }
+
+    #[test]
+    fn expand_preserves_non_utf8_original_bytes() {
+        // Shell output routinely contains non-UTF-8 sequences (terminal
+        // control codes, binary blobs from `cat` on a wrong file, etc.).
+        // Expand must round-trip byte-for-byte — not through a UTF-8
+        // lossy conversion — or agents auditing the cache will see
+        // spurious `\uFFFD` REPLACEMENT CHARACTER bytes.
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+
+        // Mix of valid UTF-8 and isolated 0xFF bytes.
+        let content: Vec<u8> = vec![
+            b'h', b'e', b'l', b'l', b'o', b'\n',
+            0xFF, 0xFE, 0xFD,
+            b'\n',
+        ];
+        let path = Path::new("bin.dat");
+        let _ = cm.get_or_compress(path, &content, &pipeline).unwrap();
+        // Round-trip via expand_prefix.
+        let hash = CacheManager::sha256_hex(&content);
+        let result = cm.expand_prefix(&hash[..16]).unwrap().unwrap();
+        match result {
+            ExpandResult::Original { bytes, .. } => {
+                assert_eq!(bytes, content, "non-UTF-8 bytes must round-trip exactly");
+            }
+            ExpandResult::CompressedOnly { .. } => {
+                panic!("fresh entry should have original bytes");
+            }
+        }
     }
 
     #[test]

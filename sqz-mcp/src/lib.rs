@@ -201,10 +201,37 @@ impl McpServer {
         }
     }
 
-    /// Process a tool call: serialize input JSON → compress → return response.
+    /// Process a tool call: dispatch by tool ID and return the response.
+    ///
+    /// Tools we handle:
+    ///
+    /// * `compress` — run the input `text` through the full sqz pipeline.
+    ///   The default, and the reason sqz-mcp exists.
+    /// * `passthrough` — return `text` unchanged. Intended for models
+    ///   (reported: GLM 5.1 on Synthetic) that loop when they see
+    ///   `§ref:…§` dedup tokens in compressed output. Letting the agent
+    ///   explicitly ask for raw data turns a thrash loop into one honest
+    ///   tool call.
+    /// * `expand` — resolve a `§ref:<prefix>§` token (or bare hex prefix)
+    ///   back to the original pre-compression bytes from the cache.
+    ///   Matches the behaviour of `sqz expand` on the CLI.
+    ///
+    /// Unknown tool IDs fall back to `compress` to preserve backward
+    /// compatibility — early sqz-mcp releases had only one tool and
+    /// callers may still send tool_id="compress" or an empty string.
     pub fn handle_tool_call(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
         self.apply_pending_preset();
 
+        match request.tool_id.as_str() {
+            "passthrough" => self.handle_passthrough(request),
+            "expand" => self.handle_expand(request),
+            // Default and explicit "compress": run the pipeline.
+            _ => self.handle_compress(request),
+        }
+    }
+
+    /// Compress pipeline — the historical default.
+    fn handle_compress(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
         // Serialize the input JSON to a string for compression.
         let raw_input = serde_json::to_string(&request.input)
             .map_err(|e| SqzError::Other(format!("input serialization error: {e}")))?;
@@ -218,6 +245,90 @@ impl McpServer {
             output: compressed.data,
             tokens_original,
             tokens_compressed,
+        })
+    }
+
+    /// Passthrough: return `input.text` unchanged.
+    ///
+    /// Designed as a cooperation point with agents that can't (or won't)
+    /// parse sqz's compressed output. The agent explicitly asks for raw
+    /// data, sqz honours the ask, and we avoid the thrash-loop failure
+    /// mode. Reported by SquireNed on Synthetic for GLM 5.1.
+    ///
+    /// Accepts the same `{text: string}` input shape as `compress` so
+    /// the two tools are trivially interchangeable. If the input is
+    /// JSON without a `text` key, we fall back to re-serialising the
+    /// whole object — strictly less useful than calling the right tool,
+    /// but never destructive.
+    fn handle_passthrough(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
+        let text = match request.input.get("text").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => {
+                // Best-effort: serialize the whole input.
+                serde_json::to_string(&request.input)
+                    .map_err(|e| SqzError::Other(format!("input serialization error: {e}")))?
+            }
+        };
+        let tokens = estimate_tokens(&text);
+        Ok(ToolCallResponse {
+            tool_id: request.tool_id,
+            output: text,
+            tokens_original: tokens,
+            // Passthrough is 1:1 — original == compressed so stats
+            // stay honest.
+            tokens_compressed: tokens,
+        })
+    }
+
+    /// Expand: look up a dedup ref prefix in the cache and return the
+    /// original bytes (or the compressed form if originals weren't
+    /// captured for that entry).
+    ///
+    /// Input: `{ "prefix": "a1b2c3d4" }` or `{ "prefix": "§ref:a1b2c3d4§" }`.
+    fn handle_expand(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
+        let raw = request
+            .input
+            .get("prefix")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                SqzError::Other("expand: input must be { \"prefix\": \"<hex>\" }".to_string())
+            })?;
+        // Strip the `§ref:…§` wrapper so callers can paste the token raw.
+        let prefix = raw
+            .trim()
+            .trim_start_matches('§')
+            .trim_start_matches("ref:")
+            .trim_end_matches('§')
+            .trim();
+
+        let result = self.engine.cache_manager().expand_prefix(prefix)?;
+        let output = match result {
+            Some(sqz_engine::ExpandResult::Original { bytes, hash }) => {
+                // Best-effort UTF-8 conversion. Non-UTF-8 bytes become
+                // the replacement character in the MCP response — this
+                // is a necessary concession because JSON-RPC strings
+                // must be UTF-8. Agents that truly need binary-safe
+                // output should use the CLI's `sqz expand` which writes
+                // raw bytes to stdout.
+                let as_text = String::from_utf8_lossy(&bytes).into_owned();
+                format!("[sqz:expand hash={hash}]\n{as_text}")
+            }
+            Some(sqz_engine::ExpandResult::CompressedOnly { compressed, hash }) => {
+                format!(
+                    "[sqz:expand hash={hash} note=compressed-only (predates original-capture migration)]\n{compressed}"
+                )
+            }
+            None => {
+                format!("[sqz:expand hash-not-found prefix={prefix}]")
+            }
+        };
+
+        let tokens = estimate_tokens(&output);
+        Ok(ToolCallResponse {
+            tool_id: request.tool_id,
+            output,
+            tokens_original: tokens,
+            tokens_compressed: tokens,
         })
     }
 
@@ -538,6 +649,69 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                  checked for byte-exact survival; compression is discarded if \
                  coverage drops below 85%"
                     .to_string(),
+            ],
+            ..Default::default()
+        },
+        // Escape hatch for models that loop on compressed output (reported
+        // for GLM 5.1 on Synthetic). The agent explicitly asks for raw
+        // text and sqz returns it unmodified. Pairs with `expand` below
+        // for the case where the agent has already seen a `§ref:…§`
+        // token and needs to resolve it.
+        ToolDefinition {
+            id: "passthrough".to_string(),
+            name: "Passthrough (No Compression)".to_string(),
+            description: "Return the input text unchanged. Use this when \
+                you need the raw, uncompressed form of tool output — for \
+                example because you can't parse sqz's `§ref:HASH§` dedup \
+                tokens, or because you need to audit byte-for-byte what \
+                a command produced. This is strictly more tokens than \
+                `compress` but avoids any interpretation ambiguity."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The text to return unchanged."
+                    }
+                },
+                "required": ["text"]
+            }),
+            compression_transforms: vec![
+                "none: input is returned byte-for-byte".to_string(),
+            ],
+            ..Default::default()
+        },
+        // Ref-resolution tool. Mirrors `sqz expand` on the CLI: give it
+        // the 16-char prefix from a `§ref:…§` token (or the whole token)
+        // and it returns the bytes that produced the ref. For agents
+        // that see refs in their context and need to recover the
+        // original content before they can proceed.
+        ToolDefinition {
+            id: "expand".to_string(),
+            name: "Expand Dedup Ref".to_string(),
+            description: "Resolve a `§ref:HASH§` dedup token (or a bare \
+                hex prefix) back to the original pre-compression content. \
+                Use this if you see a `§ref:…§` token in tool output and \
+                need the full text it points at. Returns either the raw \
+                original bytes (for cache entries from sqz ≥ 0.10.0) or \
+                the compressed-but-legible form with a note (for older \
+                entries)."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prefix": {
+                        "type": "string",
+                        "description": "The hex prefix from a `§ref:<prefix>§` token. \
+                                        Accepts the bare prefix (`a1b2c3d4`) or the \
+                                        full token pasted verbatim (`§ref:a1b2c3d4§`)."
+                    }
+                },
+                "required": ["prefix"]
+            }),
+            compression_transforms: vec![
+                "none: returns cached original bytes".to_string(),
             ],
             ..Default::default()
         },
@@ -1005,5 +1179,111 @@ complexity_threshold = 0.4
             names.iter().any(|n| n == "compress"),
             "default tools must include `compress`; got {names:?}"
         );
+    }
+
+    /// `passthrough` and `expand` are the escape-hatch tools. They must
+    /// be advertised alongside `compress` so agents can discover them via
+    /// `tools/list` alone (no out-of-band coordination). Reported by
+    /// SquireNed on the Synthetic discord for GLM 5.1.
+    #[test]
+    fn test_default_tools_advertise_passthrough_and_expand() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        let resp = server.handle_jsonrpc_line(line);
+        let tools = resp.result.unwrap().get("tools").cloned().unwrap();
+        let names: Vec<String> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "passthrough"),
+            "passthrough tool must be advertised; got {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "expand"),
+            "expand tool must be advertised; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_passthrough_returns_input_unchanged() {
+        // Core contract: agent asked for raw text, sqz returns raw
+        // text. Any transformation breaks the escape-hatch promise.
+        let (mut server, _dir) = make_server();
+        let text = "ls -la\ntotal 42\n-rw-r--r-- 1 root root 17 Jan  1 00:00 readme.md\n";
+        let req = ToolCallRequest {
+            tool_id: "passthrough".to_string(),
+            input: serde_json::json!({ "text": text }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).unwrap();
+        assert_eq!(resp.output, text, "passthrough must return byte-exact input");
+        assert_eq!(
+            resp.tokens_original, resp.tokens_compressed,
+            "passthrough is 1:1 so token counts must match"
+        );
+    }
+
+    #[test]
+    fn test_passthrough_falls_back_to_serialising_if_no_text_field() {
+        // If the agent sends `{"foo": 1}` (no `text` key), we don't
+        // error — we serialise the whole object. Principle: never
+        // surface a hard failure when we can give the agent something
+        // useful. A hard error would re-trigger the retry loop we're
+        // trying to prevent.
+        let (mut server, _dir) = make_server();
+        let req = ToolCallRequest {
+            tool_id: "passthrough".to_string(),
+            input: serde_json::json!({ "foo": 1, "bar": "baz" }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).unwrap();
+        assert!(resp.output.contains("foo"));
+        assert!(resp.output.contains("bar"));
+    }
+
+    #[test]
+    fn test_expand_tool_returns_not_found_marker_on_miss() {
+        // The tool MUST NOT return a JSON-RPC error on cache miss — an
+        // error retriggers the retry loop. Instead we return a
+        // structured "hash-not-found" marker the agent can read and
+        // reason about.
+        let (mut server, _dir) = make_server();
+        let req = ToolCallRequest {
+            tool_id: "expand".to_string(),
+            input: serde_json::json!({ "prefix": "deadbeef00000000" }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).unwrap();
+        assert!(resp.output.contains("hash-not-found"));
+        assert!(resp.output.contains("deadbeef00000000"));
+    }
+
+    #[test]
+    fn test_expand_tool_strips_ref_token_wrapper() {
+        // Agents often paste the `§ref:…§` token verbatim rather than
+        // extracting just the prefix. All four shapes must work so the
+        // escape hatch is as forgiving as possible.
+        let (mut server, _dir) = make_server();
+        for prefix_input in [
+            "§ref:deadbeef00000000§",
+            "ref:deadbeef00000000",
+            "deadbeef00000000",
+            "  deadbeef00000000  ",
+        ] {
+            let req = ToolCallRequest {
+                tool_id: "expand".to_string(),
+                input: serde_json::json!({ "prefix": prefix_input }),
+                intent: None,
+            };
+            let resp = server.handle_tool_call(req).unwrap();
+            assert!(
+                resp.output.contains("deadbeef00000000"),
+                "input {prefix_input:?} did not yield expected prefix in output: {}",
+                resp.output
+            );
+        }
     }
 }

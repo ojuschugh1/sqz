@@ -70,6 +70,33 @@ enum Command {
         /// Show verifier confidence score alongside token reduction.
         #[arg(long)]
         verify: bool,
+        /// Bypass the dedup cache entirely — never emit a `§ref:HASH§`
+        /// token, even for content that's been seen before.
+        ///
+        /// Added after SquireNed reported on-list that GLM 5.1 on
+        /// Synthetic loops when it receives dedup refs it can't parse.
+        /// Also honoured via `SQZ_NO_DEDUP=1` in the environment, which
+        /// is what the shell hook uses so the agent can flip the switch
+        /// without re-invoking sqz.
+        #[arg(long)]
+        no_cache: bool,
+    },
+
+    /// Expand a `§ref:PREFIX§` dedup token back to the content it points at.
+    ///
+    /// Agents that can't parse sqz's dedup refs see `§ref:a1b2c3d4§`
+    /// mid-output and don't know what to do with it. Running
+    /// `sqz expand a1b2c3d4` (or any longer prefix) returns the original
+    /// pre-compression bytes from the cache. If the cache entry predates
+    /// the original-capture migration (v0.10.0), the compressed-but-
+    /// legible form is returned with a note explaining why.
+    ///
+    /// Accepts either the prefix alone (`sqz expand a1b2c3d4`) or the
+    /// full `§ref:…§` token pasted verbatim (`sqz expand §ref:a1b2c3d4§`).
+    Expand {
+        /// Hash prefix or full `§ref:PREFIX§` token to look up.
+        #[arg(required = true)]
+        prefix: String,
     },
 
     /// Export a session to CTX format.
@@ -208,7 +235,10 @@ fn main() {
         }
 
         Some(Command::Init { yes, global }) => cmd_init(yes, global),
-        Some(Command::Compress { text, mode, verify }) => cmd_compress(text, &mode, verify),
+        Some(Command::Compress { text, mode, verify, no_cache }) => {
+            cmd_compress(text, &mode, verify, no_cache)
+        }
+        Some(Command::Expand { prefix }) => cmd_expand(&prefix),
         Some(Command::Export { session_id }) => cmd_export(&session_id),
         Some(Command::Import { file }) => cmd_import(&file),
         Some(Command::Status) => cmd_status(),
@@ -467,8 +497,13 @@ fn cmd_init(skip_confirm: bool, global: bool) {
     }
 }
 
-/// `sqz compress [text] [--mode safe|default|aggressive|auto] [--verify]`
-fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool) {
+/// `sqz compress [text] [--mode safe|default|aggressive|auto] [--verify] [--no-cache]`
+///
+/// The `no_cache` flag (also via `SQZ_NO_DEDUP=1`) turns off the dedup
+/// cache so no `§ref:…§` token is ever returned. Added after SquireNed
+/// reported on the Synthetic discord that GLM 5.1 loops when served
+/// refs it can't parse.
+fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: bool) {
     let is_stdin = text.is_none();
     let input = match text {
         Some(t) => t,
@@ -481,6 +516,14 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool) {
             }
             buf
         }
+    };
+
+    // Merge CLI flag with env var — either one turns off dedup. Env var
+    // wins if the CLI flag wasn't passed so shell-hook callers can set
+    // SQZ_NO_DEDUP=1 in their shell config without editing any commands.
+    let env_opts = cli_proxy::InterceptOptions::from_env();
+    let opts = cli_proxy::InterceptOptions {
+        no_cache: no_cache || env_opts.no_cache,
     };
 
     // When reading from stdin in auto mode (the shell hook path), route
@@ -497,7 +540,7 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool) {
                 return;
             }
         };
-        let compressed = proxy.intercept_output(&cmd, &input);
+        let compressed = proxy.intercept_output_with_options(&cmd, &input, opts);
         print!("{}", compressed);
         return;
     }
@@ -568,6 +611,95 @@ fn cmd_export(session_id: &str) {
         Err(e) => {
             eprintln!("[sqz] export error: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+/// `sqz expand <ref-or-prefix>` — resolve a dedup ref back to full content.
+///
+/// Designed for agents that can't parse `§ref:…§` tokens and end up
+/// thrashing around them (reported for GLM 5.1 on Synthetic by
+/// SquireNed: "500 13-token requests" instead of one legible one). The
+/// agent sees the ref mid-output, runs `sqz expand a1b2c3d4` (or pastes
+/// the whole `§ref:a1b2c3d4§` token verbatim), and gets the original
+/// pre-compression bytes back on stdout.
+///
+/// Output separation:
+///   * stdout — the resolved content itself (nothing else), so pipelines
+///     like `sqz expand … | grep foo` just work.
+///   * stderr — human-readable metadata (full hash, note about
+///     compressed-only fallback). The agent can ignore stderr and still
+///     get exactly what it asked for.
+///
+/// Exit codes: `0` on hit, `1` on no-match, `2` on ambiguous-prefix, `3`
+/// on engine init / DB error. Lets shell pipelines detect each case.
+fn cmd_expand(raw: &str) {
+    // Strip the `§ref:…§` wrapper so callers can paste the token as-is.
+    // Also accept a leading `ref:` without the §'s, which is what some
+    // terminals render §ref:…§ as when unicode is stripped.
+    let trimmed = raw.trim();
+    let prefix = trimmed
+        .strip_prefix('§')
+        .unwrap_or(trimmed)
+        .strip_prefix("ref:")
+        .unwrap_or(trimmed.strip_prefix('§').unwrap_or(trimmed))
+        .trim_end_matches('§')
+        .trim()
+        .to_string();
+
+    let engine = match sqz_engine::SqzEngine::new() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[sqz] expand: engine init error: {e}");
+            std::process::exit(3);
+        }
+    };
+
+    match engine.cache_manager().expand_prefix(&prefix) {
+        Ok(Some(sqz_engine::ExpandResult::Original { hash, bytes })) => {
+            use std::io::Write;
+            // Write raw bytes — the original may legitimately not be
+            // UTF-8 (command output often has non-text sequences), and
+            // println! would garble or reject them.
+            let mut out = std::io::stdout().lock();
+            if let Err(e) = out.write_all(&bytes) {
+                eprintln!("[sqz] expand: stdout write error: {e}");
+                std::process::exit(3);
+            }
+            eprintln!("[sqz] expanded ref prefix '{prefix}' → {} bytes (full hash {hash})", bytes.len());
+        }
+        Ok(Some(sqz_engine::ExpandResult::CompressedOnly { hash, compressed })) => {
+            // Pre-migration cache entry — we only have the compressed
+            // form. Still useful: agent gets legible text instead of an
+            // opaque ref. Note tells the user how to capture the true
+            // original if they need it.
+            println!("{compressed}");
+            eprintln!(
+                "[sqz] expanded ref prefix '{prefix}' (compressed form only; full hash {hash})"
+            );
+            eprintln!(
+                "[sqz] note: this cache entry predates the original-capture migration."
+            );
+            eprintln!(
+                "[sqz] to capture the true original bytes, re-run the command that produced"
+            );
+            eprintln!(
+                "[sqz] this ref with 'SQZ_NO_DEDUP=1' or '--no-cache'."
+            );
+        }
+        Ok(None) => {
+            eprintln!(
+                "[sqz] expand: no cache entry matches prefix '{prefix}'."
+            );
+            eprintln!("[sqz] hint: the ref may be from a different machine or a wiped ~/.sqz/sessions.db.");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            // Ambiguous prefix is the most common error here; surface
+            // the raw engine message since it includes the "use a longer
+            // prefix" recommendation.
+            eprintln!("[sqz] expand: {e}");
+            std::process::exit(2);
         }
     }
 }
