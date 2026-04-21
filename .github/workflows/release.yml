@@ -4,6 +4,20 @@
 # Triggers on version tags (v*.*.*).
 # Builds statically-linked binaries for all 5 supported platforms and
 # uploads them as GitHub Release assets.
+#
+# For each target we ship TWO archives:
+#   * sqz-<version>-<target>.{tar.gz,zip}     — the CLI
+#   * sqz-mcp-<version>-<target>.{tar.gz,zip} — the MCP server
+#
+# Both tarballs are flat (single binary at the root, no wrapping
+# directory) so that `tar -xzf archive.tar.gz` extracts the binary
+# directly into the current working directory. Consumers depend on
+# this layout: install.sh, install.ps1, and npm/install.js all assume
+# a top-level binary — no `archive/sqz` nesting.
+#
+# If you add another crate, also add it to the `binaries` list below
+# AND to install.sh / install.ps1 / npm/install.js / homebrew/sqz.rb —
+# the distribution surfaces are parallel and do not auto-sync.
 
 name: Release
 
@@ -69,25 +83,45 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} --bin sqz
+        run: |
+          cross build --release --target ${{ matrix.target }} --bin sqz
+          cross build --release --target ${{ matrix.target }} --bin sqz-mcp
 
       - name: Build (native)
         if: "!matrix.cross"
-        run: cargo build --release --target ${{ matrix.target }} --bin sqz
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin sqz
+          cargo build --release --target ${{ matrix.target }} --bin sqz-mcp
 
       # ── Package ────────────────────────────────────────────────────────────
+      #
+      # One flat tarball per binary, no wrapper directory. install.sh,
+      # install.ps1 and npm/install.js all depend on this layout — if
+      # you change it, update those three too.
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          BINARY="sqz"
+          set -eu
           TARGET="${{ matrix.target }}"
           VERSION="${GITHUB_REF_NAME}"
-          ARCHIVE="sqz-${VERSION}-${TARGET}.tar.gz"
-          cp "target/${TARGET}/release/${BINARY}" "${BINARY}"
-          tar -czf "${ARCHIVE}" "${BINARY}"
-          echo "ASSET=${ARCHIVE}" >> "$GITHUB_ENV"
+          ASSETS=""
+          for BINARY in sqz sqz-mcp; do
+            ARCHIVE="${BINARY}-${VERSION}-${TARGET}.tar.gz"
+            # Stage the binary in the workspace root so the tarball has
+            # the binary at its root (no nested directory).
+            cp "target/${TARGET}/release/${BINARY}" "${BINARY}"
+            tar -czf "${ARCHIVE}" "${BINARY}"
+            rm "${BINARY}"
+            ASSETS="${ASSETS}${ASSETS:+$'\n'}${ARCHIVE}"
+          done
+          # Space-separated ASSET_LIST is used by the upload step.
+          {
+            echo "ASSET_LIST<<EOF"
+            echo "${ASSETS}"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -95,16 +129,32 @@ jobs:
         run: |
           $TARGET = "${{ matrix.target }}"
           $VERSION = "$env:GITHUB_REF_NAME"
-          $ARCHIVE = "sqz-${VERSION}-${TARGET}.zip"
-          Copy-Item "target\${TARGET}\release\sqz.exe" "sqz.exe"
-          Compress-Archive -Path "sqz.exe" -DestinationPath $ARCHIVE
-          "ASSET=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $Assets = @()
+          foreach ($BINARY in @("sqz", "sqz-mcp")) {
+            $ARCHIVE = "${BINARY}-${VERSION}-${TARGET}.zip"
+            $SrcExe = "target\${TARGET}\release\${BINARY}.exe"
+            $TmpExe = "${BINARY}.exe"
+            Copy-Item $SrcExe $TmpExe
+            Compress-Archive -Path $TmpExe -DestinationPath $ARCHIVE -Force
+            Remove-Item $TmpExe
+            $Assets += $ARCHIVE
+          }
+          # Newline-separated for ASSET_LIST multiline var.
+          $AssetList = ($Assets -join "`n")
+          "ASSET_LIST<<EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $AssetList | Out-File -FilePath $env:GITHUB_ENV -Append
+          "EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: ${{ env.ASSET }}
+          path: |
+            sqz-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            sqz-${{ github.ref_name }}-${{ matrix.target }}.zip
+            sqz-mcp-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            sqz-mcp-${{ github.ref_name }}-${{ matrix.target }}.zip
+          if-no-files-found: ignore
 
   # ── Create GitHub Release ─────────────────────────────────────────────────
   release:

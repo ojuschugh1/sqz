@@ -6,11 +6,18 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh -s -- --version 0.1.0
+#
+# Installs two binaries into $SQZ_INSTALL_DIR (default /usr/local/bin):
+#   * sqz     — the CLI (required)
+#   * sqz-mcp — the MCP server (optional, warn-and-continue if missing)
+#
+# sqz-mcp powers MCP-based integrations (Claude Code MCP client, OpenCode,
+# etc.). The shell CLI still works if sqz-mcp is unavailable, so a failed
+# sqz-mcp download should not abort the install.
 
 set -eu
 
 REPO="ojuschugh1/sqz"
-BINARY="sqz"
 INSTALL_DIR="${SQZ_INSTALL_DIR:-/usr/local/bin}"
 VERSION="${1:-latest}"
 
@@ -74,36 +81,98 @@ resolve_version() {
     fi
 }
 
-# ── Download and install ──────────────────────────────────────────────────
+# ── Download and install a single binary ─────────────────────────────────
+# Args: $1 binary name (sqz or sqz-mcp)
+#       $2 "required" | "optional"
+# Required failures exit the script; optional failures warn and return 1
+# so the install can continue with what it has.
+install_one_binary() {
+    binary="$1"
+    required="$2"
+    archive="${binary}-${VERSION}-${PLATFORM}.tar.gz"
+    url="https://github.com/${REPO}/releases/download/${VERSION}/${archive}"
 
-download_and_install() {
-    ARCHIVE="${BINARY}-${VERSION}-${PLATFORM}.tar.gz"
-    URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
+    tmp_dir="$(mktemp -d)"
+    # Local trap so we clean up this binary's tmp dir even if the parent
+    # script keeps running for the next binary.
+    # shellcheck disable=SC2064
+    trap "rm -rf '${tmp_dir}'" EXIT INT TERM
 
-    TMP_DIR="$(mktemp -d)"
-    trap 'rm -rf "$TMP_DIR"' EXIT
-
-    echo "Downloading sqz ${VERSION} for ${PLATFORM}..."
-    curl -fsSL "$URL" -o "${TMP_DIR}/${ARCHIVE}"
-
-    echo "Extracting..."
-    tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
-
-    echo "Installing to ${INSTALL_DIR}/${BINARY}..."
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "${TMP_DIR}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
-        chmod +x "${INSTALL_DIR}/${BINARY}"
-    else
-        sudo mv "${TMP_DIR}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
-        sudo chmod +x "${INSTALL_DIR}/${BINARY}"
+    echo "Downloading ${binary} ${VERSION} for ${PLATFORM}..."
+    if ! curl -fsSL "$url" -o "${tmp_dir}/${archive}"; then
+        rm -rf "${tmp_dir}"
+        trap - EXIT INT TERM
+        if [ "$required" = "required" ]; then
+            echo "Failed to download required binary ${binary} from ${url}" >&2
+            exit 1
+        else
+            echo "  ! Could not download optional ${binary} (continuing)." >&2
+            echo "    MCP-based integrations will be unavailable. To install later:" >&2
+            echo "      cargo install ${binary}" >&2
+            return 1
+        fi
     fi
 
+    echo "Extracting ${binary}..."
+    if ! tar -xzf "${tmp_dir}/${archive}" -C "$tmp_dir"; then
+        rm -rf "${tmp_dir}"
+        trap - EXIT INT TERM
+        if [ "$required" = "required" ]; then
+            echo "Failed to extract ${archive}" >&2
+            exit 1
+        else
+            echo "  ! Failed to extract optional ${binary} (continuing)." >&2
+            return 1
+        fi
+    fi
+
+    # Sanity check: the extracted artifact at ${tmp_dir}/${binary} must
+    # be a regular file, not a directory. A directory here would mean
+    # the release tarball layout changed (and every downstream installer
+    # is broken). Catch this loud and early instead of letting `mv`
+    # silently move the binary *into* the directory.
+    if [ ! -f "${tmp_dir}/${binary}" ]; then
+        rm -rf "${tmp_dir}"
+        trap - EXIT INT TERM
+        echo "  ! ${archive} did not contain a top-level '${binary}' file." >&2
+        echo "    This is a release-packaging bug — report to https://github.com/${REPO}/issues" >&2
+        if [ "$required" = "required" ]; then
+            exit 1
+        fi
+        return 1
+    fi
+
+    echo "Installing to ${INSTALL_DIR}/${binary}..."
+    if [ -w "$INSTALL_DIR" ]; then
+        mv "${tmp_dir}/${binary}" "${INSTALL_DIR}/${binary}"
+        chmod +x "${INSTALL_DIR}/${binary}"
+    else
+        sudo mv "${tmp_dir}/${binary}" "${INSTALL_DIR}/${binary}"
+        sudo chmod +x "${INSTALL_DIR}/${binary}"
+    fi
+
+    rm -rf "${tmp_dir}"
+    trap - EXIT INT TERM
+    echo "  ✓ ${binary} ${VERSION} installed."
+    return 0
+}
+
+install_everything() {
+    # sqz is required — any failure is fatal.
+    install_one_binary "sqz" "required"
+
+    # sqz-mcp is optional — soft-fail if the release predates the
+    # multi-binary workflow or if the asset is otherwise unavailable.
+    install_one_binary "sqz-mcp" "optional" || true
+
+    echo ""
     echo "sqz ${VERSION} installed successfully."
-    echo "Run 'sqz init' to configure shell hooks and default presets."
+    echo "Next: run 'sqz init' inside a project, or 'sqz init --global' to"
+    echo "install hooks for all Claude Code projects."
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────
 
 detect_platform
 resolve_version
-download_and_install
+install_everything

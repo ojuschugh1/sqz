@@ -131,8 +131,20 @@ npm install -g sqz-cli
 Then initialize:
 
 ```sh
-sqz init
+sqz init --global     # hooks apply to every project on this machine
+# or
+sqz init              # hooks apply to just this project (.claude/settings.local.json)
 ```
+
+`--global` writes to `~/.claude/settings.json` (the user scope per the
+[Anthropic scope table](https://docs.claude.com/en/docs/claude-code/settings)),
+so the sqz hook fires in every Claude Code session on this machine. This is
+the common case on first install. Your existing `permissions`, `env`,
+`statusLine`, and unrelated hooks in `~/.claude/settings.json` are
+preserved — sqz merges its entries rather than overwriting.
+
+Plain `sqz init` (project scope) is useful when you want sqz active only
+inside one repo.
 
 That's it. Shell hooks installed, AI tool hooks configured.
 
@@ -172,7 +184,8 @@ What doesn't get compressed:
 ## CLI
 
 ```sh
-sqz init              # Install hooks
+sqz init --global     # Install hooks for every project on this machine
+sqz init              # Install hooks for just this project
 sqz compress <text>   # Compress (or pipe from stdin)
 sqz compact           # Evict stale context to free tokens
 sqz gain              # Show daily token savings

@@ -38,10 +38,26 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Install shell hooks and create default presets.
+    ///
+    /// By default, installs hooks at project scope (`.claude/settings.local.json`
+    /// in the current directory). Pass `--global` to install at user scope
+    /// (`~/.claude/settings.json`) so the hook fires in every Claude Code
+    /// session on this machine — the common case on first install.
     Init {
         /// Skip confirmation prompt and install everything.
         #[arg(long, short)]
         yes: bool,
+
+        /// Install hooks at user scope (~/.claude/settings.json) so they
+        /// apply to every project on this machine, not just cwd.
+        ///
+        /// Without this flag, `sqz init` writes to the current project's
+        /// `.claude/settings.local.json`. That file is gitignored and
+        /// only active when Claude Code is running inside that project —
+        /// which is a common foot-gun if you ran `sqz init` once in one
+        /// repo and expected it to work everywhere.
+        #[arg(long, short, alias = "g")]
+        global: bool,
     },
 
     /// Compress text from stdin or a positional argument.
@@ -191,7 +207,7 @@ fn main() {
             }
         }
 
-        Some(Command::Init { yes }) => cmd_init(yes),
+        Some(Command::Init { yes, global }) => cmd_init(yes, global),
         Some(Command::Compress { text, mode, verify }) => cmd_compress(text, &mode, verify),
         Some(Command::Export { session_id }) => cmd_export(&session_id),
         Some(Command::Import { file }) => cmd_import(&file),
@@ -214,7 +230,7 @@ fn main() {
 // ── Command implementations ───────────────────────────────────────────────
 
 /// `sqz init` — detect shell, install hook, create default preset.
-fn cmd_init(skip_confirm: bool) {
+fn cmd_init(skip_confirm: bool, global: bool) {
     use std::io::Write;
 
     let hook = ShellHook::detect();
@@ -225,6 +241,12 @@ fn cmd_init(skip_confirm: bool) {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sqz".to_string());
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    let scope = if global {
+        sqz_engine::InstallScope::Global
+    } else {
+        sqz_engine::InstallScope::Project
+    };
 
     // ── Phase 1: Build the plan ──────────────────────────────────────
 
@@ -325,6 +347,27 @@ fn cmd_init(skip_confirm: bool) {
             continue;
         }
 
+        // Claude Code at global scope: we merge into ~/.claude/settings.json
+        // instead of creating a project-level .claude/settings.local.json.
+        // Show the real target in the plan so the user can see we're
+        // touching their user-level config — and abort if they don't
+        // want that.
+        if config.tool_name == "Claude Code" && scope == sqz_engine::InstallScope::Global {
+            if let Some(target) = sqz_engine::claude_user_settings_path() {
+                let target_exists = target.exists();
+                plan.push((
+                    target.display().to_string(),
+                    if target_exists {
+                        "Claude Code hooks (merge sqz entries into user settings)".to_string()
+                    } else {
+                        "Claude Code hooks (create user settings.json)".to_string()
+                    },
+                    !target_exists,
+                ));
+            }
+            continue;
+        }
+
         let full_path = project_dir.join(&config.config_path);
         if !full_path.exists() {
             plan.push((
@@ -405,13 +448,23 @@ fn cmd_init(skip_confirm: bool) {
     // AI tool hooks — merge/install runs after the user confirms.
     // The plan above already flagged any `.jsonc` comments-will-be-lost
     // concern so the user could Ctrl-C before we got here.
-    let installed_tools = sqz_engine::install_tool_hooks(&project_dir, &sqz_path);
+    let installed_tools = sqz_engine::install_tool_hooks_scoped(&project_dir, &sqz_path, scope);
     for tool in &installed_tools {
         println!("[sqz] ✓ {} hook installed", tool);
     }
 
     println!();
     println!("[sqz] init complete. Restart your shell or source the RC file.");
+    if !global && installed_tools.iter().any(|t| t == "Claude Code") {
+        // Tell the user the hook they just installed only fires inside
+        // *this* project. This is the bit 76vangel missed: they expected
+        // sqz to work across "multiple projects" after one install.
+        println!();
+        println!("[sqz] note: Claude Code hook installed at project scope.");
+        println!("      To enable sqz in every project on this machine, re-run:");
+        println!("         sqz init --global");
+        println!("      (writes ~/.claude/settings.json, merges with existing user settings)");
+    }
 }
 
 /// `sqz compress [text] [--mode safe|default|aggressive|auto] [--verify]`
@@ -907,6 +960,24 @@ fn cmd_uninstall(skip_confirm: bool) {
         ));
     }
 
+    // Claude Code user-level ~/.claude/settings.json: surgically remove
+    // sqz's hook entries while preserving the user's permissions, env,
+    // statusLine and unrelated hooks. This is the symmetric teardown
+    // for `sqz init --global`. If the user installed with project scope
+    // only, this is a no-op (the file either doesn't exist or has no
+    // sqz entries).
+    let claude_user_settings = sqz_engine::claude_user_settings_path();
+    let claude_user_settings_exists = claude_user_settings
+        .as_ref()
+        .map(|p| p.exists())
+        .unwrap_or(false);
+    if let (Some(path), true) = (&claude_user_settings, claude_user_settings_exists) {
+        files_to_remove.push((
+            format!("{} (sqz hook entries only)", path.display()),
+            true,
+        ));
+    }
+
     // OpenCode user-level TypeScript plugin. Unlike the other tool
     // configs this lives at `~/.config/opencode/plugins/sqz.ts`, outside
     // any project — so `generate_hook_configs` doesn't produce an entry
@@ -1072,6 +1143,42 @@ fn cmd_uninstall(skip_confirm: bool) {
                     "[sqz] ✗ could not clean up {}: {e}",
                     codex_toml.display()
                 );
+            }
+        }
+    }
+
+    // Surgically remove sqz's PreToolUse / PreCompact / SessionStart
+    // entries from ~/.claude/settings.json. Keeps everything else the
+    // user has configured (permissions, env, statusLine, unrelated
+    // hooks). If the file ends up empty after stripping, it's removed.
+    if claude_user_settings_exists {
+        match sqz_engine::remove_claude_global_hook() {
+            Ok(Some((path, true))) => {
+                if path.exists() {
+                    println!(
+                        "[sqz] ✓ removed sqz hook entries from {}",
+                        path.display()
+                    );
+                } else {
+                    println!("[sqz] ✓ removed {}", path.display());
+                }
+            }
+            Ok(Some((path, false))) => {
+                println!(
+                    "[sqz] ✓ no sqz hook entries found in {}",
+                    path.display()
+                );
+            }
+            Ok(None) => { /* file didn't exist after all — skip */ }
+            Err(e) => {
+                if let Some(path) = &claude_user_settings {
+                    eprintln!(
+                        "[sqz] ✗ could not clean up {}: {e}",
+                        path.display()
+                    );
+                } else {
+                    eprintln!("[sqz] ✗ could not resolve ~/.claude/settings.json: {e}");
+                }
             }
         }
     }

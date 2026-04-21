@@ -1,6 +1,23 @@
 #!/usr/bin/env node
-// postinstall script — downloads the correct sqz binary for the current platform
-// Requirement 16.2: npm install -g sqz-cli / npx sqz-cli wrapper
+// postinstall script — downloads the correct sqz binaries for the current
+// platform. Ships two binaries:
+//
+//   * sqz     — the CLI (required, install fails if this is missing)
+//   * sqz-mcp — the MCP server (optional, we log and continue if missing)
+//
+// The distinction matters because sqz (the CLI) is the core value — it
+// compresses shell output via `sqz compress` and powers the hook system.
+// sqz-mcp is a separate feature (MCP protocol for tools like Claude Code,
+// Cursor, OpenCode). A user who only cares about shell compression
+// should not have their install fail if the MCP server tarball is
+// unavailable for any reason (e.g. installing an older release tagged
+// before sqz-mcp was packaged — see issue shochdoerfer/76vangel, fixed
+// in 0.9.x release workflow).
+//
+// Each archive contains one binary at the root, no wrapping directory,
+// so the install extracts `sqz` (or `sqz.exe`) directly into bin/.
+// This matches the layout the GitHub release workflow produces —
+// keep `.github/workflows/release.yml` and this file in sync.
 
 "use strict";
 
@@ -13,7 +30,8 @@ const REPO = "ojuschugh1/sqz";
 const VERSION = require("./package.json").version;
 const BIN_DIR = path.join(__dirname, "bin");
 
-// Map Node.js platform/arch to Rust target triples
+// Map Node.js platform/arch to Rust target triples (same naming as the
+// release workflow).
 function getPlatformTarget() {
   const platform = process.platform;
   const arch = process.arch;
@@ -60,6 +78,87 @@ function downloadFile(url, dest) {
   });
 }
 
+// Extract a single named file from a tarball into BIN_DIR. On Windows,
+// zip archives are used instead — `tar` on recent Windows 10+ can read
+// both .tar.gz and .zip, so we use the same command everywhere.
+function extractBinary(archivePath, binaryName) {
+  const archive = path.basename(archivePath);
+  if (archive.endsWith(".zip") && process.platform === "win32") {
+    // PowerShell's Expand-Archive is the reliable path on Windows —
+    // tar.exe can choke on some zip metadata produced by Compress-Archive.
+    execSync(
+      `powershell -NoProfile -NonInteractive -Command ` +
+        `"Expand-Archive -Path '${archivePath}' ` +
+        `-DestinationPath '${BIN_DIR}' -Force"`,
+      { stdio: "inherit" }
+    );
+    return;
+  }
+  // Extract the specific binary file. `-C <dir>` changes into BIN_DIR
+  // before extraction so the resulting path is bin/<binaryName>.
+  execSync(`tar -xzf "${archivePath}" -C "${BIN_DIR}" "${binaryName}"`, {
+    stdio: "inherit",
+  });
+}
+
+// Download and install a single binary.
+// Returns true on success, false on failure. Throws only for `required`
+// binaries; optional ones log and return false so the rest of the install
+// continues.
+async function installBinary(name, target, ext, baseUrl, { required }) {
+  const archiveExt = process.platform === "win32" ? "zip" : "tar.gz";
+  const archive = `${name}-v${VERSION}-${target}.${archiveExt}`;
+  const url = `${baseUrl}/${archive}`;
+  const archivePath = path.join(BIN_DIR, archive);
+  const binaryName = `${name}${ext}`;
+  const binaryDest = path.join(BIN_DIR, binaryName);
+
+  // Remove any stale placeholder wrapper file that was shipped inside
+  // the npm tarball. We will overwrite it with the real binary;
+  // failing to remove first can cause "cannot overwrite" errors on
+  // platforms where the wrapper was chmod-ed executable.
+  try {
+    if (fs.existsSync(binaryDest)) fs.unlinkSync(binaryDest);
+  } catch (_) {
+    // Non-fatal — extractBinary will surface any real error.
+  }
+
+  console.log(`Downloading ${name} for ${target}...`);
+  try {
+    await downloadFile(url, archivePath);
+    extractBinary(archivePath, binaryName);
+    fs.unlinkSync(archivePath);
+
+    if (process.platform !== "win32") {
+      fs.chmodSync(binaryDest, 0o755);
+    }
+    console.log(`  ✓ ${name} installed`);
+    return true;
+  } catch (err) {
+    // Clean up any partial download so a retry starts fresh.
+    try { if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath); }
+    catch (_) { /* ignore */ }
+
+    if (required) {
+      console.error(`  ✗ Failed to download ${name}: ${err.message}`);
+      console.error(`    You can manually download from: ${url}`);
+      throw err;
+    } else {
+      // Optional binary — warn loudly but don't break the install.
+      // This is the case for `sqz-mcp` on releases that predate the
+      // multi-binary workflow (anything before v0.10.0).
+      console.warn(`  ! ${name} could not be downloaded (optional): ${err.message}`);
+      console.warn(`    MCP-based integrations (Claude Code MCP, OpenCode, etc.)`);
+      console.warn(`    will be unavailable. The sqz CLI itself still works.`);
+      console.warn(`    If you need ${name}, install manually:`);
+      console.warn(`      cargo install sqz-mcp`);
+      console.warn(`    or grab the binary from:`);
+      console.warn(`      ${url}`);
+      return false;
+    }
+  }
+}
+
 async function install() {
   const { target, ext } = getPlatformTarget();
 
@@ -70,31 +169,13 @@ async function install() {
 
   const baseUrl = `https://github.com/${REPO}/releases/download/v${VERSION}`;
 
-  for (const name of ["sqz", "sqz-mcp"]) {
-    const archive = `${name}-v${VERSION}-${target}.tar.gz`;
-    const url = `${baseUrl}/${archive}`;
-    const archivePath = path.join(BIN_DIR, archive);
-    const binaryName = `${name}${ext}`;
-    const binaryDest = path.join(BIN_DIR, binaryName);
+  // sqz is required. If this download fails the package is useless —
+  // propagate the error so `npm install` exits non-zero.
+  await installBinary("sqz", target, ext, baseUrl, { required: true });
 
-    console.log(`Downloading ${name} for ${target}...`);
-    try {
-      await downloadFile(url, archivePath);
-
-      // Extract the binary from the tarball
-      execSync(`tar -xzf "${archivePath}" -C "${BIN_DIR}" "${binaryName}"`, { stdio: "inherit" });
-      fs.unlinkSync(archivePath);
-
-      if (process.platform !== "win32") {
-        fs.chmodSync(binaryDest, 0o755);
-      }
-      console.log(`  ✓ ${name} installed`);
-    } catch (err) {
-      console.error(`  ✗ Failed to download ${name}: ${err.message}`);
-      console.error(`    You can manually download from: ${url}`);
-      process.exit(1);
-    }
-  }
+  // sqz-mcp is optional. Releases before v0.10.0 do not ship this
+  // tarball and there is no point failing the whole install over it.
+  await installBinary("sqz-mcp", target, ext, baseUrl, { required: false });
 }
 
 install().catch((err) => {
