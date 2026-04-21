@@ -5,6 +5,36 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-04-21
+
+### Added
+
+- **`sqz expand <ref>`** — CLI command to recover original content from a
+  `§ref:HASH§` dedup token. Accepts hash prefixes or the full `§ref:...§`
+  token. Returns exact original bytes from the cache. Exit codes distinguish
+  hit (0), no-match (1), ambiguous (1), and error (2).
+- **`sqz compress --no-cache`** — per-invocation opt-out from dedup. The
+  compression pipeline still runs but the 13-token shortcut never fires.
+- **`SQZ_NO_DEDUP=1` env var** — same effect as `--no-cache`, settable once
+  in shell config for models that can't handle `§ref:...§` tokens.
+- **MCP `passthrough` tool** — returns input byte-exact with zero transforms.
+  Agents that need raw data can call this instead of `compress`.
+- **MCP `expand` tool** — MCP equivalent of `sqz expand`. Agents can resolve
+  dedup refs without shelling out.
+- **Original bytes stored in cache** — new `original` BLOB column on
+  `cache_entries` so `expand` returns true uncompressed content, not the
+  compressed version. Additive migration; pre-migration rows return
+  compressed-only with a note.
+- **Escape hatch docs in rules files** — Cursor, Windsurf, Cline, and Codex
+  AGENTS.md templates now include the four escape paths so agents discover
+  them without human intervention.
+
+### Fixed
+
+- Agents that can't parse `§ref:HASH§` tokens (e.g., GLM 5.1 on Synthetic)
+  now have four independent ways to bypass dedup, breaking the 500-tiny-call
+  loop reported by SquireNed.
+
 ## [1.0.0] — 2026-04-21
 
 ## [0.10.0] — 2026-04-21

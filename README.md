@@ -187,6 +187,8 @@ What doesn't get compressed:
 sqz init --global     # Install hooks for every project on this machine
 sqz init              # Install hooks for just this project
 sqz compress <text>   # Compress (or pipe from stdin)
+sqz compress --no-cache  # Compress without dedup (always full output)
+sqz expand <ref>      # Recover original content from a §ref:HASH§ token
 sqz compact           # Evict stale context to free tokens
 sqz gain              # Show daily token savings
 sqz stats             # Cumulative report
@@ -194,6 +196,27 @@ sqz discover          # Find missed savings
 sqz resume            # Re-inject session context after compaction
 sqz hook claude       # Process a PreToolUse hook
 sqz proxy --port 8080 # API proxy (compresses full request payloads)
+```
+
+### Dedup Escape Hatch
+
+When sqz sees the same content twice, it returns a compact `§ref:HASH§` token
+instead of the full text. Most models handle this fine, but some (e.g., GLM 5.1)
+can't parse the ref format and loop. Four ways to work around this:
+
+```sh
+# 1. Recover original content from a ref
+sqz expand a1b2c3d4              # prefix match
+sqz expand '§ref:a1b2c3d4§'     # paste the whole token
+
+# 2. Compress without dedup (per-invocation)
+echo "..." | sqz compress --no-cache
+
+# 3. Disable dedup globally (env var)
+export SQZ_NO_DEDUP=1
+
+# 4. MCP passthrough tool (returns input byte-exact, zero transforms)
+# Available via tools/list when sqz-mcp is running
 ```
 
 ## Track Your Own Savings
