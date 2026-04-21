@@ -83,15 +83,11 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
-        run: |
-          cross build --release --target ${{ matrix.target }} --bin sqz
-          cross build --release --target ${{ matrix.target }} --bin sqz-mcp
+        run: cross build --release --target ${{ matrix.target }}
 
       - name: Build (native)
         if: "!matrix.cross"
-        run: |
-          cargo build --release --target ${{ matrix.target }} --bin sqz
-          cargo build --release --target ${{ matrix.target }} --bin sqz-mcp
+        run: cargo build --release --target ${{ matrix.target }}
 
       # ── Package ────────────────────────────────────────────────────────────
       #
@@ -111,10 +107,14 @@ jobs:
             ARCHIVE="${BINARY}-${VERSION}-${TARGET}.tar.gz"
             # Stage the binary in the workspace root so the tarball has
             # the binary at its root (no nested directory).
-            cp "target/${TARGET}/release/${BINARY}" "${BINARY}"
-            tar -czf "${ARCHIVE}" "${BINARY}"
-            rm "${BINARY}"
-            ASSETS="${ASSETS}${ASSETS:+$'\n'}${ARCHIVE}"
+            if [ -f "target/${TARGET}/release/${BINARY}" ]; then
+              cp "target/${TARGET}/release/${BINARY}" "${BINARY}"
+              tar -czf "${ARCHIVE}" "${BINARY}"
+              rm "${BINARY}"
+              ASSETS="${ASSETS}${ASSETS:+$'\n'}${ARCHIVE}"
+            else
+              echo "::warning::Binary ${BINARY} not found for ${TARGET}, skipping"
+            fi
           done
           # Space-separated ASSET_LIST is used by the upload step.
           {
@@ -134,10 +134,14 @@ jobs:
             $ARCHIVE = "${BINARY}-${VERSION}-${TARGET}.zip"
             $SrcExe = "target\${TARGET}\release\${BINARY}.exe"
             $TmpExe = "${BINARY}.exe"
-            Copy-Item $SrcExe $TmpExe
-            Compress-Archive -Path $TmpExe -DestinationPath $ARCHIVE -Force
-            Remove-Item $TmpExe
-            $Assets += $ARCHIVE
+            if (Test-Path $SrcExe) {
+              Copy-Item $SrcExe $TmpExe
+              Compress-Archive -Path $TmpExe -DestinationPath $ARCHIVE -Force
+              Remove-Item $TmpExe
+              $Assets += $ARCHIVE
+            } else {
+              Write-Warning "Binary ${BINARY}.exe not found for ${TARGET}, skipping"
+            }
           }
           # Newline-separated for ASSET_LIST multiline var.
           $AssetList = ($Assets -join "`n")

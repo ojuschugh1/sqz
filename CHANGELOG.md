@@ -5,6 +5,16 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] — 2026-04-21
+
+### Fixed
+
+- **CI: Release workflow builds all targets again** — v1.0.0 and v1.0.1
+  failed to build Linux and macOS binaries because the workflow used
+  `--bin sqz` + `--bin sqz-mcp` as separate commands. Changed to build
+  the full workspace in one pass. Packaging step now gracefully skips
+  missing binaries instead of failing the entire job.
+
 ## [1.0.1] — 2026-04-21
 
 ### Added

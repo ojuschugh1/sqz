@@ -1,6 +1,6 @@
 {
   "name": "sqz-cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Universal context intelligence layer — compresses LLM context across CLI, MCP, browser, and IDE",
   "keywords": [
     "llm",
