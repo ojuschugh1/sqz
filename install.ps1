@@ -104,17 +104,31 @@ function Install-SqzBinary {
         Expand-Archive -Path $ZipPath -DestinationPath $TmpDir -Force
 
         $SrcBinary = Join-Path $TmpDir $BinaryFile
+
+        # Handle two known archive layouts:
+        #   Flat (v1.0.0+):   binary at archive root → $TmpDir\sqz.exe
+        #   Nested (≤v0.9.0): binary inside a subdirectory → $TmpDir\sqz\sqz.exe
         if (-not (Test-Path $SrcBinary -PathType Leaf)) {
-            # Sanity check: must be a file. If the release tarball layout
-            # ever changes to contain a nested directory, catch it here
-            # rather than letting Copy-Item silently misbehave.
-            Write-Warning "$Archive did not contain a top-level '$BinaryFile' file."
-            Write-Warning "This is a release-packaging bug — report to https://github.com/$script:Repo/issues"
-            if ($Required) {
-                Write-Error "Required binary $Name is missing from the archive."
-                exit 1
+            $NestedBinary = Join-Path $TmpDir $Name $BinaryFile
+            if (Test-Path $NestedBinary -PathType Leaf) {
+                Move-Item -Path $NestedBinary -Destination $SrcBinary -Force
             }
-            return $false
+        }
+
+        # Last resort: search recursively for the binary.
+        if (-not (Test-Path $SrcBinary -PathType Leaf)) {
+            $Found = Get-ChildItem -Path $TmpDir -Recurse -Filter $BinaryFile -File | Select-Object -First 1
+            if ($Found) {
+                Move-Item -Path $Found.FullName -Destination $SrcBinary -Force
+            } else {
+                Write-Warning "$Archive did not contain a '$BinaryFile' binary."
+                Write-Warning "This is a release-packaging bug — report to https://github.com/$script:Repo/issues"
+                if ($Required) {
+                    Write-Error "Required binary $Name is missing from the archive."
+                    exit 1
+                }
+                return $false
+            }
         }
 
         $DestBinary = Join-Path $InstallDir $BinaryFile

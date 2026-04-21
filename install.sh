@@ -126,20 +126,40 @@ install_one_binary() {
         fi
     fi
 
-    # Sanity check: the extracted artifact at ${tmp_dir}/${binary} must
-    # be a regular file, not a directory. A directory here would mean
-    # the release tarball layout changed (and every downstream installer
-    # is broken). Catch this loud and early instead of letting `mv`
-    # silently move the binary *into* the directory.
+    # Locate the binary inside the extracted archive. Two known layouts:
+    #
+    #   Flat (v1.0.0+):   tar root contains the binary directly.
+    #                      ${tmp_dir}/${binary}
+    #
+    #   Nested (≤v0.9.0): tar root is a directory named after the crate,
+    #                      binary is inside it alongside source files.
+    #                      ${tmp_dir}/${binary}/${binary}
+    #
+    # We also handle the case where the top-level entry is a directory
+    # (same name as the binary) — move the nested binary up so the rest
+    # of the script works unchanged.
+    if [ -d "${tmp_dir}/${binary}" ] && [ -f "${tmp_dir}/${binary}/${binary}" ]; then
+        # Nested layout: pull the binary up to the expected location.
+        mv "${tmp_dir}/${binary}/${binary}" "${tmp_dir}/${binary}.tmp"
+        rm -rf "${tmp_dir}/${binary}"
+        mv "${tmp_dir}/${binary}.tmp" "${tmp_dir}/${binary}"
+    fi
+
     if [ ! -f "${tmp_dir}/${binary}" ]; then
-        rm -rf "${tmp_dir}"
-        trap - EXIT INT TERM
-        echo "  ! ${archive} did not contain a top-level '${binary}' file." >&2
-        echo "    This is a release-packaging bug — report to https://github.com/${REPO}/issues" >&2
-        if [ "$required" = "required" ]; then
-            exit 1
+        # Last resort: search for the binary anywhere in the extracted tree.
+        found="$(find "${tmp_dir}" -name "${binary}" -type f | head -n 1)"
+        if [ -n "$found" ]; then
+            mv "$found" "${tmp_dir}/${binary}"
+        else
+            rm -rf "${tmp_dir}"
+            trap - EXIT INT TERM
+            echo "  ! ${archive} did not contain a '${binary}' binary." >&2
+            echo "    This is a release-packaging bug — report to https://github.com/${REPO}/issues" >&2
+            if [ "$required" = "required" ]; then
+                exit 1
+            fi
+            return 1
         fi
-        return 1
     fi
 
     echo "Installing to ${INSTALL_DIR}/${binary}..."

@@ -81,6 +81,10 @@ function downloadFile(url, dest) {
 // Extract a single named file from a tarball into BIN_DIR. On Windows,
 // zip archives are used instead — `tar` on recent Windows 10+ can read
 // both .tar.gz and .zip, so we use the same command everywhere.
+//
+// Handles two known archive layouts:
+//   Flat (v1.0.0+):   binary at archive root → tar contains "sqz"
+//   Nested (≤v0.9.0): binary inside a subdirectory → tar contains "sqz/sqz"
 function extractBinary(archivePath, binaryName) {
   const archive = path.basename(archivePath);
   if (archive.endsWith(".zip") && process.platform === "win32") {
@@ -92,13 +96,67 @@ function extractBinary(archivePath, binaryName) {
         `-DestinationPath '${BIN_DIR}' -Force"`,
       { stdio: "inherit" }
     );
+    // After extraction, the binary might be nested in a subdirectory.
+    const binaryDest = path.join(BIN_DIR, binaryName);
+    if (!fs.existsSync(binaryDest)) {
+      // Look for it inside a subdirectory (e.g. sqz/sqz.exe)
+      const baseName = binaryName.replace(/\.exe$/, "");
+      const nestedPath = path.join(BIN_DIR, baseName, binaryName);
+      if (fs.existsSync(nestedPath)) {
+        fs.renameSync(nestedPath, binaryDest);
+        // Clean up the now-empty subdirectory.
+        try { fs.rmdirSync(path.join(BIN_DIR, baseName), { recursive: true }); }
+        catch (_) { /* ignore */ }
+      }
+    }
     return;
   }
-  // Extract the specific binary file. `-C <dir>` changes into BIN_DIR
-  // before extraction so the resulting path is bin/<binaryName>.
-  execSync(`tar -xzf "${archivePath}" -C "${BIN_DIR}" "${binaryName}"`, {
+  // Try extracting the binary from the top level first.
+  try {
+    execSync(`tar -xzf "${archivePath}" -C "${BIN_DIR}" "${binaryName}"`, {
+      stdio: "inherit",
+    });
+    return;
+  } catch (_) {
+    // Flat extraction failed — try the nested layout.
+  }
+
+  // Nested layout: extract everything, then move the binary up.
+  const tmpExtract = path.join(BIN_DIR, "__sqz_extract_tmp__");
+  if (!fs.existsSync(tmpExtract)) {
+    fs.mkdirSync(tmpExtract, { recursive: true });
+  }
+  execSync(`tar -xzf "${archivePath}" -C "${tmpExtract}"`, {
     stdio: "inherit",
   });
+
+  // Search for the binary inside the extracted tree.
+  const binaryDest = path.join(BIN_DIR, binaryName);
+  const baseName = binaryName.replace(/\.exe$/, "");
+  const candidates = [
+    path.join(tmpExtract, baseName, binaryName),  // sqz/sqz
+    path.join(tmpExtract, binaryName),             // sqz (shouldn't happen if flat failed, but be safe)
+  ];
+
+  let found = false;
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      fs.renameSync(candidate, binaryDest);
+      found = true;
+      break;
+    }
+  }
+
+  // Clean up temp extraction directory.
+  try { fs.rmSync(tmpExtract, { recursive: true, force: true }); }
+  catch (_) { /* ignore */ }
+
+  if (!found) {
+    throw new Error(
+      `${archive} did not contain '${binaryName}' at the expected location. ` +
+      `This is a release-packaging bug — report to https://github.com/${REPO}/issues`
+    );
+  }
 }
 
 // Download and install a single binary.
