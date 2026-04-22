@@ -58,6 +58,33 @@ enum Command {
         /// repo and expected it to work everywhere.
         #[arg(long, short, alias = "g")]
         global: bool,
+
+        /// Comma-separated list of agents to install. Only the named
+        /// tools get configured; all others are skipped.
+        ///
+        /// Accepts: claude, cursor, windsurf, cline, gemini, opencode,
+        /// codex. Aliases like `claude-code`, `gemini-cli`, `roo`
+        /// (= cline) are also recognised.
+        ///
+        /// Example: `sqz init --only opencode`
+        ///          `sqz init --only opencode,codex`
+        ///
+        /// Requested in issue #11 (@shochdoerfer): single-agent users
+        /// wanted a way to opt in to just their agent rather than
+        /// getting hook configs sprayed across every tool sqz knows
+        /// about.
+        #[arg(long, value_name = "TOOLS", conflicts_with = "skip")]
+        only: Option<String>,
+
+        /// Comma-separated list of agents to skip. Every other
+        /// supported tool is installed normally.
+        ///
+        /// Same name vocabulary as `--only`. Cannot be combined with
+        /// `--only`.
+        ///
+        /// Example: `sqz init --skip cursor,windsurf`
+        #[arg(long, value_name = "TOOLS")]
+        skip: Option<String>,
     },
 
     /// Compress text from stdin or a positional argument.
@@ -250,7 +277,7 @@ fn main() {
             }
         }
 
-        Some(Command::Init { yes, global }) => cmd_init(yes, global),
+        Some(Command::Init { yes, global, only, skip }) => cmd_init(yes, global, only, skip),
         Some(Command::Compress { text, mode, verify, no_cache, cmd }) => {
             cmd_compress(text, &mode, verify, no_cache, cmd)
         }
@@ -276,8 +303,42 @@ fn main() {
 // ── Command implementations ───────────────────────────────────────────────
 
 /// `sqz init` — detect shell, install hook, create default preset.
-fn cmd_init(skip_confirm: bool, global: bool) {
+fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option<String>) {
     use std::io::Write;
+
+    // Parse the agent filter first so typos fail fast, before we
+    // touch any files. Clap's `conflicts_with` already guarantees
+    // --only and --skip aren't both set, so the match below is
+    // exhaustive.
+    let filter = match (only.as_deref(), skip.as_deref()) {
+        (None, None) => sqz_engine::ToolFilter::All,
+        (Some(raw), None) => match sqz_engine::parse_tool_list(raw) {
+            Ok(names) if names.is_empty() => {
+                // --only "" or --only "   " — pointless but harmless;
+                // treat as "install nothing AI-tool-related, just the
+                // shell hook and preset."
+                sqz_engine::ToolFilter::Only(names)
+            }
+            Ok(names) => sqz_engine::ToolFilter::Only(names),
+            Err(e) => {
+                eprintln!("[sqz] init: {e}");
+                std::process::exit(1);
+            }
+        },
+        (None, Some(raw)) => match sqz_engine::parse_tool_list(raw) {
+            Ok(names) => sqz_engine::ToolFilter::Skip(names),
+            Err(e) => {
+                eprintln!("[sqz] init: {e}");
+                std::process::exit(1);
+            }
+        },
+        (Some(_), Some(_)) => {
+            // Unreachable: clap's conflicts_with catches this before
+            // we get here. Defensive exit in case clap config drifts.
+            eprintln!("[sqz] init: --only and --skip are mutually exclusive");
+            std::process::exit(1);
+        }
+    };
 
     let hook = ShellHook::detect();
     let rc_path = hook.rc_path();
@@ -329,6 +390,14 @@ fn cmd_init(skip_confirm: bool, global: bool) {
     let opencode_jsonc_has_comments =
         sqz_engine::opencode_config_has_comments(&project_dir);
     for config in &tool_configs {
+        // Respect the --only/--skip filter from the CLI. Skipped tools
+        // generate no plan line AND no file write — the user shouldn't
+        // see "[sqz] will create .cursor/rules/sqz.mdc" when they asked
+        // for opencode only.
+        if !filter.includes(&config.tool_name) {
+            continue;
+        }
+
         // OpenCode is special: the installer merges into whichever of
         // opencode.json / opencode.jsonc already exists, rather than
         // blindly creating a parallel opencode.json. Report the
@@ -494,7 +563,8 @@ fn cmd_init(skip_confirm: bool, global: bool) {
     // AI tool hooks — merge/install runs after the user confirms.
     // The plan above already flagged any `.jsonc` comments-will-be-lost
     // concern so the user could Ctrl-C before we got here.
-    let installed_tools = sqz_engine::install_tool_hooks_scoped(&project_dir, &sqz_path, scope);
+    let installed_tools =
+        sqz_engine::install_tool_hooks_scoped_filtered(&project_dir, &sqz_path, scope, &filter);
     for tool in &installed_tools {
         println!("[sqz] ✓ {} hook installed", tool);
     }

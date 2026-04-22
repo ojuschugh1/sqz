@@ -645,6 +645,158 @@ pub enum InstallScope {
     Global,
 }
 
+/// Which tools `sqz init` should configure.
+///
+/// By default sqz init writes hook configs for every supported tool
+/// (Claude Code, Cursor, Windsurf, Cline, Gemini CLI, OpenCode, Codex).
+/// Users who only use one agent have asked (issue #11, @shochdoerfer)
+/// for a way to say "just OpenCode, please, leave the rest alone." This
+/// filter is the plumbing for that.
+///
+/// Matching is by canonical tool name. The [`canonicalize_tool_name`]
+/// helper normalises user input (lowercase, hyphens/underscores/spaces
+/// collapsed, known aliases) so `Opencode`, `open-code`, `opencode`,
+/// `OPENCODE` all refer to the same tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolFilter {
+    /// Install hook configs for every supported tool. The historical
+    /// default of `sqz init`.
+    All,
+    /// Install hook configs only for the named tools. Unknown names are
+    /// surfaced to the caller as errors by the canonicalisation layer
+    /// so we don't silently ignore typos.
+    Only(Vec<String>),
+    /// Install hook configs for every supported tool EXCEPT the named
+    /// tools. Useful when the user is fine with everything but wants
+    /// one integration skipped (e.g. a project shared with collaborators
+    /// who don't want a `.windsurfrules` file in the repo).
+    Skip(Vec<String>),
+}
+
+impl Default for ToolFilter {
+    fn default() -> Self {
+        ToolFilter::All
+    }
+}
+
+impl ToolFilter {
+    /// Return `true` if `tool_name` (as produced by [`generate_hook_configs`])
+    /// should be installed under this filter.
+    ///
+    /// `tool_name` is the display name sqz uses internally:
+    ///   * `"Claude Code"`, `"Cursor"`, `"Windsurf"`, `"Cline"`,
+    ///     `"Gemini CLI"`, `"OpenCode"`, `"Codex"`.
+    ///
+    /// The caller is expected to have already canonicalised the filter
+    /// entries via [`canonicalize_tool_name`] so the strings line up
+    /// case- and alias-wise.
+    pub fn includes(&self, tool_name: &str) -> bool {
+        let canon = canonicalize_tool_name(tool_name);
+        match self {
+            ToolFilter::All => true,
+            ToolFilter::Only(allow) => allow.iter().any(|n| {
+                // `allow` entries have already been canonicalised by
+                // parse_tool_list; compare canonical to canonical.
+                n == &canon
+            }),
+            ToolFilter::Skip(deny) => !deny.iter().any(|n| n == &canon),
+        }
+    }
+}
+
+/// Every canonical tool name sqz knows about, in the same order
+/// [`generate_hook_configs`] emits them. Used by the CLI to list valid
+/// options in `--only`/`--skip` error messages, and by tests that
+/// need to enumerate the supported set.
+pub const SUPPORTED_TOOL_NAMES: &[&str] = &[
+    "Claude Code",
+    "Cursor",
+    "Windsurf",
+    "Cline",
+    "Gemini CLI",
+    "OpenCode",
+    "Codex",
+];
+
+/// Normalise a tool name or alias to its canonical form.
+///
+/// Canonical forms are lowercase and hyphen-free. Accepts common
+/// variants:
+///
+/// | Input                                  | Canonical      |
+/// |----------------------------------------|----------------|
+/// | `Claude Code`, `claude-code`, `claude` | `claudecode`   |
+/// | `Cursor`, `cursor`                     | `cursor`       |
+/// | `Windsurf`, `windsurf`                 | `windsurf`     |
+/// | `Cline`, `roo`, `roo-code`, `roocode`  | `cline`        |
+/// | `Gemini CLI`, `gemini-cli`, `gemini`   | `gemini`       |
+/// | `OpenCode`, `opencode`                 | `opencode`     |
+/// | `Codex`, `codex`                       | `codex`        |
+///
+/// Returns the canonical string unchanged if no alias matches — the
+/// caller decides whether unknown names are an error. This function
+/// never fails.
+pub fn canonicalize_tool_name(name: &str) -> String {
+    let lowered: String = name
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .filter(|c| *c != '-' && *c != '_')
+        .collect();
+    match lowered.as_str() {
+        "claude" | "claudecode" => "claudecode".to_string(),
+        "cursor" => "cursor".to_string(),
+        "windsurf" => "windsurf".to_string(),
+        // Cline is also sold as "Roo Code" — treat the two as one
+        // integration because that's what sqz actually targets (same
+        // .clinerules file).
+        "cline" | "roo" | "roocode" => "cline".to_string(),
+        "gemini" | "geminicli" => "gemini".to_string(),
+        "opencode" => "opencode".to_string(),
+        "codex" => "codex".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Parse a user-supplied tool list (comma-separated, whitespace-tolerant)
+/// into a vector of canonical names.
+///
+/// Returns an error if any entry does not match a known tool — we never
+/// silently drop typos because the failure mode ("my filter didn't
+/// work") is hard to debug.
+///
+/// The error message lists every accepted name so the user can see
+/// exactly what's valid.
+pub fn parse_tool_list(raw: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let known: std::collections::HashSet<String> = SUPPORTED_TOOL_NAMES
+        .iter()
+        .map(|n| canonicalize_tool_name(n))
+        .collect();
+    for part in raw.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let canon = canonicalize_tool_name(trimmed);
+        if !known.contains(&canon) {
+            let valid: Vec<String> = SUPPORTED_TOOL_NAMES
+                .iter()
+                .map(|n| canonicalize_tool_name(n))
+                .collect();
+            return Err(crate::error::SqzError::Other(format!(
+                "unknown agent name '{}'. Valid options: {}",
+                trimmed,
+                valid.join(", ")
+            )));
+        }
+        if !out.contains(&canon) {
+            out.push(canon);
+        }
+    }
+    Ok(out)
+}
+
 /// Like [`install_tool_hooks`] but lets the caller choose between
 /// project-local and user-global scope. This is the function `sqz init`
 /// and `sqz init --global` both call.
@@ -675,10 +827,39 @@ pub fn install_tool_hooks_scoped(
     sqz_path: &str,
     scope: InstallScope,
 ) -> Vec<String> {
+    install_tool_hooks_scoped_filtered(project_dir, sqz_path, scope, &ToolFilter::All)
+}
+
+/// Like [`install_tool_hooks_scoped`] but honours a [`ToolFilter`] so
+/// callers can restrict `sqz init` to a subset of the supported tools.
+///
+/// The filter applies to hook-config writes AND to the OpenCode
+/// TypeScript plugin at `~/.config/opencode/plugins/sqz.ts` — we only
+/// install the plugin file when OpenCode passes the filter. Writing
+/// the plugin file to a machine where the user filtered OpenCode out
+/// would be surprising (they'd see sqz fire next time they opened
+/// OpenCode even though they never asked for it).
+///
+/// Shell hook (rc file) and the default preset are NOT gated by this
+/// filter — they're user-scoped and not specific to any agent.
+/// `cmd_init` handles those separately.
+pub fn install_tool_hooks_scoped_filtered(
+    project_dir: &Path,
+    sqz_path: &str,
+    scope: InstallScope,
+    filter: &ToolFilter,
+) -> Vec<String> {
     let configs = generate_hook_configs(sqz_path);
     let mut installed = Vec::new();
 
     for config in &configs {
+        // Apply the user's agent filter before we touch anything.
+        // Each tool the filter rejects is completely skipped — no
+        // plan lines, no files written, no logging.
+        if !filter.includes(&config.tool_name) {
+            continue;
+        }
+
         // OpenCode config files are special: they live alongside the
         // user's own config and must be *merged* rather than clobbered.
         // The placeholder `config_content` is only used on a fresh
@@ -760,9 +941,16 @@ pub fn install_tool_hooks_scoped(
     // wrote anything, so this call only matters for machines where no
     // project config existed — we still want the user-level plugin so
     // future OpenCode sessions see sqz.
-    if let Ok(true) = crate::opencode_plugin::install_opencode_plugin(sqz_path) {
-        if !installed.iter().any(|n| n == "OpenCode") {
-            installed.push("OpenCode".to_string());
+    //
+    // Gated by the filter: if the user ran `sqz init --skip opencode`
+    // we must NOT drop the plugin file in `~/.config/opencode/plugins/`.
+    // Leaving it there would surprise them on their next OpenCode run
+    // (sqz would start firing uninvited, reverting the skip).
+    if filter.includes("OpenCode") {
+        if let Ok(true) = crate::opencode_plugin::install_opencode_plugin(sqz_path) {
+            if !installed.iter().any(|n| n == "OpenCode") {
+                installed.push("OpenCode".to_string());
+            }
         }
     }
 
@@ -1916,3 +2104,302 @@ mod global_install_tests {
         assert_eq!(after, "{ invalid json because");
     }
 }
+
+#[cfg(test)]
+mod issue_11_tool_filter_tests {
+    //! Regression tests for issue #11 (@shochdoerfer): let the user
+    //! choose for which agent sqz init creates configs.
+    //!
+    //! Every assertion here pins a behaviour the filter should have.
+    //! If any one of these flips, users are either getting configs for
+    //! tools they asked to skip OR getting no config for tools they
+    //! explicitly asked for — both are issue #11 regressions.
+
+    use super::*;
+
+    #[test]
+    fn canonicalize_collapses_common_aliases() {
+        // Each row: list of aliases a user might type, followed by the
+        // canonical form they should all normalise to.
+        for aliases in &[
+            (vec!["Claude Code", "claude-code", "claude", "CLAUDE", "ClaudeCode"], "claudecode"),
+            (vec!["Cursor", "cursor", "CURSOR"], "cursor"),
+            (vec!["Windsurf", "WINDSURF"], "windsurf"),
+            // Cline is also marketed as "Roo Code" — sqz treats them
+            // as one integration (same .clinerules file) so the
+            // aliases must collapse.
+            (vec!["Cline", "cline", "Roo", "roo-code", "RooCode"], "cline"),
+            (vec!["Gemini CLI", "gemini-cli", "gemini", "GEMINI"], "gemini"),
+            (vec!["OpenCode", "open-code", "opencode", "OPENCODE"], "opencode"),
+            (vec!["Codex", "codex"], "codex"),
+        ] {
+            for alias in &aliases.0 {
+                assert_eq!(
+                    canonicalize_tool_name(alias),
+                    aliases.1,
+                    "alias '{}' must canonicalise to '{}'",
+                    alias,
+                    aliases.1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn canonicalize_leaves_unknown_names_unchanged_but_normalised() {
+        // Unknown names fall through — we don't guess. The caller
+        // (parse_tool_list) is responsible for turning unknown values
+        // into user-facing errors; canonicalize itself just
+        // normalises case, whitespace, and hyphens/underscores.
+        assert_eq!(canonicalize_tool_name("unknown-tool"), "unknowntool");
+        assert_eq!(canonicalize_tool_name("Some Thing"), "something");
+    }
+
+    #[test]
+    fn parse_tool_list_accepts_comma_separated_with_whitespace() {
+        // Typical shell invocation: `--only opencode,codex` or
+        // `--only "opencode, codex"` — both should work.
+        let names = parse_tool_list("opencode,codex").unwrap();
+        assert_eq!(names, vec!["opencode", "codex"]);
+
+        let names = parse_tool_list(" opencode ,  codex ").unwrap();
+        assert_eq!(names, vec!["opencode", "codex"]);
+
+        // Single entry.
+        let names = parse_tool_list("opencode").unwrap();
+        assert_eq!(names, vec!["opencode"]);
+
+        // Alias with hyphen.
+        let names = parse_tool_list("claude-code").unwrap();
+        assert_eq!(names, vec!["claudecode"]);
+    }
+
+    #[test]
+    fn parse_tool_list_dedupes_repeated_entries() {
+        // `--only opencode,opencode` shouldn't produce two "opencode"
+        // entries that the filter then matches twice. Harmless today
+        // but tomorrow someone could code `filter.allow.len()` against
+        // it and silently count wrong.
+        let names = parse_tool_list("opencode,opencode").unwrap();
+        assert_eq!(names, vec!["opencode"]);
+
+        // Same name via different aliases still dedupes because they
+        // canonicalise to the same string.
+        let names = parse_tool_list("Claude Code, claude, claude-code").unwrap();
+        assert_eq!(names, vec!["claudecode"]);
+    }
+
+    #[test]
+    fn parse_tool_list_rejects_unknown_names_with_helpful_error() {
+        // This is the critical failure path: a typo in --only must
+        // fail, not silently drop. Otherwise the user runs `sqz init
+        // --only opncode` (typo), sees "OK" with nothing installed,
+        // and spends 20 minutes figuring out why. The error message
+        // must list valid options verbatim so they can spot their
+        // typo.
+        let err = parse_tool_list("opncode").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown agent name 'opncode'"),
+            "error must quote the bad input: {msg}"
+        );
+        assert!(msg.contains("opencode"), "error must list valid options: {msg}");
+        assert!(msg.contains("cursor"), "error must list valid options: {msg}");
+    }
+
+    #[test]
+    fn parse_tool_list_rejects_one_bad_entry_in_a_list() {
+        // `--only opencode,xyz` — fail the whole list, don't just drop
+        // xyz. User either typed a typo they need to see, or they
+        // don't understand the vocabulary — in both cases pretending
+        // the input was valid hurts them.
+        let err = parse_tool_list("opencode,xyz").unwrap_err();
+        assert!(err.to_string().contains("xyz"));
+    }
+
+    #[test]
+    fn parse_tool_list_empty_and_whitespace_return_empty_vec() {
+        // `--only ""` and `--only "   "` produce an empty filter —
+        // semantically "install nothing" rather than "install all".
+        // cmd_init surfaces this as ToolFilter::Only(empty) which
+        // skips every config file but still installs the shell hook
+        // and preset.
+        assert_eq!(parse_tool_list("").unwrap(), Vec::<String>::new());
+        assert_eq!(parse_tool_list("   ").unwrap(), Vec::<String>::new());
+        assert_eq!(parse_tool_list(" , , ").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn tool_filter_all_includes_every_supported_tool() {
+        let filter = ToolFilter::All;
+        for tool in SUPPORTED_TOOL_NAMES {
+            assert!(
+                filter.includes(tool),
+                "default filter must include {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_filter_only_opencode_excludes_everything_else() {
+        // The exact scenario from issue #11.
+        let filter = ToolFilter::Only(vec!["opencode".to_string()]);
+        assert!(filter.includes("OpenCode"));
+        // Every other supported tool is rejected.
+        for tool in SUPPORTED_TOOL_NAMES {
+            if *tool == "OpenCode" {
+                continue;
+            }
+            assert!(
+                !filter.includes(tool),
+                "--only opencode must not include {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_filter_only_multi_tool_includes_exactly_those() {
+        let filter = ToolFilter::Only(vec!["opencode".to_string(), "codex".to_string()]);
+        assert!(filter.includes("OpenCode"));
+        assert!(filter.includes("Codex"));
+        // Everything else: excluded.
+        assert!(!filter.includes("Claude Code"));
+        assert!(!filter.includes("Cursor"));
+        assert!(!filter.includes("Windsurf"));
+        assert!(!filter.includes("Cline"));
+        assert!(!filter.includes("Gemini CLI"));
+    }
+
+    #[test]
+    fn tool_filter_skip_inverts_the_set() {
+        // `--skip cursor,windsurf` means "install everything except
+        // those two." Opposite of --only.
+        let filter = ToolFilter::Skip(vec!["cursor".to_string(), "windsurf".to_string()]);
+        assert!(!filter.includes("Cursor"));
+        assert!(!filter.includes("Windsurf"));
+        // Everything else stays on.
+        assert!(filter.includes("Claude Code"));
+        assert!(filter.includes("Cline"));
+        assert!(filter.includes("Gemini CLI"));
+        assert!(filter.includes("OpenCode"));
+        assert!(filter.includes("Codex"));
+    }
+
+    #[test]
+    fn tool_filter_only_empty_excludes_everything() {
+        // Edge: `--only ""` → empty filter → nothing passes. This is
+        // semantically "install no AI-tool configs, just the shell
+        // hook and preset." Surprising if the user typed it by
+        // accident, but consistent — the plan output will show only
+        // shell/preset lines and the user can abort.
+        let filter = ToolFilter::Only(vec![]);
+        for tool in SUPPORTED_TOOL_NAMES {
+            assert!(
+                !filter.includes(tool),
+                "empty --only must exclude every tool, got {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_filter_only_accepts_display_name_or_canonical() {
+        // The filter lives in the engine; callers pass the
+        // display-name strings ("Claude Code", "Gemini CLI") straight
+        // from generate_hook_configs. But filter entries come from
+        // the CLI via parse_tool_list, which canonicalises. Both
+        // sides must line up — assert the cross-path works.
+        let filter = ToolFilter::Only(vec!["claudecode".to_string()]);
+        assert!(filter.includes("Claude Code"));
+        assert!(!filter.includes("Cursor"));
+
+        let filter = ToolFilter::Only(vec!["gemini".to_string()]);
+        assert!(filter.includes("Gemini CLI"));
+    }
+
+    #[test]
+    fn supported_tool_names_matches_generate_hook_configs_exactly() {
+        // Invariant: the SUPPORTED_TOOL_NAMES constant (used in error
+        // messages, docs, tests) must match the tool_name fields the
+        // config generator actually emits. If someone adds a new tool
+        // config but forgets to add its name to the constant, this
+        // test fails loudly.
+        let configs = generate_hook_configs("sqz");
+        let emitted: std::collections::HashSet<&str> =
+            configs.iter().map(|c| c.tool_name.as_str()).collect();
+        let declared: std::collections::HashSet<&str> =
+            SUPPORTED_TOOL_NAMES.iter().copied().collect();
+        assert_eq!(
+            emitted, declared,
+            "SUPPORTED_TOOL_NAMES must equal the set of tool_name values \
+             from generate_hook_configs. emitted={:?}, declared={:?}",
+            emitted, declared
+        );
+    }
+
+    #[test]
+    fn filtered_install_only_opencode_writes_only_opencode_files() {
+        // End-to-end: exercise install_tool_hooks_scoped_filtered
+        // against a tempdir and assert that only OpenCode's files
+        // appear. This is the single most important regression for
+        // issue #11: no Cursor rules, no Windsurf rules, no Cline
+        // rules, no Gemini settings, no AGENTS.md, no .claude/.
+        let dir = tempfile::tempdir().unwrap();
+        let filter = ToolFilter::Only(vec!["opencode".to_string()]);
+        let _installed = install_tool_hooks_scoped_filtered(
+            dir.path(),
+            "sqz",
+            InstallScope::Project,
+            &filter,
+        );
+
+        // OpenCode SHOULD be there.
+        assert!(
+            dir.path().join("opencode.json").exists(),
+            "OpenCode config must be written when --only opencode is used"
+        );
+
+        // None of the other agents' files should exist.
+        for (path, tool) in &[
+            (".claude/settings.local.json", "Claude Code"),
+            (".cursor/rules/sqz.mdc", "Cursor"),
+            (".windsurfrules", "Windsurf"),
+            (".clinerules", "Cline"),
+            (".gemini/settings.json", "Gemini CLI"),
+            ("AGENTS.md", "Codex"),
+        ] {
+            assert!(
+                !dir.path().join(path).exists(),
+                "filter rejected {tool} but the installer still wrote {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn filtered_install_skip_cursor_omits_only_cursor() {
+        // Symmetric: --skip cursor should leave everything else intact.
+        let dir = tempfile::tempdir().unwrap();
+        let filter = ToolFilter::Skip(vec!["cursor".to_string()]);
+        let _installed = install_tool_hooks_scoped_filtered(
+            dir.path(),
+            "sqz",
+            InstallScope::Project,
+            &filter,
+        );
+
+        // Cursor rules must NOT exist.
+        assert!(
+            !dir.path().join(".cursor/rules/sqz.mdc").exists(),
+            "skip cursor: .cursor/rules/sqz.mdc must not be written"
+        );
+        // Windsurf and Cline rules SHOULD still exist.
+        assert!(
+            dir.path().join(".windsurfrules").exists(),
+            "skip cursor should not skip windsurf"
+        );
+        assert!(
+            dir.path().join(".clinerules").exists(),
+            "skip cursor should not skip cline"
+        );
+    }
+}
+

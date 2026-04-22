@@ -2,9 +2,12 @@
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "sqz": {
-      "type": "local",
-      "command": ["sqz-mcp", "--transport", "stdio"]
+      "command": [
+        "sqz-mcp",
+        "--transport",
+        "stdio"
+      ],
+      "type": "local"
     }
-  },
-  "plugin": ["sqz"]
+  }
 }
