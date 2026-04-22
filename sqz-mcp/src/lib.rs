@@ -427,7 +427,10 @@ impl McpServer {
             if line.trim().is_empty() {
                 continue;
             }
-            let response = self.handle_jsonrpc_line(&line);
+            // Notifications (no id) return None and must produce no output.
+            let Some(response) = self.handle_jsonrpc_line(&line) else {
+                continue;
+            };
             let serialized = serde_json::to_string(&response)
                 .unwrap_or_else(|_| r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"serialize error"}}"#.to_string());
             writeln!(out, "{serialized}")
@@ -476,11 +479,17 @@ impl McpServer {
                     let _ = reader.read_exact(&mut body);
                     let body_str = String::from_utf8_lossy(&body);
 
-                    let response = self.handle_jsonrpc_line(body_str.trim());
-                    let json = serde_json::to_string(&response).unwrap_or_default();
+                    // Notifications (no id) produce no response body. Send
+                    // an empty 204 No Content so HTTP clients still get a
+                    // valid response but no JSON-RPC payload.
+                    let (status, json) = match self.handle_jsonrpc_line(body_str.trim()) {
+                        Some(resp) => ("200 OK", serde_json::to_string(&resp).unwrap_or_default()),
+                        None => ("204 No Content", String::new()),
+                    };
 
                     let http_response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                        status,
                         json.len(),
                         json
                     );
@@ -492,16 +501,23 @@ impl McpServer {
         Ok(())
     }
 
-    fn handle_jsonrpc_line(&mut self, line: &str) -> JsonRpcResponse {
+    fn handle_jsonrpc_line(&mut self, line: &str) -> Option<JsonRpcResponse> {
         // Apply any pending preset reload first.
         self.apply_pending_preset();
 
         let req: JsonRpcRequest = match serde_json::from_str(line) {
             Ok(r) => r,
-            Err(e) => return JsonRpcResponse::err(None, -32700, format!("parse error: {e}")),
+            Err(e) => return Some(JsonRpcResponse::err(None, -32700, format!("parse error: {e}"))),
         };
 
-        match req.method.as_str() {
+        // Notifications (no id) are one-way per JSON-RPC 2.0 and MUST NOT
+        // receive a response. Responding to one makes strict clients like
+        // Claude Code mark the server as failed. Reported in issue #12.
+        if req.id.is_none() {
+            return None;
+        }
+
+        Some(match req.method.as_str() {
             "tools/list" => {
                 let intent = req.params
                     .as_ref()
@@ -547,11 +563,11 @@ impl McpServer {
             "tools/call" => {
                 let params = match req.params {
                     Some(p) => p,
-                    None => return JsonRpcResponse::err(req.id, -32602, "missing params"),
+                    None => return Some(JsonRpcResponse::err(req.id, -32602, "missing params")),
                 };
                 let tool_id = match params.get("name").and_then(|v| v.as_str()) {
                     Some(id) => id.to_string(),
-                    None => return JsonRpcResponse::err(req.id, -32602, "missing params.name"),
+                    None => return Some(JsonRpcResponse::err(req.id, -32602, "missing params.name")),
                 };
                 let input = params.get("arguments").cloned().unwrap_or(Value::Null);
                 let intent = params.get("intent").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -588,7 +604,7 @@ impl McpServer {
             }
 
             _ => JsonRpcResponse::err(req.id, -32601, format!("method not found: {}", req.method)),
-        }
+        })
     }
 }
 
@@ -732,6 +748,18 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    /// Test-only wrapper that unwraps the `Option<JsonRpcResponse>` so
+    /// existing tests can keep calling `.error`, `.result` directly.
+    /// Panics if the server returned `None` (i.e. a notification) —
+    /// callers that want to assert on the no-response path should call
+    /// `handle_jsonrpc_line` directly.
+    impl McpServer {
+        pub(crate) fn handle_jsonrpc_line_unwrap(&mut self, line: &str) -> JsonRpcResponse {
+            self.handle_jsonrpc_line(line)
+                .expect("expected response; got None (notification). Use handle_jsonrpc_line directly if that's intended.")
+        }
+    }
 
     fn make_server() -> (McpServer, TempDir) {
         let dir = TempDir::new().expect("tempdir");
@@ -937,7 +965,7 @@ complexity_threshold = 0.4
     fn test_jsonrpc_initialize() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         assert!(resp.error.is_none(), "initialize should not error");
         let result = resp.result.expect("initialize should have result");
         assert!(result.get("protocolVersion").is_some());
@@ -951,7 +979,7 @@ complexity_threshold = 0.4
     fn test_initialize_advertises_tools_capability() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         let result = resp.result.expect("initialize should have result");
 
         let caps = result.get("capabilities")
@@ -983,7 +1011,7 @@ complexity_threshold = 0.4
     fn test_jsonrpc_tools_list() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         assert!(resp.error.is_none(), "tools/list should not error");
         let result = resp.result.expect("tools/list should have result");
         let tools = result.get("tools").expect("result should have tools");
@@ -995,7 +1023,7 @@ complexity_threshold = 0.4
     fn test_jsonrpc_tools_call() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"compress","arguments":{"text":"lorem ipsum dolor sit amet"}}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         assert!(resp.error.is_none(), "tools/call should not error: {:?}", resp.error);
         let result = resp.result.expect("tools/call should have result");
         assert!(result.get("content").is_some());
@@ -1006,7 +1034,7 @@ complexity_threshold = 0.4
     fn test_jsonrpc_unknown_method() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":4,"method":"unknown/method","params":{}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32601);
     }
@@ -1015,7 +1043,7 @@ complexity_threshold = 0.4
     #[test]
     fn test_jsonrpc_parse_error() {
         let (mut server, _dir) = make_server();
-        let resp = server.handle_jsonrpc_line("not json at all {{{");
+        let resp = server.handle_jsonrpc_line_unwrap("not json at all {{{");
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32700);
     }
@@ -1035,7 +1063,7 @@ complexity_threshold = 0.4
     fn test_tools_list_outputschema_is_valid_object_or_absent() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         assert!(resp.error.is_none(), "tools/list errored: {:?}", resp.error);
 
         let tools = resp.result
@@ -1091,7 +1119,7 @@ complexity_threshold = 0.4
     fn test_default_tools_omit_outputschema() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         let tools = resp.result.unwrap().get("tools").cloned().unwrap();
         for tool in tools.as_array().unwrap() {
             let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
@@ -1124,7 +1152,7 @@ complexity_threshold = 0.4
     fn test_tools_list_has_no_io_impostor_tools() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         let tools = resp.result.unwrap().get("tools").cloned().unwrap();
         let names: Vec<String> = tools
             .as_array()
@@ -1166,7 +1194,7 @@ complexity_threshold = 0.4
     fn test_default_tools_advertise_compress_tool() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         let tools = resp.result.unwrap().get("tools").cloned().unwrap();
         let names: Vec<String> = tools
             .as_array()
@@ -1189,7 +1217,7 @@ complexity_threshold = 0.4
     fn test_default_tools_advertise_passthrough_and_expand() {
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
-        let resp = server.handle_jsonrpc_line(line);
+        let resp = server.handle_jsonrpc_line_unwrap(line);
         let tools = resp.result.unwrap().get("tools").cloned().unwrap();
         let names: Vec<String> = tools
             .as_array()
@@ -1285,5 +1313,35 @@ complexity_threshold = 0.4
                 resp.output
             );
         }
+    }
+
+    // ── Issue #12: notifications must not receive responses ──────────────
+
+    /// Notification = request without `id`. Per JSON-RPC 2.0 these are
+    /// one-way messages; responding makes Claude Code mark the server
+    /// as failed.
+    #[test]
+    fn test_notification_returns_none() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#;
+        assert!(server.handle_jsonrpc_line(line).is_none());
+    }
+
+    /// Same for unknown-method notifications — the absence of `id` is
+    /// what makes it a notification, regardless of whether we'd
+    /// recognise the method.
+    #[test]
+    fn test_unknown_notification_returns_none() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","method":"some/unknown/notif"}"#;
+        assert!(server.handle_jsonrpc_line(line).is_none());
+    }
+
+    /// Requests (with `id`) must still respond normally.
+    #[test]
+    fn test_request_still_responds() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        assert!(server.handle_jsonrpc_line(line).is_some());
     }
 }
