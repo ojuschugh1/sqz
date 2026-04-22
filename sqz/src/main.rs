@@ -80,6 +80,22 @@ enum Command {
         /// without re-invoking sqz.
         #[arg(long)]
         no_cache: bool,
+        /// Label this compression with the name of the command that
+        /// produced the input (e.g. "git", "cargo", "kubectl"). Shown
+        /// in `sqz stats` and `sqz gain --history` so you can see which
+        /// commands are saving the most tokens.
+        ///
+        /// Previously passed only via the `SQZ_CMD` environment
+        /// variable baked into the rewritten command. That approach
+        /// was sh-specific — `SQZ_CMD=cmd foo` is syntactically
+        /// invalid in PowerShell (parsed as a command name) and in
+        /// cmd.exe (also parsed as a command name), which broke every
+        /// Windows hook. `--cmd` is shell-neutral. Reported in issue
+        /// #10. The `SQZ_CMD` env var is still honoured for backward
+        /// compatibility with the POSIX shell hook scripts; `--cmd`
+        /// wins if both are present.
+        #[arg(long, value_name = "NAME")]
+        cmd: Option<String>,
     },
 
     /// Expand a `§ref:PREFIX§` dedup token back to the content it points at.
@@ -235,8 +251,8 @@ fn main() {
         }
 
         Some(Command::Init { yes, global }) => cmd_init(yes, global),
-        Some(Command::Compress { text, mode, verify, no_cache }) => {
-            cmd_compress(text, &mode, verify, no_cache)
+        Some(Command::Compress { text, mode, verify, no_cache, cmd }) => {
+            cmd_compress(text, &mode, verify, no_cache, cmd)
         }
         Some(Command::Expand { prefix }) => cmd_expand(&prefix),
         Some(Command::Export { session_id }) => cmd_export(&session_id),
@@ -497,13 +513,19 @@ fn cmd_init(skip_confirm: bool, global: bool) {
     }
 }
 
-/// `sqz compress [text] [--mode safe|default|aggressive|auto] [--verify] [--no-cache]`
+/// `sqz compress [text] [--mode safe|default|aggressive|auto] [--verify] [--no-cache] [--cmd NAME]`
 ///
 /// The `no_cache` flag (also via `SQZ_NO_DEDUP=1`) turns off the dedup
 /// cache so no `§ref:…§` token is ever returned. Added after SquireNed
 /// reported on the Synthetic discord that GLM 5.1 loops when served
 /// refs it can't parse.
-fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: bool) {
+///
+/// The `cmd` parameter labels the compression in stats. Prefer passing
+/// it as `--cmd NAME` (shell-neutral — works in POSIX shells, PowerShell,
+/// and cmd.exe). Legacy `SQZ_CMD=NAME` env var is still honoured for
+/// backward compatibility with the POSIX shell hook scripts. `--cmd`
+/// wins if both are set.
+fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: bool, cmd: Option<String>) {
     let is_stdin = text.is_none();
     let input = match text {
         Some(t) => t,
@@ -528,10 +550,16 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
 
     // When reading from stdin in auto mode (the shell hook path), route
     // through CliProxy to get dedup cache, per-command formatters, context
-    // refs, and predictive pre-caching. The SQZ_CMD env var carries the
-    // original command name from the shell hook.
+    // refs, and predictive pre-caching.
+    //
+    // Label resolution order:
+    //   1. `--cmd` CLI flag (issue #10, preferred — shell-neutral)
+    //   2. `SQZ_CMD` env var (legacy POSIX shell hook)
+    //   3. "stdin" (unknown source)
     if mode == "auto" && is_stdin {
-        let cmd = std::env::var("SQZ_CMD").unwrap_or_else(|_| "stdin".to_string());
+        let label = cmd
+            .or_else(|| std::env::var("SQZ_CMD").ok())
+            .unwrap_or_else(|| "stdin".to_string());
         let proxy = match CliProxy::new() {
             Ok(p) => p,
             Err(e) => {
@@ -540,7 +568,7 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
                 return;
             }
         };
-        let compressed = proxy.intercept_output_with_options(&cmd, &input, opts);
+        let compressed = proxy.intercept_output_with_options(&label, &input, opts);
         print!("{}", compressed);
         return;
     }

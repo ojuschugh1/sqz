@@ -66,7 +66,8 @@ export const SqzPlugin = async (ctx: any) => {{
   // like `SQZ_CMD=SQZ_CMD=ddev SQZ_CMD=ddev ddev exec ...` (reported as
   // a follow-up to issue #5). We skip if any of these markers appear:
   //   * the case-insensitive substring "sqz_cmd=" or "sqz compress"
-  //     (covers the tail of prior wraps regardless of case)
+  //     (covers the tail of prior wraps regardless of case; SQZ_CMD= is
+  //     legacy pre-issue-#10 but still valid in POSIX shell hooks)
   //   * a leading `VAR=` assignment that starts with SQZ_
   //     (defensive catch-all for exotic wrap variants)
   //   * the base command itself is sqz or sqz-mcp (running sqz directly
@@ -96,6 +97,16 @@ export const SqzPlugin = async (ctx: any) => {{
     return "unknown";
   }}
 
+  // Shell-escape a command-name label so it's safe to inline into the
+  // rewritten shell command. Agents occasionally invoke commands via
+  // paths with spaces (`"/my tools/foo" --arg`) and in the LLM
+  // roundtrip that can survive to `extractBaseCmd`'s output. Quote the
+  // label unless it's pure ASCII alphanumeric.
+  function shellEscapeLabel(s: string): string {{
+    if (/^[A-Za-z0-9_.-]+$/.test(s)) return s;
+    return "'" + s.replace(/'/g, "'\\''") + "'";
+  }}
+
   return {{
     "tool.execute.before": async (input: any, output: any) => {{
       const tool = input.tool ?? "";
@@ -104,9 +115,19 @@ export const SqzPlugin = async (ctx: any) => {{
       const cmd = output.args?.command ?? "";
       if (!cmd || isAlreadyWrapped(cmd) || isInteractive(cmd)) return;
 
-      // Rewrite: pipe through sqz compress
+      // Rewrite: pipe through `sqz compress --cmd <base>`.
+      //
+      // Issue #10: the previous form was `SQZ_CMD=<base> <cmd> 2>&1 |
+      // <sqz> compress`, which uses sh-specific inline env-var syntax.
+      // On Windows, OpenCode Desktop routes bash-tool commands through
+      // PowerShell (or cmd.exe when $SHELL is unset), and both parse
+      // `SQZ_CMD=cmd` as a command name — raising CommandNotFoundException
+      // and producing zero compression. `--cmd NAME` is a normal CLI
+      // argument, shell-neutral, works in POSIX sh, zsh, fish, PowerShell,
+      // and cmd.exe.
       const base = extractBaseCmd(cmd);
-      output.args.command = `SQZ_CMD=${{base}} ${{cmd}} 2>&1 | ${{SQZ_PATH}} compress`;
+      const label = shellEscapeLabel(base);
+      output.args.command = `${{cmd}} 2>&1 | ${{SQZ_PATH}} compress --cmd ${{label}}`;
     }},
   }};
 }};
@@ -339,23 +360,35 @@ pub fn update_opencode_config_detailed(project_dir: &Path) -> Result<(bool, bool
 
         let mut changed = false;
 
-        // Merge `plugin`: add "sqz" if not present. Create the array if
-        // the key is missing; preserve the user's existing entries.
-        let plugin_entry = obj.entry("plugin").or_insert_with(|| serde_json::json!([]));
-        if let Some(arr) = plugin_entry.as_array_mut() {
-            let has_sqz = arr.iter().any(|v| v.as_str() == Some("sqz"));
-            if !has_sqz {
-                arr.push(serde_json::json!("sqz"));
+        // Issue #10: do NOT add `"plugin": ["sqz"]` to opencode.json any
+        // more. The user-level plugin file at
+        // `~/.config/opencode/plugins/sqz.ts` is auto-discovered by
+        // OpenCode and loads the plugin by itself. Listing it as `sqz`
+        // in the `plugin` array makes OpenCode ALSO try to load it as
+        // an npm package — per the OpenCode docs, "a local plugin and
+        // an npm plugin with similar names are both loaded separately",
+        // which produces two live copies of the plugin and double hook
+        // firing on every command.
+        //
+        // Backward-compat: if a previous sqz install already wrote
+        // `"plugin": ["sqz"]`, surgically strip it so the upgrade fixes
+        // the double-load for returning users. Pre-existing entries
+        // from OTHER plugins are left alone.
+        if let Some(arr) = obj.get_mut("plugin").and_then(|v| v.as_array_mut()) {
+            let before = arr.len();
+            arr.retain(|v| v.as_str() != Some("sqz"));
+            if arr.len() != before {
                 changed = true;
             }
-        } else {
-            // `plugin` exists but isn't an array — bail rather than
-            // silently clobber a user's weird-but-valid config.
-            return Err(crate::error::SqzError::Other(format!(
-                "{} has a `plugin` field that is not an array; \
-                 refusing to modify it automatically",
-                existing_path.display()
-            )));
+            // If the array is now empty AND we created it in an earlier
+            // install, drop the key entirely so the file is as clean as
+            // possible. We can't distinguish "user's empty array" from
+            // "sqz's empty array", so only drop if empty — that's the
+            // same state a fresh install would produce from now on.
+            if arr.is_empty() {
+                obj.remove("plugin");
+                changed = true;
+            }
         }
 
         // Merge `mcp.sqz`: add our MCP server entry if not present.
@@ -393,13 +426,20 @@ pub fn update_opencode_config_detailed(project_dir: &Path) -> Result<(bool, bool
 
         Ok((true, had_comments))
     } else {
-        // Fresh install: create opencode.json with both plugin and MCP.
+        // Fresh install: create opencode.json with only the MCP entry.
+        //
+        // Issue #10: we deliberately do NOT write `"plugin": ["sqz"]`.
+        // OpenCode auto-loads plugins from
+        // `~/.config/opencode/plugins/*.ts` (which `install_opencode_plugin`
+        // populates separately), so listing `sqz` in the config's
+        // `plugin` array would cause OpenCode to ALSO try to load it
+        // as an npm package and end up with two live copies of the
+        // plugin firing on every tool call.
         let config = serde_json::json!({
             "$schema": "https://opencode.ai/config.json",
             "mcp": {
                 "sqz": sqz_mcp_value()
-            },
-            "plugin": ["sqz"]
+            }
         });
         let content = serde_json::to_string_pretty(&config).map_err(|e| {
             crate::error::SqzError::Other(format!("failed to serialize opencode.json: {e}"))
@@ -665,9 +705,13 @@ pub fn process_opencode_hook(input: &str) -> Result<String> {
         format!("'{}'", base_cmd.replace('\'', "'\\''"))
     };
 
+    // Issue #10: use `--cmd NAME` instead of a sh-specific `SQZ_CMD=NAME`
+    // prefix. Ensures the rewrite works in PowerShell and cmd.exe on
+    // Windows (OpenCode Desktop's default bash-tool shell when $SHELL
+    // is unset or set to a Windows shell), not just POSIX shells.
     let rewritten = format!(
-        "SQZ_CMD={} {} 2>&1 | sqz compress",
-        escaped_base, command
+        "{} 2>&1 | sqz compress --cmd {}",
+        command, escaped_base,
     );
 
     // Output in the format OpenCode expects (same as Claude Code for CLI path)
@@ -746,7 +790,14 @@ mod tests {
         let cmd = parsed["args"]["command"].as_str().unwrap();
         assert!(cmd.contains("sqz compress"), "should pipe through sqz: {cmd}");
         assert!(cmd.contains("git status"), "should preserve original: {cmd}");
-        assert!(cmd.contains("SQZ_CMD=git"), "should set SQZ_CMD: {cmd}");
+        // Issue #10: label is passed via `--cmd NAME` (shell-neutral),
+        // not via the sh-specific `SQZ_CMD=NAME` prefix that breaks
+        // PowerShell and cmd.exe.
+        assert!(cmd.contains("--cmd git"), "should pass base command via --cmd: {cmd}");
+        assert!(
+            !cmd.contains("SQZ_CMD="),
+            "must not emit legacy sh-style env prefix: {cmd}"
+        );
     }
 
     #[test]
@@ -825,6 +876,23 @@ mod tests {
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("\"sqz\""));
         assert!(content.contains("sqz-mcp"));
+
+        // Issue #10: fresh-install must NOT include `"plugin": ["sqz"]`.
+        // The local plugin file at ~/.config/opencode/plugins/sqz.ts is
+        // what actually installs the hook. Listing sqz in the config's
+        // plugin array would make OpenCode try to also load it as an
+        // npm package, producing two live copies of the plugin (reported
+        // in issue #10).
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(
+            parsed.get("plugin").is_none(),
+            "fresh-install opencode.json must not include `plugin`; got: {content}"
+        );
+        assert_eq!(
+            parsed["mcp"]["sqz"]["type"].as_str(),
+            Some("local"),
+            "mcp.sqz must be present"
+        );
     }
 
     #[test]
@@ -841,24 +909,89 @@ mod tests {
         assert!(result, "should update existing config");
         let content = std::fs::read_to_string(&config_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        // Issue #10: sqz is NOT added to the `plugin` array any more
+        // (double-load fix). But pre-existing plugin entries from
+        // OTHER plugins must be preserved. And the MCP entry must
+        // be added.
         let plugins = parsed["plugin"].as_array().unwrap();
-        assert!(plugins.iter().any(|v| v.as_str() == Some("sqz")));
-        assert!(plugins.iter().any(|v| v.as_str() == Some("other")));
+        assert!(
+            !plugins.iter().any(|v| v.as_str() == Some("sqz")),
+            "issue #10: sqz must NOT be registered as a config-level plugin \
+             (the local plugin file at ~/.config/opencode/plugins/sqz.ts \
+             already loads it; double-registering causes double hook firing)"
+        );
+        assert!(
+            plugins.iter().any(|v| v.as_str() == Some("other")),
+            "pre-existing plugin entries from OTHER plugins must be preserved"
+        );
+        // MCP server registration IS still added — that's the separate,
+        // non-duplicated path.
+        assert_eq!(
+            parsed["mcp"]["sqz"]["type"].as_str(),
+            Some("local"),
+            "mcp.sqz must be added"
+        );
+    }
+
+    /// Issue #10 upgrade path: a user who ran an older sqz release and
+    /// got `"plugin": ["sqz"]` written into their config should have
+    /// that entry surgically removed when they re-run `sqz init` on a
+    /// newer release. Pre-existing entries from other plugins survive.
+    #[test]
+    fn test_update_opencode_config_removes_legacy_sqz_plugin_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("opencode.json");
+        std::fs::write(
+            &config_path,
+            r#"{"plugin":["other","sqz"]}"#,
+        )
+        .unwrap();
+
+        let changed = update_opencode_config(dir.path()).unwrap();
+        assert!(changed, "must report that the legacy plugin entry was stripped");
+
+        let after = std::fs::read_to_string(&config_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
+        let plugins = parsed["plugin"].as_array().unwrap();
+        assert!(
+            !plugins.iter().any(|v| v.as_str() == Some("sqz")),
+            "legacy sqz plugin entry must be stripped on re-init"
+        );
+        assert!(
+            plugins.iter().any(|v| v.as_str() == Some("other")),
+            "other plugin entries must survive the cleanup"
+        );
+    }
+
+    /// Issue #10: when the legacy `"plugin": ["sqz"]` was the ONLY
+    /// entry in the plugin array, the whole `plugin` key should be
+    /// dropped rather than left as `"plugin": []`.
+    #[test]
+    fn test_update_opencode_config_drops_empty_plugin_array_after_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("opencode.json");
+        std::fs::write(&config_path, r#"{"plugin":["sqz"]}"#).unwrap();
+
+        update_opencode_config(dir.path()).unwrap();
+
+        let after = std::fs::read_to_string(&config_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert!(
+            parsed.get("plugin").is_none(),
+            "empty plugin array should be dropped entirely, got: {after}"
+        );
     }
 
     #[test]
     fn test_update_opencode_config_skips_if_present() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("opencode.json");
-        // A complete sqz install has BOTH the plugin entry and the MCP
-        // server entry. Writing only `plugin[]` leaves the MCP server
-        // unregistered; the updated merger considers this incomplete
-        // and will add the missing `mcp.sqz` key. A truly idempotent
-        // "nothing to do" state requires both pieces to be present.
+        // After issue #10, the complete "nothing to do" state is ONLY
+        // the MCP server entry. `"plugin": ["sqz"]` is legacy and
+        // will be stripped on re-init (see the legacy-cleanup test).
         std::fs::write(
             &config_path,
             r#"{
-  "plugin": ["sqz"],
   "mcp": {
     "sqz": {
       "type": "local",
@@ -872,14 +1005,15 @@ mod tests {
         let result = update_opencode_config(dir.path()).unwrap();
         assert!(
             !result,
-            "complete install (plugin + mcp.sqz) must be idempotent"
+            "a config that already has just the mcp.sqz entry (no plugin[]) \
+             must be idempotent — nothing more to do"
         );
     }
 
-    /// Companion to the above: when only `plugin[\"sqz\"]` is present
-    /// the merger must add the missing `mcp.sqz` entry — before the
-    /// issue #6 fix the updater only ever touched the plugin array,
-    /// leaving MCP registration to chance.
+    /// When only `plugin[\"sqz\"]` is present the merger must add the
+    /// missing `mcp.sqz` entry AND strip the legacy plugin entry.
+    /// Before the issue #6 fix the updater only ever touched the
+    /// plugin array, leaving MCP registration to chance.
     #[test]
     fn test_update_opencode_config_adds_missing_mcp_entry() {
         let dir = tempfile::tempdir().unwrap();
@@ -934,7 +1068,8 @@ mod tests {
     /// When a user command begins with legitimate env-var assignments
     /// (e.g. `FOO=bar make test`) the base command should be `make`,
     /// not `FOO=bar`. The old implementation picked `FOO=bar` and
-    /// produced `SQZ_CMD=FOO=bar` wraps.
+    /// produced `SQZ_CMD=FOO=bar` wraps. Now it should produce
+    /// `--cmd make` (issue #10).
     #[test]
     fn test_process_opencode_hook_skips_leading_env_assignments_for_base() {
         let input = r#"{"tool":"bash","args":{"command":"FOO=bar BAZ=qux make test"}}"#;
@@ -942,7 +1077,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let cmd = parsed["args"]["command"].as_str().unwrap();
         assert!(
-            cmd.contains("SQZ_CMD=make"),
+            cmd.contains("--cmd make"),
             "base command must be `make`, not `FOO=bar`; got: {cmd}"
         );
         assert!(
@@ -1077,9 +1212,12 @@ mod tests {
         let after = std::fs::read_to_string(&jsonc).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
         let plugins = parsed["plugin"].as_array().unwrap();
+        // Issue #10: sqz is NOT registered in the plugin array any more
+        // (double-load fix). Pre-existing OTHER-plugin entries still
+        // survive. The MCP server entry is the one we register now.
         assert!(
-            plugins.iter().any(|v| v.as_str() == Some("sqz")),
-            "plugin[] must contain sqz after merge"
+            !plugins.iter().any(|v| v.as_str() == Some("sqz")),
+            "issue #10: sqz must NOT be added to plugin[]"
         );
         assert!(
             plugins.iter().any(|v| v.as_str() == Some("other-plugin")),
@@ -1349,5 +1487,139 @@ mod tests {
         let plugins = parsed["plugin"].as_array().unwrap();
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0], "other");
+    }
+
+    // ── Issue #10: Windows shell + duplicate plugin load ──────────────────
+
+    /// End-to-end regression for issue #10. The reporter ran `dotnet
+    /// build` via OpenCode Desktop on Windows and got a
+    /// CommandNotFoundException from PowerShell because sqz emitted
+    /// the sh-specific `SQZ_CMD=cmd cmd /c dotnet build …` form.
+    ///
+    /// The fix: use `sqz compress --cmd NAME` — a normal CLI argument
+    /// every shell accepts.
+    #[test]
+    fn issue_10_opencode_rewrite_works_in_powershell_syntax() {
+        let input = r#"{"tool":"bash","args":{"command":"dotnet build NewNeonCheckers3.sln"}}"#;
+        let result = process_opencode_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let cmd = parsed["args"]["command"].as_str().unwrap();
+
+        // Regression asserts: the rewrite must not contain the
+        // sh-specific env-var assignment that breaks in PowerShell and
+        // cmd.exe.
+        assert!(
+            !cmd.contains("SQZ_CMD="),
+            "issue #10: rewrite must not emit `SQZ_CMD=` (breaks on \
+             PowerShell/cmd.exe); got: {cmd}"
+        );
+        // And it must use the shell-neutral --cmd form instead.
+        assert!(
+            cmd.contains("--cmd dotnet"),
+            "rewrite must pass label via --cmd; got: {cmd}"
+        );
+        // PowerShell tokenises on whitespace: a command that begins
+        // with a word that is NOT an env assignment must be what
+        // PowerShell will execute. "dotnet build …" is valid in every
+        // shell; "SQZ_CMD=… dotnet build …" is not.
+        let first_token = cmd.split_whitespace().next().unwrap_or("");
+        assert_eq!(
+            first_token, "dotnet",
+            "first token of the rewritten command must be the user's \
+             command itself, not an env-var assignment; got: {cmd}"
+        );
+    }
+
+    /// Companion to the above: the TS plugin (which runs inside
+    /// OpenCode's Bun runtime) must emit the same shell-neutral form.
+    /// Both the Rust-side hook and the TS plugin exist so we test both.
+    #[test]
+    fn issue_10_ts_plugin_emits_cmd_flag_not_env_prefix() {
+        let content = generate_opencode_plugin("sqz");
+        // The plugin builds its rewrite with a template literal. Look
+        // for the `--cmd` pattern and make sure the legacy `SQZ_CMD=`
+        // prefix is nowhere in the output template.
+        assert!(
+            content.contains("compress --cmd"),
+            "TS plugin must build rewrite with `compress --cmd ${{base}}`"
+        );
+        // The plugin still CONTAINS the SQZ_CMD= string — in a regex
+        // (`/^\\s*SQZ_[A-Z0-9_]+=/`) used by `isAlreadyWrapped` to
+        // detect legacy pre-wrapped commands from older sqz versions.
+        // So we assert specifically that the EMITTED COMMAND has no
+        // `SQZ_CMD=${base} ${cmd}` template.
+        assert!(
+            !content.contains("SQZ_CMD=${base}"),
+            "TS plugin must not emit the legacy `SQZ_CMD=${{base}}` prefix"
+        );
+    }
+
+    /// Bug #1 from issue #10: plugin loaded twice.
+    ///
+    /// Before the fix, `sqz init` wrote both:
+    ///   1. `"plugin": ["sqz"]` in opencode.json
+    ///   2. `~/.config/opencode/plugins/sqz.ts`
+    ///
+    /// Per OpenCode docs: "a local plugin and an npm plugin with
+    /// similar names are both loaded separately." So (1) + (2)
+    /// produced two live plugin instances firing on every tool call.
+    ///
+    /// The fix: don't write (1). Rely on (2) — OpenCode auto-loads
+    /// `.ts` files from the plugins directory. Keep the MCP server
+    /// registration in opencode.json (that's a separate, non-
+    /// duplicating concern).
+    #[test]
+    fn issue_10_fresh_opencode_config_has_no_plugin_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        update_opencode_config(dir.path()).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("opencode.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // The deliberate absence of `plugin` is the whole fix.
+        assert!(
+            parsed.get("plugin").is_none(),
+            "issue #10: fresh opencode.json must not include `plugin` key; got: {content}"
+        );
+
+        // MCP server registration must still be present — it's the
+        // separate, non-duplicating path.
+        assert_eq!(
+            parsed["mcp"]["sqz"]["type"].as_str(),
+            Some("local"),
+            "mcp.sqz is the one sqz-authored entry that belongs in \
+             opencode.json; must still be registered"
+        );
+    }
+
+    /// When a user upgrades from an older sqz (which wrote `plugin:
+    /// ["sqz"]`), running `sqz init` on the new version must
+    /// surgically remove the legacy entry so the double-load bug is
+    /// actually resolved — not just prevented for fresh installs.
+    #[test]
+    fn issue_10_reinit_strips_legacy_plugin_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("opencode.json");
+        std::fs::write(
+            &config,
+            // The exact shape an older sqz install would have produced.
+            r#"{"$schema":"https://opencode.ai/config.json","mcp":{"sqz":{"type":"local","command":["sqz-mcp","--transport","stdio"]}},"plugin":["sqz"]}"#,
+        )
+        .unwrap();
+
+        let changed = update_opencode_config(dir.path()).unwrap();
+        assert!(changed, "re-init must report a change (the legacy entry was stripped)");
+
+        let after = std::fs::read_to_string(&config).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert!(
+            parsed.get("plugin").is_none(),
+            "legacy `plugin: [\"sqz\"]` must be stripped on re-init; got: {after}"
+        );
+        // MCP entry must survive.
+        assert_eq!(
+            parsed["mcp"]["sqz"]["type"].as_str(),
+            Some("local"),
+            "mcp.sqz must survive cleanup of the plugin entry"
+        );
     }
 }

@@ -183,8 +183,20 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // Don't intercept commands that are already piped through sqz.
     // Check the base command name specifically, not substring — so
     // "grep sqz logfile" or "cargo search sqz" aren't skipped.
+    //
+    // Guards:
+    //   * base command is `sqz` (running sqz directly)
+    //   * legacy `SQZ_CMD=…` sh-style prefix (from older sqz versions)
+    //   * new shell-neutral `--cmd NAME` form — we need this because
+    //     the new emission (issue #10 fix) uses `| sqz compress --cmd …`
+    //     and without a guard the hook would re-wrap commands it had
+    //     already rewritten once (runaway-prefix bug from issue #5).
     let base_cmd = extract_base_command(command);
-    if base_cmd == "sqz" || command.starts_with("SQZ_CMD=") {
+    if base_cmd == "sqz"
+        || command.starts_with("SQZ_CMD=")
+        || command.contains("sqz compress --cmd ")
+        || command.contains("sqz.exe compress --cmd ")
+    {
         return Ok(match platform {
             HookPlatform::Cursor => "{}".to_string(),
             _ => input.to_string(),
@@ -212,10 +224,17 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
 
     // Rewrite: pipe the command's output through sqz compress.
     // The command is a simple command (no operators), so direct piping is safe.
+    //
+    // Issue #10: use `--cmd NAME` instead of a `SQZ_CMD=NAME` prefix so
+    // the rewrite works in every shell. The sh-style inline env-var
+    // assignment doesn't parse in PowerShell (the reporter's default on
+    // Windows) or cmd.exe — both treat `SQZ_CMD=cmd` as a literal
+    // command name and raise `CommandNotFoundException`. `--cmd NAME`
+    // is a normal CLI argument and all three shells parse it fine.
     let rewritten = format!(
-        "SQZ_CMD={} {} 2>&1 | sqz compress",
+        "{} 2>&1 | sqz compress --cmd {}",
+        command,
         shell_escape(extract_base_command(command)),
-        command
     );
 
     // Build platform-specific output.
@@ -1174,7 +1193,13 @@ mod tests {
         let cmd = hook_output["updatedInput"]["command"].as_str().unwrap();
         assert!(cmd.contains("sqz compress"), "should pipe through sqz: {cmd}");
         assert!(cmd.contains("git status"), "should preserve original command: {cmd}");
-        assert!(cmd.contains("SQZ_CMD=git"), "should set SQZ_CMD: {cmd}");
+        // Issue #10: the label is now passed as `--cmd NAME`, not as a
+        // `SQZ_CMD=NAME` prefix (sh-specific, broken on PowerShell/cmd.exe).
+        assert!(cmd.contains("--cmd git"), "should pass base command as --cmd: {cmd}");
+        assert!(
+            !cmd.contains("SQZ_CMD="),
+            "new rewrites must not emit the legacy sh-style env prefix: {cmd}"
+        );
         // Claude Code format should NOT have top-level decision/permission/continue
         assert!(parsed.get("decision").is_none(), "Claude Code format should not have top-level decision");
         assert!(parsed.get("permission").is_none(), "Claude Code format should not have top-level permission");
@@ -1286,7 +1311,9 @@ mod tests {
         let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
         assert!(cmd.contains("sqz compress"), "windsurf format should work: {cmd}");
         assert!(cmd.contains("cargo test"));
-        assert!(cmd.contains("SQZ_CMD=cargo"));
+        // Issue #10: label is passed as `--cmd`, not `SQZ_CMD=` prefix.
+        assert!(cmd.contains("--cmd cargo"), "label must be passed via --cmd flag");
+        assert!(!cmd.contains("SQZ_CMD="), "must not emit legacy env prefix: {cmd}");
     }
 
     #[test]
@@ -1309,6 +1336,74 @@ mod tests {
         assert!(is_interactive_command("python3"));
         assert!(!is_interactive_command("git status"));
         assert!(!is_interactive_command("cargo test"));
+    }
+
+    // ── Issue #10: Windows shell compatibility ────────────────────────────
+
+    /// The rewritten command must use shell-neutral syntax so it works
+    /// in PowerShell and cmd.exe on Windows, not just POSIX shells.
+    ///
+    /// The old form `SQZ_CMD=val cmd` is sh-specific: PowerShell parses
+    /// `SQZ_CMD=val` as a command name (CommandNotFoundException), and
+    /// cmd.exe does the same. OpenCode Desktop on Windows routes the
+    /// bash tool through PowerShell (or cmd.exe when $SHELL is unset),
+    /// so the old form produced zero compression and a spurious error
+    /// dialog.
+    ///
+    /// Reported in issue #10. The fix: pass the label as `--cmd NAME`,
+    /// a normal CLI argument that every shell accepts.
+    #[test]
+    fn issue_10_rewrite_is_shell_neutral() {
+        let input = r#"{"tool_name":"Bash","tool_input":{"command":"dotnet build NewNeonCheckers3.sln"}}"#;
+        let result = process_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+
+        // Must use the --cmd flag form.
+        assert!(
+            cmd.contains("--cmd dotnet"),
+            "issue #10: rewrite must pass label via --cmd, got: {cmd}"
+        );
+        // Must NOT use the sh-specific inline-env-var form.
+        assert!(
+            !cmd.contains("SQZ_CMD="),
+            "issue #10: rewrite must NOT emit `SQZ_CMD=` prefix \
+             (broken in PowerShell and cmd.exe), got: {cmd}"
+        );
+        // Reporter's original command must still be intact.
+        assert!(
+            cmd.contains("dotnet build NewNeonCheckers3.sln"),
+            "original command must be preserved verbatim: {cmd}"
+        );
+        // And the pipe to sqz must be there.
+        assert!(cmd.contains("| sqz compress"), "must pipe through sqz: {cmd}");
+    }
+
+    /// The already-wrapped guard must recognise the new `--cmd` form so
+    /// that a command the hook has already rewritten doesn't get
+    /// wrapped again (causing `… | sqz compress --cmd X 2>&1 | sqz
+    /// compress --cmd sqz` chains).
+    ///
+    /// This is the runaway-prefix bug from issue #5 rephrased for the
+    /// new emission form.
+    #[test]
+    fn issue_10_already_wrapped_command_passes_through() {
+        let input = r#"{"tool_name":"Bash","tool_input":{"command":"git status 2>&1 | sqz compress --cmd git"}}"#;
+        let result = process_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        // The hook must leave an already-wrapped command alone.
+        // (When the guard short-circuits we return the input verbatim.)
+        assert_eq!(
+            result, input,
+            "already-wrapped command must pass through unchanged; \
+             otherwise each pass accumulates another `| sqz compress` tail"
+        );
+        // And explicitly verify the non-rewritten `command` is still the
+        // original, so someone reading the hook response doesn't think
+        // we silently re-wrapped.
+        let _ = parsed; // suppress "unused" in case of future assertion adds
     }
 
     #[test]
