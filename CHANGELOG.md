@@ -5,6 +5,45 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] — 2026-04-22
+
+### Added
+
+- **`sqz init --only <agents>`** — comma-separated list of agents to install.
+  Only the named tools get configured; all others are skipped. Accepts:
+  claude, cursor, windsurf, cline, gemini, opencode, codex. Aliases like
+  `claude-code`, `gemini-cli`, `roo` (= cline) are also recognised.
+  Requested in issue #11 (@shochdoerfer).
+- **`sqz init --skip <agents>`** — exclude list (complementary to `--only`).
+  Cannot be combined with `--only`.
+- **`sqz compress --cmd <name>`** — pass the base command label as a CLI
+  argument instead of the `SQZ_CMD=` env var. Shell-neutral: works in
+  PowerShell, cmd.exe, and POSIX shells.
+
+### Fixed
+
+- **OpenCode plugin shows as `file:///...` instead of "sqz"** — migrated
+  the TS plugin to OpenCode's V1 shape with `export default { id: "sqz",
+  server: factory }`. Modern OpenCode reads the `id` field and displays
+  "sqz" in the plugin list. Legacy OpenCode still loads via the named
+  export fallback. Both paths fire exactly once (identity dedup).
+- **Windows: `SQZ_CMD=cmd` CommandNotFoundException** (issue #10) — the
+  rewritten command used sh-style inline env-var syntax which fails in
+  PowerShell and cmd.exe. Changed all 3 emission sites (tool_hooks.rs,
+  opencode_plugin.rs TS, opencode_plugin.rs Rust) to use `--cmd NAME`
+  instead. `SQZ_CMD=` still recognised as legacy fallback.
+- **OpenCode duplicate plugin load** (issue #10) — `sqz init` registered
+  the plugin both via `opencode.json` (`"plugin": ["sqz"]`) and via
+  `~/.config/opencode/plugins/sqz.ts`. OpenCode loaded both. Fix: stop
+  writing the `plugin` array entry; rely on the auto-discovered .ts file.
+  Legacy entries cleaned up on re-run.
+- **npm install: nested tarball layout** — handle pre-v1.0 release tarballs
+  that contain a wrapper directory instead of a flat binary.
+
+### Testing
+
+- 1099 tests total, 0 failures
+
 ## [1.0.4] — 2026-04-21
 
 ### Fixed

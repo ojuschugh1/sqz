@@ -146,6 +146,19 @@ preserved — sqz merges its entries rather than overwriting.
 Plain `sqz init` (project scope) is useful when you want sqz active only
 inside one repo.
 
+**Only using one agent?** Pass `--only` (or `--skip`) to limit which
+configs are written:
+
+```sh
+sqz init --only opencode              # just OpenCode, nothing else
+sqz init --only opencode,codex        # OpenCode and Codex
+sqz init --skip cursor,windsurf       # everything except Cursor and Windsurf
+```
+
+Accepted names: `claude`, `cursor`, `windsurf`, `cline`, `gemini`,
+`opencode`, `codex`. Aliases (`claude-code`, `gemini-cli`, `roo`) also
+work. `--only` and `--skip` can't be combined.
+
 That's it. Shell hooks installed, AI tool hooks configured.
 
 ## How It Works
@@ -184,17 +197,19 @@ What doesn't get compressed:
 ## CLI
 
 ```sh
-sqz init --global     # Install hooks for every project on this machine
-sqz init              # Install hooks for just this project
-sqz compress <text>   # Compress (or pipe from stdin)
-sqz compress --no-cache  # Compress without dedup (always full output)
-sqz expand <ref>      # Recover original content from a §ref:HASH§ token
-sqz compact           # Evict stale context to free tokens
-sqz gain              # Show daily token savings
-sqz stats             # Cumulative report
-sqz discover          # Find missed savings
-sqz resume            # Re-inject session context after compaction
-sqz hook claude       # Process a PreToolUse hook
+sqz init --global             # Install hooks for every project on this machine
+sqz init                      # Install hooks for just this project
+sqz init --only opencode      # Only configure OpenCode (skip the rest)
+sqz init --skip cursor        # Configure every agent except Cursor
+sqz compress <text>           # Compress (or pipe from stdin)
+sqz compress --no-cache       # Compress without dedup (always full output)
+sqz expand <ref>              # Recover original content from a §ref:HASH§ token
+sqz compact                   # Evict stale context to free tokens
+sqz gain                      # Show daily token savings
+sqz stats                     # Cumulative report
+sqz discover                  # Find missed savings
+sqz resume                    # Re-inject session context after compaction
+sqz hook claude               # Process a PreToolUse hook
 sqz proxy --port 8080 # API proxy (compresses full request payloads)
 ```
 
