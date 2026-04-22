@@ -5,6 +5,17 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] — 2026-04-22
+
+### Fixed
+
+- **MCP: `notifications/initialized` caused Claude Code to mark server as
+  failed** (issue #12) — the server was returning an error response to
+  JSON-RPC notifications (messages without an `id`). Per the spec,
+  notifications are one-way and must produce no output. Claude Code saw
+  the unexpected error and marked sqz-mcp as failed. Fix: silently ignore
+  all notifications. 2 regression tests added.
+
 ## [1.0.5] — 2026-04-22
 
 ### Added
