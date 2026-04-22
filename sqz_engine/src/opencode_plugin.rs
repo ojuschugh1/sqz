@@ -22,6 +22,35 @@ use crate::error::Result;
 ///
 /// The plugin intercepts shell tool calls and rewrites them to pipe
 /// output through `sqz hook opencode`, which compresses the output.
+///
+/// ## Plugin shape (issue #10 comment by @itguy327)
+///
+/// OpenCode's V1 plugin loader (packages/opencode/src/plugin/shared.ts,
+/// function `readV1Plugin` + `resolvePluginId`) requires file-source
+/// plugins to default-export `{ id: string, server: Plugin }`. Without
+/// an `id`, OpenCode's loader throws "Path plugin ... must export id"
+/// — but the loader is lenient and falls through to the "legacy"
+/// path (`getLegacyPlugins`), which iterates all exports looking for
+/// a factory function. That fallback works but gives the plugin no
+/// human-readable name, so OpenCode's UI displays the raw
+/// `file:///...` spec instead of "sqz". Reported by @itguy327 on
+/// issue #10.
+///
+/// The fix is a dual-export shape:
+///
+/// 1. **Default export** — V1 object `{ id: "sqz", server: factory }`
+///    so the modern loader identifies the plugin by name.
+/// 2. **Named export** `SqzPlugin` — legacy factory fallback. Old
+///    OpenCode versions that don't know about V1 walk
+///    `Object.values(mod)`; default export dedups against the named
+///    export via `Set` identity in `getLegacyPlugins` so the factory
+///    fires exactly once either way.
+///
+/// Concrete verification that the dedup holds: the `seen` Set in
+/// `getLegacyPlugins` uses identity, and we assign the same factory
+/// reference to both. Also verified end-to-end by loading the
+/// generated file under the V1 loader and asserting only one hook
+/// registration.
 pub fn generate_opencode_plugin(sqz_path: &str) -> String {
     // Escape for embedding in a double-quoted TypeScript string literal.
     // On Windows, sqz_path contains backslashes that must be escaped —
@@ -33,10 +62,11 @@ pub fn generate_opencode_plugin(sqz_path: &str) -> String {
  *
  * Intercepts shell commands and pipes output through sqz for token savings.
  * Install: copy to ~/.config/opencode/plugins/sqz.ts
- * Config:  add "plugin": ["sqz"] to opencode.json or opencode.jsonc
+ * Discovery is automatic — no opencode.json entry needed (and in fact
+ * including one causes the plugin to load twice, per issue #10).
  */
 
-export const SqzPlugin = async (ctx: any) => {{
+const SqzPluginFactory = async (ctx: any) => {{
   const SQZ_PATH = "{sqz_path}";
 
   // Commands that should not be intercepted.
@@ -131,6 +161,25 @@ export const SqzPlugin = async (ctx: any) => {{
     }},
   }};
 }};
+
+// V1 default export — modern OpenCode (post-V1 loader) reads `id` here
+// and displays "sqz" in the plugin list. Without this, OpenCode falls
+// back to the raw `file:///...` spec as the plugin name (@itguy327 on
+// issue #10). `readV1Plugin` in OpenCode's plugin/shared.ts requires
+// file-source plugins to declare an id — otherwise `resolvePluginId`
+// throws.
+export default {{
+  id: "sqz",
+  server: SqzPluginFactory,
+}};
+
+// Legacy named export — pre-V1 OpenCode versions walk Object.values(mod)
+// looking for factory functions. Assigning the same reference as the
+// default export's `.server` means the legacy `seen` Set dedups via
+// identity, so the factory fires exactly once either way. Kept for
+// backward compatibility with OpenCode versions that predate the V1
+// loader (roughly anything before mid-2025).
+export const SqzPlugin = SqzPluginFactory;
 "#
     )
 }
@@ -773,6 +822,65 @@ mod tests {
         assert!(content.contains("isInteractive"));
         assert!(content.contains("vim"));
         assert!(content.contains("--watch"));
+    }
+
+    /// Issue #10 follow-up (@itguy327 comment): OpenCode's plugin UI
+    /// shows the raw `file:///...` spec as the plugin name instead of
+    /// "sqz" because our generated plugin lacked the V1 `id` field.
+    ///
+    /// OpenCode's V1 loader in `packages/opencode/src/plugin/shared.ts`
+    /// requires file-source plugins to default-export an object with an
+    /// `id` field — `resolvePluginId` literally throws "Path plugin …
+    /// must export id" if it's missing. When the default export is
+    /// absent, the loader falls through to the legacy path which works
+    /// but provides no name, so OpenCode displays the file spec
+    /// instead.
+    ///
+    /// Fix: the plugin default-exports `{ id: "sqz", server: factory }`.
+    /// This test locks in that shape — dropping either field would
+    /// regress the fix.
+    #[test]
+    fn test_generate_opencode_plugin_declares_v1_id() {
+        let content = generate_opencode_plugin("sqz");
+        assert!(
+            content.contains("id: \"sqz\""),
+            "plugin must default-export `id: \"sqz\"` so OpenCode's \
+             V1 loader (shared.ts readV1Plugin/resolvePluginId) \
+             displays \"sqz\" in the UI instead of the file path; \
+             got:\n{content}"
+        );
+        assert!(
+            content.contains("server: SqzPluginFactory"),
+            "plugin must default-export `server: <factory>` for V1 \
+             loader compliance; got:\n{content}"
+        );
+        assert!(
+            content.contains("export default {"),
+            "plugin must have a default export per OpenCode V1 shape; \
+             got:\n{content}"
+        );
+    }
+
+    /// Companion to the V1-shape test: the legacy named export must
+    /// stay in place for backward compat with pre-V1 OpenCode.
+    ///
+    /// The legacy loader walks `Object.values(mod)` and dedupes via a
+    /// `Set`, so if our default export's `.server` is the same function
+    /// reference as the `SqzPlugin` named export, the factory fires
+    /// exactly once either way. This test asserts both exports are
+    /// present AND share the same factory name — if someone later
+    /// splits them into different functions they'd double-load on old
+    /// OpenCode versions.
+    #[test]
+    fn test_generate_opencode_plugin_legacy_named_export_preserved() {
+        let content = generate_opencode_plugin("sqz");
+        assert!(
+            content.contains("export const SqzPlugin = SqzPluginFactory"),
+            "legacy named export must alias the same factory reference \
+             as the V1 default export — otherwise old OpenCode versions \
+             would see two distinct factories in `Object.values(mod)` \
+             and fire the hook twice; got:\n{content}"
+        );
     }
 
     // Note: the older `test_generate_opencode_plugin_has_sqz_guard` was
