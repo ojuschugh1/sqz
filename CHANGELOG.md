@@ -5,6 +5,23 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] — 2026-04-22
+
+### Fixed
+
+- **Claude Code utilization gap** (issue #12 follow-up) — sqz-mcp was
+  connected but Claude Code never called its tools because the MCP server
+  only offered `compress` while the PreToolUse hook already compressed
+  Bash output. Added guidance in the tool description so Claude knows
+  when to prefer the MCP tool over the built-in Read/Grep.
+- **OpenCode plugin always regenerated on init** — `sqz init` now
+  overwrites `~/.config/opencode/plugins/sqz.ts` every time to pick up
+  fixes (V1 shape, `--cmd` rewrite, etc.) without requiring manual
+  deletion. Also adds `enabled: true` to the MCP entry in opencode.json.
+- **Codex integration test env-var races** — eliminated `std::env::set_var`
+  in codex tests; each test now uses isolated temp directories with
+  `CODEX_HOME` override instead of mutating the global `HOME`.
+
 ## [1.0.6] — 2026-04-22
 
 ### Fixed
