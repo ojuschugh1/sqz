@@ -906,13 +906,27 @@ pub fn install_tool_hooks_scoped_filtered(
         // instead of writing a fresh .claude/settings.local.json in cwd.
         // This is the fix for "sqz init does nothing outside the project
         // I ran it in" — reported by 76vangel. Design mirrors rtk init -g.
+        //
+        // Also triggers the issue #12 companion installs (CLAUDE.md
+        // guidance + ~/.claude.json MCP server registration) since those
+        // belong to Claude Code conceptually — if you're installing the
+        // hook, you want the guidance and MCP wiring too.
         if config.tool_name == "Claude Code" && scope == InstallScope::Global {
-            match install_claude_global(sqz_path) {
-                Ok(true) => installed.push("Claude Code".to_string()),
-                Ok(false) => { /* nothing new to install — already present */ }
-                Err(_e) => {
-                    // Non-fatal: leave Claude Code out and continue.
-                }
+            let hook_installed = match install_claude_global(sqz_path) {
+                Ok(v) => v,
+                Err(_) => false,
+            };
+            let md_changed = crate::claude_md_integration::install_claude_md_guidance(
+                project_dir, sqz_path,
+            )
+            .unwrap_or(false);
+            let mcp_changed =
+                crate::claude_md_integration::install_claude_mcp_config()
+                    .unwrap_or(false);
+            if (hook_installed || md_changed || mcp_changed)
+                && !installed.iter().any(|n| n == "Claude Code")
+            {
+                installed.push("Claude Code".to_string());
             }
             continue;
         }
@@ -921,6 +935,25 @@ pub fn install_tool_hooks_scoped_filtered(
 
         // Don't overwrite existing hook configs
         if full_path.exists() {
+            // Project-scope Claude Code file already exists — but the
+            // companion CLAUDE.md guidance and MCP registration might
+            // not. Install those idempotently (they're no-ops if
+            // already present).
+            if config.tool_name == "Claude Code" {
+                let md_changed =
+                    crate::claude_md_integration::install_claude_md_guidance(
+                        project_dir, sqz_path,
+                    )
+                    .unwrap_or(false);
+                let mcp_changed =
+                    crate::claude_md_integration::install_claude_mcp_config()
+                        .unwrap_or(false);
+                if (md_changed || mcp_changed)
+                    && !installed.iter().any(|n| n == "Claude Code")
+                {
+                    installed.push("Claude Code".to_string());
+                }
+            }
             continue;
         }
 
@@ -933,6 +966,18 @@ pub fn install_tool_hooks_scoped_filtered(
 
         if std::fs::write(&full_path, &config.config_content).is_ok() {
             installed.push(config.tool_name.clone());
+            // Claude Code at project scope: also install the issue #12
+            // companion artifacts (CLAUDE.md guidance + ~/.claude.json
+            // MCP registration). The agent needs all three pieces to
+            // actually use sqz — the hook catches Bash, the MCP server
+            // provides sqz_read_file/grep/list_dir, and the CLAUDE.md
+            // tells it when to pick which.
+            if config.tool_name == "Claude Code" {
+                let _ = crate::claude_md_integration::install_claude_md_guidance(
+                    project_dir, sqz_path,
+                );
+                let _ = crate::claude_md_integration::install_claude_mcp_config();
+            }
         }
     }
 

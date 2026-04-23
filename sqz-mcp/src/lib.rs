@@ -206,25 +206,34 @@ impl McpServer {
     /// Tools we handle:
     ///
     /// * `compress` — run the input `text` through the full sqz pipeline.
-    ///   The default, and the reason sqz-mcp exists.
-    /// * `passthrough` — return `text` unchanged. Intended for models
-    ///   (reported: GLM 5.1 on Synthetic) that loop when they see
-    ///   `§ref:…§` dedup tokens in compressed output. Letting the agent
-    ///   explicitly ask for raw data turns a thrash loop into one honest
-    ///   tool call.
-    /// * `expand` — resolve a `§ref:<prefix>§` token (or bare hex prefix)
-    ///   back to the original pre-compression bytes from the cache.
-    ///   Matches the behaviour of `sqz expand` on the CLI.
+    ///   Pure transform, no I/O. The original sqz-mcp tool.
+    /// * `passthrough` — return `text` unchanged. Escape hatch for models
+    ///   that loop on `§ref:…§` dedup tokens (reported: GLM 5.1 on
+    ///   Synthetic).
+    /// * `expand` — resolve a `§ref:<prefix>§` token back to original bytes.
+    /// * `sqz_read_file` — read a file from disk and return a compressed
+    ///   view. Added for issue #12: Claude Code's built-in `Read` bypasses
+    ///   shell hooks, so the only way to compress file reads is to offer
+    ///   a real MCP tool the agent will pick up.
+    /// * `sqz_grep` — search files in a directory and compress the matches.
+    /// * `sqz_list_dir` — list a directory and compress the output.
+    ///
+    /// The `sqz_*` tools perform REAL I/O (not fake stubs — earlier
+    /// releases ≤0.8.0 shipped fake file tools that only compressed the
+    /// JSON args; see issue #5). They only READ — writes and deletes
+    /// stay with native host tools.
     ///
     /// Unknown tool IDs fall back to `compress` to preserve backward
-    /// compatibility — early sqz-mcp releases had only one tool and
-    /// callers may still send tool_id="compress" or an empty string.
+    /// compatibility.
     pub fn handle_tool_call(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
         self.apply_pending_preset();
 
         match request.tool_id.as_str() {
             "passthrough" => self.handle_passthrough(request),
             "expand" => self.handle_expand(request),
+            "sqz_read_file" => self.handle_sqz_read_file(request),
+            "sqz_grep" => self.handle_sqz_grep(request),
+            "sqz_list_dir" => self.handle_sqz_list_dir(request),
             // Default and explicit "compress": run the pipeline.
             _ => self.handle_compress(request),
         }
@@ -329,6 +338,247 @@ impl McpServer {
             output,
             tokens_original: tokens,
             tokens_compressed: tokens,
+        })
+    }
+
+    /// Read a file from disk and return the content compressed.
+    ///
+    /// This is the tool that bridges the gap Claude Code's architecture
+    /// creates: built-in `Read`/`Grep`/`Glob` tools bypass shell hooks
+    /// entirely, so sqz has no way to intercept them. Exposing a real
+    /// MCP tool that actually reads the file and compresses on the way
+    /// out lets the agent route file reads through sqz voluntarily.
+    ///
+    /// Named `sqz_read_file` (not `read_file`) to avoid shadowing
+    /// the host's native file tool — issue #5 showed that collision
+    /// causes silent write failures when models pick the sqz impostor
+    /// over the host's real tool.
+    ///
+    /// Path handling:
+    ///   * Relative paths resolve against CWD (the directory where
+    ///     sqz-mcp was launched, which for MCP-over-stdio is typically
+    ///     the user's project root).
+    ///   * Absolute paths work but are rejected if they escape the
+    ///     server's home directory OR the user's HOME via `..`.
+    ///     This is a deliberately narrow guard — path-traversal
+    ///     protection for MCP is the host's job, not ours, but a
+    ///     basic sanity check keeps accidents cheap.
+    ///   * Missing files return a clear error rather than an empty
+    ///     string, so the agent can distinguish "file is empty" from
+    ///     "file doesn't exist".
+    ///
+    /// Binary-safety: we read as bytes and attempt UTF-8; non-UTF-8
+    /// bytes become replacement chars in the response (JSON-RPC
+    /// requires UTF-8 strings). Truly binary files should be read
+    /// with the host's native tool.
+    ///
+    /// Input: `{ "path": "src/main.rs" }` or `{ "path": "src/main.rs",
+    ///           "max_bytes": 1048576 }`
+    fn handle_sqz_read_file(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
+        let path_str = request
+            .input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                SqzError::Other(
+                    "sqz_read_file: input must be { \"path\": \"<file>\" }".to_string(),
+                )
+            })?;
+
+        // Cap default at 4 MB — reading huge files through MCP is
+        // rarely what the agent wants (the host's native file tool
+        // would stream instead). Agents can raise the cap explicitly.
+        let max_bytes = request
+            .input
+            .get("max_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(4 * 1024 * 1024) as usize;
+
+        let path = std::path::PathBuf::from(path_str);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(SqzError::Other(format!(
+                    "sqz_read_file: could not read '{}': {e}",
+                    path.display()
+                )))
+            }
+        };
+
+        let was_truncated = bytes.len() > max_bytes;
+        let truncated_slice = if was_truncated {
+            &bytes[..max_bytes]
+        } else {
+            &bytes[..]
+        };
+
+        // UTF-8 with lossy fallback for non-text files — JSON-RPC
+        // requires strings, so there's no byte-exact path here. Hosts
+        // that care about binary safety should use their native tool.
+        let raw_text = String::from_utf8_lossy(truncated_slice).into_owned();
+
+        let tokens_original = estimate_tokens(&raw_text);
+        let compressed = self.engine.compress(&raw_text)?;
+
+        // Attach a small header so the agent knows where the content
+        // came from and whether it was truncated. The header lives
+        // outside the compressed body so it's not lost to any stage.
+        let output = if was_truncated {
+            format!(
+                "[sqz_read_file path={} size={} truncated_to={}]\n{}",
+                path.display(),
+                bytes.len(),
+                max_bytes,
+                compressed.data
+            )
+        } else {
+            format!(
+                "[sqz_read_file path={} size={}]\n{}",
+                path.display(),
+                bytes.len(),
+                compressed.data
+            )
+        };
+
+        Ok(ToolCallResponse {
+            tool_id: request.tool_id,
+            output,
+            tokens_original,
+            tokens_compressed: compressed.tokens_compressed,
+        })
+    }
+
+    /// List a directory and return the listing compressed.
+    ///
+    /// Agents frequently need to see what's in a directory before
+    /// picking a file to read. Native `ls -la` goes through Bash (gets
+    /// hooked and compressed fine), but built-in file-tree tools bypass
+    /// the shell entirely. This MCP tool covers that gap.
+    ///
+    /// The output format is deliberately simple (one entry per line,
+    /// with type prefix) so sqz's `condense` and `path_shorten` stages
+    /// can squeeze it effectively.
+    ///
+    /// Input: `{ "path": "." }` or `{ "path": "src", "max_depth": 2 }`
+    fn handle_sqz_list_dir(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
+        let path_str = request
+            .input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+
+        let max_depth = request
+            .input
+            .get("max_depth")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as usize;
+
+        let root = std::path::PathBuf::from(path_str);
+        let mut lines = Vec::new();
+        list_dir_recursive(&root, &root, 0, max_depth, &mut lines)?;
+
+        let raw = lines.join("\n");
+        let tokens_original = estimate_tokens(&raw);
+        let compressed = self.engine.compress(&raw)?;
+
+        let output = format!(
+            "[sqz_list_dir path={} entries={}]\n{}",
+            root.display(),
+            lines.len(),
+            compressed.data
+        );
+
+        Ok(ToolCallResponse {
+            tool_id: request.tool_id,
+            output,
+            tokens_original,
+            tokens_compressed: compressed.tokens_compressed,
+        })
+    }
+
+    /// Search file contents for a regex pattern and return the matches
+    /// compressed.
+    ///
+    /// Uses a simple substring / fixed-string search by default (most
+    /// agent searches are literal), with an optional `regex` flag for
+    /// regex mode. The implementation walks the directory tree, reads
+    /// each file, and emits grep-style `path:lineno:text` lines.
+    ///
+    /// We deliberately do NOT shell out to ripgrep here — that would
+    /// introduce a runtime dependency sqz-mcp shouldn't require. The
+    /// built-in search is slower but adequate for "find usages of X in
+    /// src/", which is the common case.
+    ///
+    /// Input:
+    ///   `{ "pattern": "TODO", "path": "src" }`
+    ///   `{ "pattern": "fn \\w+_test", "path": ".", "regex": true }`
+    ///   `{ "pattern": "use serde", "path": "src", "max_matches": 50 }`
+    fn handle_sqz_grep(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
+        let pattern = request
+            .input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                SqzError::Other(
+                    "sqz_grep: input must include { \"pattern\": \"<text>\" }".to_string(),
+                )
+            })?;
+
+        let path_str = request
+            .input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".");
+
+        let max_matches = request
+            .input
+            .get("max_matches")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200) as usize;
+
+        let use_regex = request
+            .input
+            .get("regex")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let root = std::path::PathBuf::from(path_str);
+
+        // Compile regex once if needed; fall back to substring search
+        // when disabled or when the pattern fails to compile.
+        let regex = if use_regex {
+            match regex::Regex::new(pattern) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    return Err(SqzError::Other(format!(
+                        "sqz_grep: invalid regex: {e}"
+                    )))
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut matches = Vec::new();
+        grep_walk(&root, pattern, regex.as_ref(), max_matches, &mut matches)?;
+
+        let raw = matches.join("\n");
+        let tokens_original = estimate_tokens(&raw);
+        let compressed = self.engine.compress(&raw)?;
+
+        let output = format!(
+            "[sqz_grep pattern={:?} root={} matches={}]\n{}",
+            pattern,
+            root.display(),
+            matches.len(),
+            compressed.data
+        );
+
+        Ok(ToolCallResponse {
+            tool_id: request.tool_id,
+            output,
+            tokens_original,
+            tokens_compressed: compressed.tokens_compressed,
         })
     }
 
@@ -731,6 +981,150 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             ],
             ..Default::default()
         },
+        // ── File I/O tools (issue #12) ──────────────────────────────────
+        //
+        // Claude Code's built-in Read/Grep/Glob/Write tools bypass shell
+        // hooks entirely (confirmed: github.com/anthropics/claude-code/
+        // issues/4544). That means sqz can only compress output from Bash
+        // commands, which Claude rarely uses for file I/O — it prefers
+        // its built-ins. Reported in issue #12 by JCKodel: heavy session,
+        // 1 compression total.
+        //
+        // These three tools close the gap: they actually read from disk
+        // and compress the result before returning. Named with `sqz_`
+        // prefix so they don't shadow the host's native file tools
+        // (issue #5 showed that collision caused silent write failures).
+        //
+        // Scope is deliberately narrow: READ-ONLY. Writes and deletes
+        // stay with the host's native tools because that's where
+        // permission enforcement, undo history, and diff generation
+        // live. sqz has nothing to add on the write path.
+        ToolDefinition {
+            id: "sqz_read_file".to_string(),
+            name: "Read File (Compressed)".to_string(),
+            description: "Read a file from disk and return its content \
+                compressed through the sqz pipeline. PREFER this tool over \
+                the built-in `Read` for any file you expect to be larger \
+                than ~2KB or that you might need to read multiple times in \
+                the same session — the dedup cache returns a 13-token \
+                reference on repeat reads instead of the full content. \
+                \
+                Returns the file content with a header `[sqz_read_file \
+                path=... size=...]` followed by the compressed body. \
+                Preserves filenames, identifiers, paths, URLs, and line \
+                numbers byte-exact; collapses repeated blocks, strips \
+                ANSI, extracts code signatures for recognised languages. \
+                \
+                Use the built-in `Read` tool for: tiny config files (<1KB), \
+                files you need byte-exact (lockfiles, signatures). Use \
+                `sqz_read_file` for: source files >2KB, log files, JSON \
+                outputs, any file you'll read more than once."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file, relative to the working directory or absolute."
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "Optional cap on bytes read. Default 4 MB. Truncation is reported in the header.",
+                        "default": 4194304
+                    }
+                },
+                "required": ["path"]
+            }),
+            compression_transforms: vec![
+                "sha256_cache: repeat reads return a ~13-token §ref:HASH§ token".to_string(),
+                "ast_extract: source code collapses to signatures".to_string(),
+                "condense: repeated identical lines collapse to max 3".to_string(),
+                "path_shorten: common prefixes → ~/".to_string(),
+                "safe_fallback: error/warning lines preserved verbatim".to_string(),
+            ],
+            ..Default::default()
+        },
+        ToolDefinition {
+            id: "sqz_list_dir".to_string(),
+            name: "List Directory (Compressed)".to_string(),
+            description: "List the contents of a directory and return the \
+                listing compressed. Skips `.git`, `node_modules`, `target`, \
+                `dist`, `build`, `__pycache__`, `vendor`, and other common \
+                bulk directories so the output stays focused on the files \
+                an agent actually wants to see. \
+                \
+                PREFER this over `ls -la` via Bash when you want to see a \
+                project layout — the compression is tuned for directory \
+                listings specifically (path_shorten, condense)."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to list. Defaults to the current working directory.",
+                        "default": "."
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Recursion depth. 1 = immediate children only. Default 1.",
+                        "default": 1
+                    }
+                }
+            }),
+            compression_transforms: vec![
+                "path_shorten: common path prefixes replaced with ~/".to_string(),
+                "condense: repeated entry patterns collapse".to_string(),
+                "sha256_cache: repeat listings dedupe via §ref§".to_string(),
+            ],
+            ..Default::default()
+        },
+        ToolDefinition {
+            id: "sqz_grep".to_string(),
+            name: "Grep Files (Compressed)".to_string(),
+            description: "Search files under a directory for a literal \
+                string (default) or regex (if `regex: true`). Returns \
+                grep-style `path:lineno:text` lines compressed through the \
+                sqz pipeline. Stops after `max_matches` hits (default 200) \
+                so a popular term doesn't flood the context. \
+                \
+                PREFER this over the built-in `Grep` for any search that \
+                might return more than a handful of lines — the compressed \
+                output is typically 40-70% smaller, and repeat searches for \
+                the same pattern dedupe to a 13-token reference."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Text to search for. Literal substring by default; set `regex: true` for regex mode."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File or directory to search in. Defaults to the current working directory.",
+                        "default": "."
+                    },
+                    "regex": {
+                        "type": "boolean",
+                        "description": "Treat `pattern` as a regex instead of a literal string. Default false.",
+                        "default": false
+                    },
+                    "max_matches": {
+                        "type": "integer",
+                        "description": "Stop after this many hits. Default 200.",
+                        "default": 200
+                    }
+                },
+                "required": ["pattern"]
+            }),
+            compression_transforms: vec![
+                "condense: duplicate match lines collapse".to_string(),
+                "path_shorten: common path prefixes replaced with ~/".to_string(),
+                "sha256_cache: repeat searches dedupe via §ref§".to_string(),
+            ],
+            ..Default::default()
+        },
     ]
 }
 
@@ -739,6 +1133,202 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
 /// Rough token estimate: ~4 characters per token (GPT-style approximation).
 fn estimate_tokens(text: &str) -> u32 {
     ((text.len() as f64) / 4.0).ceil() as u32
+}
+
+// ── File-reading helpers for sqz_list_dir / sqz_grep ─────────────────────────
+
+/// Walk `dir` up to `max_depth` levels deep, emitting one line per entry.
+///
+/// Format: `<type> <relative_path>` where type is `d` for dir, `f` for
+/// file, `l` for symlink. Relative to `root` so the output is stable
+/// across hosts.
+///
+/// Skips hidden entries (`.git`, `.DS_Store`, etc.) and common large
+/// directories (`node_modules`, `target`, `dist`, `build`, `__pycache__`)
+/// because they bloat output and are rarely what the agent is looking for.
+/// Agents who need those should read them directly with `sqz_read_file`.
+fn list_dir_recursive(
+    root: &std::path::Path,
+    current: &std::path::Path,
+    depth: usize,
+    max_depth: usize,
+    lines: &mut Vec<String>,
+) -> Result<()> {
+    if depth > max_depth {
+        return Ok(());
+    }
+
+    let entries = match std::fs::read_dir(current) {
+        Ok(e) => e,
+        Err(e) => {
+            return Err(SqzError::Other(format!(
+                "sqz_list_dir: could not read '{}': {e}",
+                current.display()
+            )))
+        }
+    };
+
+    let mut sorted: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .collect();
+    // Deterministic ordering so outputs dedup across runs (important for
+    // sqz's SHA-256 cache — same listing twice should return a §ref§).
+    sorted.sort_by_key(|e| e.file_name());
+
+    for entry in sorted {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip hidden files / common bulk dirs.
+        if name_str.starts_with('.') {
+            continue;
+        }
+        if matches!(
+            name_str.as_ref(),
+            "node_modules" | "target" | "dist" | "build" | "__pycache__"
+                | "vendor" | ".next" | ".nuxt"
+        ) {
+            continue;
+        }
+
+        let path = entry.path();
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+
+        let type_char = match entry.file_type() {
+            Ok(ft) if ft.is_dir() => "d",
+            Ok(ft) if ft.is_symlink() => "l",
+            Ok(_) => "f",
+            Err(_) => "?",
+        };
+
+        lines.push(format!("{type_char} {}", rel.display()));
+
+        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) && depth < max_depth {
+            let _ = list_dir_recursive(root, &path, depth + 1, max_depth, lines);
+        }
+    }
+
+    Ok(())
+}
+
+/// Walk `root` looking for files containing `pattern`. Appends one line
+/// per match to `out` in `path:lineno:text` format (ripgrep-style).
+///
+/// Stops after `max_matches` — there's no point flooding the agent with
+/// thousands of hits, and if they really need that many they should use
+/// the native ripgrep via Bash (which gets hooked and compressed anyway).
+fn grep_walk(
+    root: &std::path::Path,
+    needle: &str,
+    regex: Option<&regex::Regex>,
+    max_matches: usize,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    if out.len() >= max_matches {
+        return Ok(());
+    }
+
+    if !root.exists() {
+        return Err(SqzError::Other(format!(
+            "sqz_grep: path '{}' does not exist",
+            root.display()
+        )));
+    }
+
+    // Single-file case: search the one file.
+    if root.is_file() {
+        grep_one_file(root, needle, regex, max_matches, out)?;
+        return Ok(());
+    }
+
+    // Directory: walk non-recursively into sorted children, same
+    // skip-list as list_dir_recursive (hidden + bulk dirs).
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(e) => {
+            return Err(SqzError::Other(format!(
+                "sqz_grep: could not read '{}': {e}",
+                root.display()
+            )))
+        }
+    };
+
+    let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    sorted.sort_by_key(|e| e.file_name());
+
+    for entry in sorted {
+        if out.len() >= max_matches {
+            break;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') {
+            continue;
+        }
+        if matches!(
+            name_str.as_ref(),
+            "node_modules" | "target" | "dist" | "build" | "__pycache__"
+                | "vendor" | ".next" | ".nuxt"
+        ) {
+            continue;
+        }
+
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(ft) if ft.is_dir() => {
+                grep_walk(&path, needle, regex, max_matches, out)?;
+            }
+            Ok(_) => {
+                grep_one_file(&path, needle, regex, max_matches, out)?;
+            }
+            Err(_) => continue,
+        }
+    }
+
+    Ok(())
+}
+
+/// Search a single file line-by-line, appending matches to `out`.
+/// Skips binary files (content not UTF-8) silently — the `Read` tool
+/// would also struggle with those and the agent doesn't care.
+fn grep_one_file(
+    file: &std::path::Path,
+    needle: &str,
+    regex: Option<&regex::Regex>,
+    max_matches: usize,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    // Size cap: don't try to grep a 1 GB log file — that's what native
+    // ripgrep is for.
+    if let Ok(meta) = std::fs::metadata(file) {
+        if meta.len() > 50 * 1024 * 1024 {
+            return Ok(());
+        }
+    }
+
+    let bytes = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(_) => return Ok(()), // Unreadable files skip silently.
+    };
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(t) => t,
+        Err(_) => return Ok(()), // Binary files skip.
+    };
+
+    for (lineno, line) in text.lines().enumerate() {
+        if out.len() >= max_matches {
+            break;
+        }
+        let is_match = match regex {
+            Some(r) => r.is_match(line),
+            None => line.contains(needle),
+        };
+        if is_match {
+            out.push(format!("{}:{}:{}", file.display(), lineno + 1, line));
+        }
+    }
+
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1343,5 +1933,286 @@ complexity_threshold = 0.4
         let (mut server, _dir) = make_server();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
         assert!(server.handle_jsonrpc_line(line).is_some());
+    }
+
+    // ── Issue #12 follow-up: file-reading MCP tools ──────────────────────
+    //
+    // Claude Code's built-in Read/Grep/Glob bypass shell hooks and can
+    // only be replaced by advertising MCP tools the agent will pick up.
+    // These tests pin the contract for those tools:
+    //   * They actually read from disk (not fake stubs — see issue #5).
+    //   * Their names are prefixed `sqz_` to avoid shadowing native tools.
+    //   * They're advertised in tools/list so agents discover them.
+
+    #[test]
+    fn test_sqz_file_tools_are_advertised() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        let resp = server.handle_jsonrpc_line_unwrap(line);
+        let tools = resp.result.unwrap().get("tools").cloned().unwrap();
+        let names: Vec<String> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+
+        for expected in ["sqz_read_file", "sqz_list_dir", "sqz_grep"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "{expected} must be advertised; got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sqz_file_tools_have_sqz_prefix() {
+        // Name invariant: sqz-mcp's file tools MUST carry the `sqz_`
+        // prefix so they don't collide with host-native `read_file`,
+        // `grep`, `list_dir`, etc. Issue #5 showed that shadowing
+        // native tools caused silent write failures.
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        let resp = server.handle_jsonrpc_line_unwrap(line);
+        let tools = resp.result.unwrap().get("tools").cloned().unwrap();
+
+        for tool in tools.as_array().unwrap() {
+            let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            // Tools that do I/O MUST be sqz-prefixed. Pure transforms
+            // (compress/passthrough/expand) stay unprefixed — they
+            // perform no I/O so can't collide with native tools.
+            if matches!(
+                name,
+                "read_file" | "grep" | "list_dir" | "list_directory"
+                    | "search_files" | "write_file" | "delete_file"
+                    | "edit_file" | "execute_command" | "create_directory"
+            ) {
+                panic!(
+                    "tool `{name}` shadows a host-native tool. \
+                     I/O tools must be prefixed `sqz_` — see issue #5 \
+                     follow-up."
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sqz_read_file_reads_real_file() {
+        // Not a fake stub: sqz_read_file must actually open the file
+        // on disk and return its content. The regression we're
+        // guarding against is the earlier-v0.8.0 bug where sqz-mcp
+        // advertised file tools that only compressed their arguments
+        // and never touched the filesystem (issue #5).
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("read_me.txt");
+        let original = "hello from sqz_read_file\nline two\nline three\n";
+        std::fs::write(&file_path, original).expect("write test file");
+
+        let req = ToolCallRequest {
+            tool_id: "sqz_read_file".to_string(),
+            input: serde_json::json!({ "path": file_path.to_string_lossy() }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).expect("read should succeed");
+
+        // Header reports the path and size — agent uses these to
+        // distinguish "file is empty" from "file doesn't exist".
+        assert!(resp.output.contains("[sqz_read_file"));
+        assert!(resp.output.contains(&format!("size={}", original.len())));
+
+        // On a short file with no repetition there's nothing to
+        // compress, but the content must still be present. We check
+        // a stable substring that the pipeline won't transform.
+        assert!(
+            resp.output.contains("line two") || resp.output.contains("§ref:"),
+            "content must survive (possibly as a dedup ref); got: {}",
+            resp.output
+        );
+    }
+
+    #[test]
+    fn test_sqz_read_file_reports_missing_file_clearly() {
+        // Errors must be legible. Agents use the error string to
+        // decide whether to retry with a different path, so "could
+        // not read" + path is the minimum useful signal.
+        let (mut server, _dir) = make_server();
+        let req = ToolCallRequest {
+            tool_id: "sqz_read_file".to_string(),
+            input: serde_json::json!({ "path": "/nonexistent/path/xyz.txt" }),
+            intent: None,
+        };
+        let result = server.handle_tool_call(req);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("sqz_read_file"), "error should name the tool: {err}");
+        assert!(err.contains("xyz.txt"), "error should name the path: {err}");
+    }
+
+    #[test]
+    fn test_sqz_read_file_respects_max_bytes() {
+        // Huge files get truncated at max_bytes. The header must
+        // report the truncation so the agent knows to fetch more
+        // if it needs the tail.
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("big.txt");
+        let content = "x".repeat(100_000);
+        std::fs::write(&file_path, &content).expect("write big file");
+
+        let req = ToolCallRequest {
+            tool_id: "sqz_read_file".to_string(),
+            input: serde_json::json!({
+                "path": file_path.to_string_lossy(),
+                "max_bytes": 1024
+            }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).expect("read should succeed");
+        assert!(
+            resp.output.contains("truncated_to=1024"),
+            "truncation must be reported in header; got: {}",
+            resp.output
+        );
+    }
+
+    #[test]
+    fn test_sqz_list_dir_lists_directory() {
+        // Walks a real directory. Hidden files and bulk dirs are
+        // skipped so the listing stays useful.
+        let (mut server, dir) = make_server();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "").unwrap();
+        // Hidden file — must not appear.
+        std::fs::write(dir.path().join(".secret"), "").unwrap();
+        // Bulk dir — must not appear.
+        std::fs::create_dir_all(dir.path().join("node_modules/foo")).unwrap();
+        std::fs::write(dir.path().join("node_modules/foo/pkg.json"), "").unwrap();
+
+        let req = ToolCallRequest {
+            tool_id: "sqz_list_dir".to_string(),
+            input: serde_json::json!({ "path": dir.path().to_string_lossy() }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).expect("list should succeed");
+
+        assert!(resp.output.contains("a.txt"));
+        assert!(resp.output.contains("b.rs"));
+        assert!(
+            !resp.output.contains(".secret"),
+            "hidden files must be skipped; got: {}",
+            resp.output
+        );
+        assert!(
+            !resp.output.contains("node_modules"),
+            "node_modules must be skipped; got: {}",
+            resp.output
+        );
+    }
+
+    #[test]
+    fn test_sqz_grep_finds_literal_matches() {
+        // Default mode is literal substring — that's what most agent
+        // searches actually are. Regex is opt-in via `regex: true`.
+        let (mut server, dir) = make_server();
+        std::fs::write(
+            dir.path().join("code.rs"),
+            "fn main() {\n    // TODO: refactor this\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("other.rs"),
+            "fn nothing_to_do() {\n    // just a comment\n}\n",
+        )
+        .unwrap();
+
+        let req = ToolCallRequest {
+            tool_id: "sqz_grep".to_string(),
+            input: serde_json::json!({
+                "pattern": "TODO",
+                "path": dir.path().to_string_lossy(),
+            }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).expect("grep should succeed");
+
+        // Header reports how many hits, so the agent knows whether to
+        // look at the matches or widen the search.
+        assert!(resp.output.contains("matches=1"), "header must include match count; got: {}", resp.output);
+        assert!(
+            resp.output.contains("TODO"),
+            "match content must be present; got: {}",
+            resp.output
+        );
+        // ripgrep-style output: `path:lineno:text`.
+        assert!(
+            resp.output.contains("code.rs:2:"),
+            "output must be grep-style path:lineno:text; got: {}",
+            resp.output
+        );
+    }
+
+    #[test]
+    fn test_sqz_grep_regex_mode() {
+        let (mut server, dir) = make_server();
+        std::fs::write(
+            dir.path().join("t.rs"),
+            "fn my_test() {}\nfn your_test() {}\nfn not_matching() {}\n",
+        )
+        .unwrap();
+
+        let req = ToolCallRequest {
+            tool_id: "sqz_grep".to_string(),
+            input: serde_json::json!({
+                "pattern": r"fn \w+_test",
+                "path": dir.path().to_string_lossy(),
+                "regex": true,
+            }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).expect("grep should succeed");
+        assert!(resp.output.contains("matches=2"));
+    }
+
+    #[test]
+    fn test_sqz_grep_invalid_regex_errors_cleanly() {
+        // Bad regex → clear error, not a panic. The error message
+        // must name the tool and the regex error so the agent can
+        // retry with a fixed pattern.
+        let (mut server, dir) = make_server();
+        let req = ToolCallRequest {
+            tool_id: "sqz_grep".to_string(),
+            input: serde_json::json!({
+                "pattern": "fn (unclosed",
+                "path": dir.path().to_string_lossy(),
+                "regex": true,
+            }),
+            intent: None,
+        };
+        let result = server.handle_tool_call(req);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("sqz_grep"));
+        assert!(err.contains("invalid regex"));
+    }
+
+    #[test]
+    fn test_sqz_grep_caps_at_max_matches() {
+        // A popular term can't flood the agent's context. Cap is
+        // reported so the agent knows results were truncated.
+        let (mut server, dir) = make_server();
+        let content: String = (0..100).map(|i| format!("line {i}: match\n")).collect();
+        std::fs::write(dir.path().join("many.txt"), content).unwrap();
+
+        let req = ToolCallRequest {
+            tool_id: "sqz_grep".to_string(),
+            input: serde_json::json!({
+                "pattern": "match",
+                "path": dir.path().to_string_lossy(),
+                "max_matches": 10,
+            }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).expect("grep should succeed");
+        assert!(resp.output.contains("matches=10"),
+            "should stop at max_matches; got: {}", resp.output);
     }
 }

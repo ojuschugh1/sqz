@@ -58,6 +58,7 @@ pub mod ast_parser;
 pub mod benchmarks;
 pub mod bpe_compressor;
 pub mod cascade_compressor;
+pub mod claude_md_integration;
 pub mod cmd_formatters;
 pub mod codex_integration;
 pub mod compression_quality;
@@ -153,6 +154,11 @@ pub use codex_integration::{
     codex_config_path,
     install_agents_md_guidance, install_codex_mcp_config,
     remove_agents_md_guidance, remove_codex_mcp_config,
+};
+pub use claude_md_integration::{
+    claude_md_guidance_block, claude_md_path, claude_user_json_path,
+    install_claude_md_guidance, install_claude_mcp_config,
+    remove_claude_md_guidance, remove_claude_mcp_config,
 };
 pub use token_pruner::{TokenPruner, PrunerConfig, PruneResult};
 pub use tool_selector::{ToolDefinition, ToolSelector};

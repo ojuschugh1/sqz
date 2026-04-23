@@ -24,6 +24,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 notify = "6"
+# regex: needed by sqz_grep MCP tool (issue #12). Using default features
+# keeps binary size reasonable (~800KB added) while providing Unicode
+# support — agents grep source code with accents/unicode more often
+# than you'd think.
+regex = "1"
 
 [dev-dependencies]
 proptest = { workspace = true }
