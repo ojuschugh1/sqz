@@ -198,12 +198,26 @@ pub fn opencode_plugin_path() -> PathBuf {
 
 /// Install the OpenCode plugin to `~/.config/opencode/plugins/sqz.ts`.
 ///
-/// Returns `true` if the plugin was installed, `false` if it already exists.
+/// Always writes the latest generated plugin, overwriting any previous
+/// version. The file is machine-generated (not user-edited), so
+/// overwriting is safe and ensures fixes like the V1 id export and the
+/// --cmd rewrite propagate on re-init. Previously this skipped if the
+/// file existed, which left stale plugins in place after upgrades
+/// (@itguy327 on issue #10: "that odd display issue is still there").
+///
+/// Returns `true` if the file was created or updated, `false` if the
+/// content was already identical (no disk write needed).
 pub fn install_opencode_plugin(sqz_path: &str) -> Result<bool> {
     let plugin_path = opencode_plugin_path();
+    let new_content = generate_opencode_plugin(sqz_path);
 
+    // Skip the write if the file already has identical content.
     if plugin_path.exists() {
-        return Ok(false);
+        if let Ok(existing) = std::fs::read_to_string(&plugin_path) {
+            if existing == new_content {
+                return Ok(false);
+            }
+        }
     }
 
     if let Some(parent) = plugin_path.parent() {
@@ -366,7 +380,8 @@ pub fn update_opencode_config_detailed(project_dir: &Path) -> Result<(bool, bool
     fn sqz_mcp_value() -> serde_json::Value {
         serde_json::json!({
             "type": "local",
-            "command": ["sqz-mcp", "--transport", "stdio"]
+            "command": ["sqz-mcp", "--transport", "stdio"],
+            "enabled": true
         })
     }
 
@@ -446,9 +461,15 @@ pub fn update_opencode_config_detailed(project_dir: &Path) -> Result<(bool, bool
             if !mcp_obj.contains_key("sqz") {
                 mcp_obj.insert("sqz".to_string(), sqz_mcp_value());
                 changed = true;
+            } else if let Some(sqz_entry) = mcp_obj.get_mut("sqz").and_then(|v| v.as_object_mut()) {
+                // Upgrade path: add "enabled": true if missing. Older
+                // sqz versions didn't include it; OpenCode docs show it
+                // in every example and users expect to see it.
+                if !sqz_entry.contains_key("enabled") {
+                    sqz_entry.insert("enabled".to_string(), serde_json::json!(true));
+                    changed = true;
+                }
             }
-            // If the entry exists we do NOT overwrite — the user may
-            // have tuned it. That's the idempotent-merge contract.
         } else {
             return Err(crate::error::SqzError::Other(format!(
                 "{} has an `mcp` field that is not an object; \
@@ -1094,16 +1115,14 @@ mod tests {
     fn test_update_opencode_config_skips_if_present() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("opencode.json");
-        // After issue #10, the complete "nothing to do" state is ONLY
-        // the MCP server entry. `"plugin": ["sqz"]` is legacy and
-        // will be stripped on re-init (see the legacy-cleanup test).
         std::fs::write(
             &config_path,
             r#"{
   "mcp": {
     "sqz": {
       "type": "local",
-      "command": ["sqz-mcp", "--transport", "stdio"]
+      "command": ["sqz-mcp", "--transport", "stdio"],
+      "enabled": true
     }
   }
 }"#,
@@ -1113,8 +1132,7 @@ mod tests {
         let result = update_opencode_config(dir.path()).unwrap();
         assert!(
             !result,
-            "a config that already has just the mcp.sqz entry (no plugin[]) \
-             must be idempotent — nothing more to do"
+            "a config with mcp.sqz including enabled:true must be idempotent"
         );
     }
 
