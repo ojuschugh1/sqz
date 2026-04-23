@@ -5,6 +5,23 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] — 2026-04-23
+
+### Fixed
+
+- **JSONC trailing commas broke OpenCode config merge** (issue #6) —
+  `strip_jsonc_comments` removed `//` and `/* */` comments but left
+  trailing commas intact. Trailing commas are valid JSONC but invalid
+  JSON, so `serde_json` failed to parse configs like
+  `{ "mcp": { "dart": { ... }, }, }`. The error was silently swallowed,
+  so `sqz init` printed "OpenCode hook installed" while the `.jsonc`
+  file was never modified. Fix: added a string-aware second pass that
+  strips commas before `]` and `}`.
+- **Codex integration test env-var races** — replaced
+  `std::env::set_var("CODEX_HOME")` with home-dir-injectable `_at`
+  variants (same pattern as `claude_md_integration`), eliminating flaky
+  failures in `remove_codex_mcp_config` and `prop_compressed_output_is_valid_json`.
+
 ## [1.0.7] — 2026-04-22
 
 ### Fixed

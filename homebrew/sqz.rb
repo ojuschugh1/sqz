@@ -11,7 +11,7 @@
 class Sqz < Formula
   desc "Universal context intelligence layer — compresses LLM context across CLI, MCP, browser, and IDE"
   homepage "https://github.com/ojuschugh1/sqz"
-  version "1.0.7"
+  version "1.0.8"
   license "ELv2"
 
   on_macos do
