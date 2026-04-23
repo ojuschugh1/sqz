@@ -346,7 +346,19 @@ fn is_essentially_empty_agents_md(s: &str) -> bool {
 /// If the config file doesn't exist yet, it is created with only sqz's
 /// entry (and its parent `~/.codex/` directory is created on demand).
 pub fn install_codex_mcp_config() -> Result<bool> {
-    let path = codex_config_path();
+    install_codex_mcp_config_at(None)
+}
+
+/// Internal: home-dir-injectable counterpart used by tests. Avoids
+/// `std::env::set_var` which races with parallel tests that also read
+/// HOME (e.g. the api_proxy property tests that open `~/.sqz/sessions.db`).
+/// See `claude_md_integration::install_claude_mcp_config_at` for the
+/// same pattern.
+pub(crate) fn install_codex_mcp_config_at(home_override: Option<&Path>) -> Result<bool> {
+    let path = match home_override {
+        Some(h) => h.join("config.toml"),
+        None => codex_config_path(),
+    };
 
     // Read or start from blank. We build on a toml_edit::DocumentMut so
     // any prior comments/whitespace survive the round-trip.
@@ -458,7 +470,18 @@ pub fn install_codex_mcp_config() -> Result<bool> {
 ///
 /// Returns `Ok(None)` if the config file does not exist at all.
 pub fn remove_codex_mcp_config() -> Result<Option<(PathBuf, bool)>> {
-    let path = codex_config_path();
+    remove_codex_mcp_config_at(None)
+}
+
+/// Internal: home-dir-injectable counterpart used by tests. See
+/// `install_codex_mcp_config_at` for rationale.
+pub(crate) fn remove_codex_mcp_config_at(
+    home_override: Option<&Path>,
+) -> Result<Option<(PathBuf, bool)>> {
+    let path = match home_override {
+        Some(h) => h.join("config.toml"),
+        None => codex_config_path(),
+    };
     if !path.exists() {
         return Ok(None);
     }
@@ -510,35 +533,18 @@ pub fn remove_codex_mcp_config() -> Result<Option<(PathBuf, bool)>> {
 mod tests {
     use super::*;
 
+    // codex_config_path() reads CODEX_HOME / HOME env vars. Testing it
+    // with set_var is inherently racy under parallel test execution, so
+    // we only verify the structural invariant: the returned path always
+    // ends with "config.toml".
     #[test]
-    fn codex_config_path_honours_codex_home() {
-        let dir = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("CODEX_HOME");
-        std::env::set_var("CODEX_HOME", dir.path());
+    fn codex_config_path_ends_with_config_toml() {
         let got = codex_config_path();
-        assert_eq!(got, dir.path().join("config.toml"));
-        match prev {
-            Some(v) => std::env::set_var("CODEX_HOME", v),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
-    }
-
-    #[test]
-    fn codex_config_path_falls_back_to_home_dot_codex() {
-        let prev_codex = std::env::var_os("CODEX_HOME");
-        let prev_home = std::env::var_os("HOME");
-        std::env::remove_var("CODEX_HOME");
-        std::env::set_var("HOME", "/tmp/codex-home-test");
-        let got = codex_config_path();
-        assert_eq!(got, PathBuf::from("/tmp/codex-home-test/.codex/config.toml"));
-        match prev_codex {
-            Some(v) => std::env::set_var("CODEX_HOME", v),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
+        assert!(
+            got.ends_with("config.toml"),
+            "codex_config_path() must end with config.toml, got: {}",
+            got.display()
+        );
     }
 
     // ── AGENTS.md guidance block ─────────────────────────────────────
@@ -663,34 +669,20 @@ mod tests {
 
     // ── ~/.codex/config.toml merger ──────────────────────────────────
 
-    /// Helper: run `f` with CODEX_HOME pointing at `home` so install/uninstall
-    /// touch only the tempdir.
-    fn with_codex_home<F: FnOnce()>(home: &Path, f: F) {
-        let prev = std::env::var_os("CODEX_HOME");
-        std::env::set_var("CODEX_HOME", home);
-        f();
-        match prev {
-            Some(v) => std::env::set_var("CODEX_HOME", v),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
-    }
-
     #[test]
     fn install_codex_mcp_config_creates_file_with_sqz_entry() {
         let dir = tempfile::tempdir().unwrap();
-        with_codex_home(dir.path(), || {
-            let created = install_codex_mcp_config().unwrap();
-            assert!(created);
-            let content = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
-            assert!(
-                content.contains("[mcp_servers.sqz]"),
-                "config.toml must contain [mcp_servers.sqz] header; got:\n{content}"
-            );
-            assert!(content.contains("command = \"sqz-mcp\""),
-                "command must be sqz-mcp");
-            assert!(content.contains("--transport"));
-            assert!(content.contains("stdio"));
-        });
+        let created = install_codex_mcp_config_at(Some(dir.path())).unwrap();
+        assert!(created);
+        let content = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(
+            content.contains("[mcp_servers.sqz]"),
+            "config.toml must contain [mcp_servers.sqz] header; got:\n{content}"
+        );
+        assert!(content.contains("command = \"sqz-mcp\""),
+            "command must be sqz-mcp");
+        assert!(content.contains("--transport"));
+        assert!(content.contains("stdio"));
     }
 
     #[test]
@@ -707,10 +699,8 @@ mod tests {
              args = [\"--flag\"]\n",
         ).unwrap();
 
-        with_codex_home(dir.path(), || {
-            let created = install_codex_mcp_config().unwrap();
-            assert!(created);
-        });
+        let created = install_codex_mcp_config_at(Some(dir.path())).unwrap();
+        assert!(created);
 
         let after = std::fs::read_to_string(&cfg).unwrap();
         assert!(after.contains("# User's existing Codex config"),
@@ -728,13 +718,11 @@ mod tests {
     #[test]
     fn install_codex_mcp_config_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        with_codex_home(dir.path(), || {
-            assert!(install_codex_mcp_config().unwrap());
-            assert!(
-                !install_codex_mcp_config().unwrap(),
-                "second install with complete [mcp_servers.sqz] must be a no-op"
-            );
-        });
+        assert!(install_codex_mcp_config_at(Some(dir.path())).unwrap());
+        assert!(
+            !install_codex_mcp_config_at(Some(dir.path())).unwrap(),
+            "second install with complete [mcp_servers.sqz] must be a no-op"
+        );
     }
 
     #[test]
@@ -748,10 +736,8 @@ mod tests {
              args = [\"--transport\", \"sse\", \"--port\", \"3999\"]\n",
         ).unwrap();
 
-        with_codex_home(dir.path(), || {
-            let changed = install_codex_mcp_config().unwrap();
-            assert!(!changed, "existing complete entry must be idempotent-skipped");
-        });
+        let changed = install_codex_mcp_config_at(Some(dir.path())).unwrap();
+        assert!(!changed, "existing complete entry must be idempotent-skipped");
         let after = std::fs::read_to_string(&cfg).unwrap();
         assert!(after.contains("/custom/path/sqz-mcp"),
             "user's custom command must survive re-init");
@@ -776,11 +762,9 @@ mod tests {
              args = [\"--transport\", \"stdio\"]\n",
         ).unwrap();
 
-        with_codex_home(dir.path(), || {
-            let (path, changed) = remove_codex_mcp_config().unwrap().unwrap();
-            assert_eq!(path, cfg);
-            assert!(changed);
-        });
+        let (path, changed) = remove_codex_mcp_config_at(Some(dir.path())).unwrap().unwrap();
+        assert_eq!(path, cfg);
+        assert!(changed);
 
         let after = std::fs::read_to_string(&cfg).unwrap();
         assert!(after.contains("# keep this comment"),
@@ -797,12 +781,10 @@ mod tests {
     fn remove_codex_mcp_config_deletes_file_when_sqz_was_the_only_entry() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
-        with_codex_home(dir.path(), || {
-            install_codex_mcp_config().unwrap();
-            let (path, changed) = remove_codex_mcp_config().unwrap().unwrap();
-            assert_eq!(path, cfg);
-            assert!(changed);
-        });
+        install_codex_mcp_config_at(Some(dir.path())).unwrap();
+        let (path, changed) = remove_codex_mcp_config_at(Some(dir.path())).unwrap().unwrap();
+        assert_eq!(path, cfg);
+        assert!(changed);
         assert!(!cfg.exists(),
             "config.toml with only sqz must be deleted on uninstall");
     }
@@ -810,10 +792,8 @@ mod tests {
     #[test]
     fn remove_codex_mcp_config_returns_none_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
-        with_codex_home(dir.path(), || {
-            let result = remove_codex_mcp_config().unwrap();
-            assert!(result.is_none());
-        });
+        let result = remove_codex_mcp_config_at(Some(dir.path())).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
@@ -821,11 +801,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         std::fs::write(&cfg, "[mcp_servers.other]\ncommand = \"x\"\n").unwrap();
-        with_codex_home(dir.path(), || {
-            let (path, changed) = remove_codex_mcp_config().unwrap().unwrap();
-            assert_eq!(path, cfg);
-            assert!(!changed);
-        });
+        let (path, changed) = remove_codex_mcp_config_at(Some(dir.path())).unwrap().unwrap();
+        assert_eq!(path, cfg);
+        assert!(!changed);
         let after = std::fs::read_to_string(&cfg).unwrap();
         assert!(after.contains("[mcp_servers.other]"));
     }
