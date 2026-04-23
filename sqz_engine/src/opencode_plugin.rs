@@ -349,6 +349,70 @@ pub fn strip_jsonc_comments(src: &str) -> String {
         i += 1;
     }
 
+    // Second pass: strip trailing commas before `]` and `}`.
+    // Trailing commas are valid JSONC but invalid JSON. Without this,
+    // serde_json::from_str fails silently and the config merge is
+    // skipped — the root cause of issue #6 ("I see no changes in
+    // opencode.jsonc") when the user's JSONC had trailing commas.
+    strip_trailing_commas(&out)
+}
+
+/// Remove trailing commas before `]` and `}` in a JSON-like string.
+///
+/// Handles whitespace and newlines between the comma and the closing
+/// bracket. String-aware: commas inside quoted strings are never touched.
+fn strip_trailing_commas(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    let len = bytes.len();
+
+    while i < len {
+        let b = bytes[i];
+
+        // Skip over string literals verbatim.
+        if b == b'"' {
+            out.push('"');
+            i += 1;
+            while i < len {
+                let c = bytes[i];
+                out.push(c as char);
+                if c == b'\\' && i + 1 < len {
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                if c == b'"' {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        // When we see a comma, look ahead (skipping whitespace) to see
+        // if the next non-whitespace char is `]` or `}`. If so, drop
+        // the comma but keep the whitespace.
+        if b == b',' {
+            let mut j = i + 1;
+            while j < len && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < len && (bytes[j] == b']' || bytes[j] == b'}') {
+                // Drop the comma; emit the whitespace and let the
+                // main loop pick up the closing bracket.
+                for k in (i + 1)..j {
+                    out.push(bytes[k] as char);
+                }
+                i = j;
+                continue;
+            }
+        }
+
+        out.push(b as char);
+        i += 1;
+    }
+
     out
 }
 
@@ -1562,6 +1626,53 @@ mod tests {
         // We don't want to panic or infinite-loop on malformed input.
         let src = "{\"a\":1 /* never ends";
         let _ = strip_jsonc_comments(src); // should return without panic
+    }
+
+    #[test]
+    fn test_strip_jsonc_comments_removes_trailing_commas() {
+        // Trailing commas are valid JSONC but invalid JSON. The
+        // stripping must produce valid JSON that serde_json can parse.
+        let src = r#"{
+  "a": [1, 2, 3,],
+  "b": {"x": 1, "y": 2,},
+}"#;
+        let stripped = strip_jsonc_comments(src);
+        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(parsed["a"], serde_json::json!([1, 2, 3]));
+        assert_eq!(parsed["b"]["x"], 1);
+        assert_eq!(parsed["b"]["y"], 2);
+    }
+
+    #[test]
+    fn test_strip_jsonc_comments_trailing_comma_in_string_preserved() {
+        // A comma followed by `}` inside a string must NOT be stripped.
+        let src = r#"{"s": "a,}"}"#;
+        let stripped = strip_jsonc_comments(src);
+        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(parsed["s"], "a,}");
+    }
+
+    #[test]
+    fn test_strip_jsonc_full_opencode_jsonc_with_comments_and_trailing_commas() {
+        // End-to-end: a realistic opencode.jsonc with both comments and
+        // trailing commas — the exact shape that caused issue #6.
+        let src = r#"{
+  // User's OpenCode config
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    // MCP servers
+    "dart": {
+      "type": "local",
+      "command": ["dart", "mcp-server"],
+    },
+  },
+}"#;
+        let stripped = strip_jsonc_comments(src);
+        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(
+            parsed["mcp"]["dart"]["type"], "local",
+            "must parse after stripping comments + trailing commas"
+        );
     }
 
     // ── Surgical uninstall ───────────────────────────────────────────
