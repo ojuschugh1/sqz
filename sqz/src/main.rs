@@ -400,31 +400,51 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
 
         // OpenCode is special: the installer merges into whichever of
         // opencode.json / opencode.jsonc already exists, rather than
-        // blindly creating a parallel opencode.json. Report the
-        // accurate target in the plan.
+        // blindly creating a parallel opencode.json. Use a dry-run to
+        // only list it in the plan when there's actually something to
+        // change — otherwise a second `sqz init` announces a merge that
+        // won't happen, which looks broken (@Icaruk on issue #6).
         if config.tool_name == "OpenCode" {
-            match &opencode_existing {
-                Some(path) => {
-                    // Existing file — we'll merge sqz entries into it.
-                    let note = if opencode_jsonc_has_comments {
+            match sqz_engine::plan_opencode_config_change(&project_dir) {
+                Ok(planned) if planned.will_change => {
+                    let is_existing = opencode_existing.is_some();
+                    let note = if is_existing && opencode_jsonc_has_comments {
                         format!(
                             "{} hook config (merge sqz entries — comments in .jsonc \
                              will be dropped)",
                             config.tool_name
                         )
-                    } else {
+                    } else if is_existing {
                         format!("{} hook config (merge sqz entries)", config.tool_name)
+                    } else {
+                        format!("{} hook config", config.tool_name)
                     };
-                    plan.push((path.display().to_string(), note, false));
-                }
-                None => {
-                    // No existing config — we'll create a fresh opencode.json.
-                    let full_path = project_dir.join(&config.config_path);
                     plan.push((
-                        full_path.display().to_string(),
-                        format!("{} hook config", config.tool_name),
-                        true,
+                        planned.target_path.display().to_string(),
+                        note,
+                        !is_existing,
                     ));
+                }
+                Ok(_) => {
+                    // Already fully configured — nothing to announce.
+                }
+                Err(_) => {
+                    // Fall back to the old behaviour: announce a merge.
+                    // The actual install step will surface the error.
+                    if let Some(path) = &opencode_existing {
+                        plan.push((
+                            path.display().to_string(),
+                            format!("{} hook config (merge sqz entries)", config.tool_name),
+                            false,
+                        ));
+                    } else {
+                        let full_path = project_dir.join(&config.config_path);
+                        plan.push((
+                            full_path.display().to_string(),
+                            format!("{} hook config", config.tool_name),
+                            true,
+                        ));
+                    }
                 }
             }
             continue;

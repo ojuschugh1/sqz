@@ -376,7 +376,60 @@ pub fn update_opencode_config(project_dir: &Path) -> Result<bool> {
 /// to be dropped from a JSONC file during the merge. Used by the `sqz
 /// init` CLI to print a warning.
 pub fn update_opencode_config_detailed(project_dir: &Path) -> Result<(bool, bool)> {
-    // Desired shape of sqz's entry in the merged config.
+    let planned = plan_opencode_config_change(project_dir)?;
+    if !planned.will_change {
+        return Ok((false, false));
+    }
+    // Re-run through the same logic, actually writing this time.
+    apply_opencode_config_change(project_dir, &planned)
+}
+
+/// Dry-run preview of what `update_opencode_config_detailed` would do.
+///
+/// Returns a `PlannedOpencodeChange` describing whether any write would
+/// happen (`will_change`) and whether comments would be lost in the
+/// process (`comments_lost`). Callers that only need the boolean answer
+/// (e.g. the `sqz init` plan builder deciding whether to list OpenCode
+/// in the plan) can check `will_change` directly.
+///
+/// Added after @Icaruk reported on issue #6 that the plan announced an
+/// OpenCode merge on every re-run even when the file was already fully
+/// configured, so users saw "no changes" and assumed the tool was
+/// broken.
+pub fn plan_opencode_config_change(project_dir: &Path) -> Result<PlannedOpencodeChange> {
+    compute_opencode_change(project_dir, /*apply=*/ false).map(|r| r.0)
+}
+
+/// Result of a dry-run over the OpenCode config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedOpencodeChange {
+    /// The file sqz would touch (exists or not).
+    pub target_path: PathBuf,
+    /// True if writing is needed. False means the config is already in
+    /// the desired shape.
+    pub will_change: bool,
+    /// True if the file is `.jsonc` with comments that would be
+    /// stripped during the serde_json round-trip.
+    pub comments_lost: bool,
+}
+
+fn apply_opencode_config_change(
+    project_dir: &Path,
+    _planned: &PlannedOpencodeChange,
+) -> Result<(bool, bool)> {
+    let (planned, _) = compute_opencode_change(project_dir, /*apply=*/ true)?;
+    Ok((planned.will_change, planned.comments_lost))
+}
+
+/// Shared core: compute-or-apply the OpenCode config change.
+///
+/// Factored out so `plan_opencode_config_change` (dry-run) and
+/// `update_opencode_config_detailed` (write) share the same merge
+/// logic. The `apply` flag gates the final write.
+fn compute_opencode_change(
+    project_dir: &Path,
+    apply: bool,
+) -> Result<(PlannedOpencodeChange, ())> {
     fn sqz_mcp_value() -> serde_json::Value {
         serde_json::json!({
             "type": "local",
@@ -396,25 +449,19 @@ pub fn update_opencode_config_detailed(project_dir: &Path) -> Result<(bool, bool
                 existing_path.display()
             ))
         })?;
-
         let parseable = if is_jsonc {
             strip_jsonc_comments(&content)
         } else {
             content.clone()
         };
-
-        // Detect whether comments were present — relevant for
-        // comments_lost reporting only if we end up mutating the file.
         let had_comments = is_jsonc && parseable != content;
 
-        // Parse existing config.
         let mut config: serde_json::Value = serde_json::from_str(&parseable).map_err(|e| {
             crate::error::SqzError::Other(format!(
                 "failed to parse {}: {e}",
                 existing_path.display()
             ))
         })?;
-
         let obj = config.as_object_mut().ok_or_else(|| {
             crate::error::SqzError::Other(format!(
                 "{} root is not a JSON object",
@@ -424,47 +471,24 @@ pub fn update_opencode_config_detailed(project_dir: &Path) -> Result<(bool, bool
 
         let mut changed = false;
 
-        // Issue #10: do NOT add `"plugin": ["sqz"]` to opencode.json any
-        // more. The user-level plugin file at
-        // `~/.config/opencode/plugins/sqz.ts` is auto-discovered by
-        // OpenCode and loads the plugin by itself. Listing it as `sqz`
-        // in the `plugin` array makes OpenCode ALSO try to load it as
-        // an npm package — per the OpenCode docs, "a local plugin and
-        // an npm plugin with similar names are both loaded separately",
-        // which produces two live copies of the plugin and double hook
-        // firing on every command.
-        //
-        // Backward-compat: if a previous sqz install already wrote
-        // `"plugin": ["sqz"]`, surgically strip it so the upgrade fixes
-        // the double-load for returning users. Pre-existing entries
-        // from OTHER plugins are left alone.
         if let Some(arr) = obj.get_mut("plugin").and_then(|v| v.as_array_mut()) {
             let before = arr.len();
             arr.retain(|v| v.as_str() != Some("sqz"));
             if arr.len() != before {
                 changed = true;
             }
-            // If the array is now empty AND we created it in an earlier
-            // install, drop the key entirely so the file is as clean as
-            // possible. We can't distinguish "user's empty array" from
-            // "sqz's empty array", so only drop if empty — that's the
-            // same state a fresh install would produce from now on.
             if arr.is_empty() {
                 obj.remove("plugin");
                 changed = true;
             }
         }
 
-        // Merge `mcp.sqz`: add our MCP server entry if not present.
         let mcp_entry = obj.entry("mcp").or_insert_with(|| serde_json::json!({}));
         if let Some(mcp_obj) = mcp_entry.as_object_mut() {
             if !mcp_obj.contains_key("sqz") {
                 mcp_obj.insert("sqz".to_string(), sqz_mcp_value());
                 changed = true;
             } else if let Some(sqz_entry) = mcp_obj.get_mut("sqz").and_then(|v| v.as_object_mut()) {
-                // Upgrade path: add "enabled": true if missing. Older
-                // sqz versions didn't include it; OpenCode docs show it
-                // in every example and users expect to see it.
                 if !sqz_entry.contains_key("enabled") {
                     sqz_entry.insert("enabled".to_string(), serde_json::json!(true));
                     changed = true;
@@ -478,47 +502,50 @@ pub fn update_opencode_config_detailed(project_dir: &Path) -> Result<(bool, bool
             )));
         }
 
-        if !changed {
-            return Ok((false, false));
+        let planned = PlannedOpencodeChange {
+            target_path: existing_path.clone(),
+            will_change: changed,
+            comments_lost: changed && had_comments,
+        };
+
+        if apply && changed {
+            let updated = serde_json::to_string_pretty(&config).map_err(|e| {
+                crate::error::SqzError::Other(format!("failed to serialize config: {e}"))
+            })?;
+            std::fs::write(&existing_path, format!("{updated}\n")).map_err(|e| {
+                crate::error::SqzError::Other(format!(
+                    "failed to write {}: {e}",
+                    existing_path.display()
+                ))
+            })?;
         }
 
-        // Serialize and write back to the SAME file (whether .json or
-        // .jsonc). We do not migrate .jsonc to .json or vice versa.
-        let updated = serde_json::to_string_pretty(&config).map_err(|e| {
-            crate::error::SqzError::Other(format!("failed to serialize config: {e}"))
-        })?;
-        std::fs::write(&existing_path, format!("{updated}\n")).map_err(|e| {
-            crate::error::SqzError::Other(format!(
-                "failed to write {}: {e}",
-                existing_path.display()
-            ))
-        })?;
-
-        Ok((true, had_comments))
+        Ok((planned, ()))
     } else {
-        // Fresh install: create opencode.json with only the MCP entry.
-        //
-        // Issue #10: we deliberately do NOT write `"plugin": ["sqz"]`.
-        // OpenCode auto-loads plugins from
-        // `~/.config/opencode/plugins/*.ts` (which `install_opencode_plugin`
-        // populates separately), so listing `sqz` in the config's
-        // `plugin` array would cause OpenCode to ALSO try to load it
-        // as an npm package and end up with two live copies of the
-        // plugin firing on every tool call.
-        let config = serde_json::json!({
-            "$schema": "https://opencode.ai/config.json",
-            "mcp": {
-                "sqz": sqz_mcp_value()
-            }
-        });
-        let content = serde_json::to_string_pretty(&config).map_err(|e| {
-            crate::error::SqzError::Other(format!("failed to serialize opencode.json: {e}"))
-        })?;
-        let path = project_dir.join("opencode.json");
-        std::fs::write(&path, format!("{content}\n")).map_err(|e| {
-            crate::error::SqzError::Other(format!("failed to write opencode.json: {e}"))
-        })?;
-        Ok((true, false))
+        // No existing config — a fresh opencode.json would be created.
+        let target = project_dir.join("opencode.json");
+        let planned = PlannedOpencodeChange {
+            target_path: target.clone(),
+            will_change: true,
+            comments_lost: false,
+        };
+
+        if apply {
+            let config = serde_json::json!({
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": {
+                    "sqz": sqz_mcp_value()
+                }
+            });
+            let content = serde_json::to_string_pretty(&config).map_err(|e| {
+                crate::error::SqzError::Other(format!("failed to serialize opencode.json: {e}"))
+            })?;
+            std::fs::write(&target, format!("{content}\n")).map_err(|e| {
+                crate::error::SqzError::Other(format!("failed to write opencode.json: {e}"))
+            })?;
+        }
+
+        Ok((planned, ()))
     }
 }
 
@@ -1385,6 +1412,52 @@ mod tests {
             comments_lost,
             "merger must report that comments were dropped from .jsonc"
         );
+    }
+
+    /// Issue #6 follow-up: dry-run must report no change when the
+    /// config is already fully configured, so the `sqz init` plan
+    /// doesn't announce a merge that won't happen.
+    #[test]
+    fn plan_opencode_reports_no_change_when_already_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        // First pass configures it.
+        update_opencode_config(dir.path()).unwrap();
+        // Second pass should be a no-op.
+        let planned = plan_opencode_config_change(dir.path()).unwrap();
+        assert!(
+            !planned.will_change,
+            "re-running against a fully configured file must be a no-op"
+        );
+        assert!(!planned.comments_lost);
+    }
+
+    /// Dry-run must report `will_change=true` when mcp.sqz is missing,
+    /// and must NOT actually write the file.
+    #[test]
+    fn plan_opencode_reports_change_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(&path, r#"{"plugin":["other"]}"#).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let planned = plan_opencode_config_change(dir.path()).unwrap();
+        assert!(planned.will_change);
+        assert_eq!(planned.target_path, path);
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before, after, "dry-run must not modify the file");
+    }
+
+    /// When no config exists, dry-run reports a fresh create and
+    /// points at the default `opencode.json` path.
+    #[test]
+    fn plan_opencode_reports_fresh_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let planned = plan_opencode_config_change(dir.path()).unwrap();
+        assert!(planned.will_change);
+        assert_eq!(planned.target_path, dir.path().join("opencode.json"));
+        assert!(!dir.path().join("opencode.json").exists(),
+            "dry-run must not create the file");
     }
 
     /// When no existing config is present, we still default to
