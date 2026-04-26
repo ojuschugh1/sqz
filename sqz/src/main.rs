@@ -209,6 +209,12 @@ enum Command {
     Stats {
         /// Session ID. If omitted, shows aggregate stats for the default agent.
         session_id: Option<String>,
+
+        /// Filter stats to a specific project directory.
+        /// Use "." for the current directory, or pass an absolute path.
+        /// Use "--project list" to see all tracked projects.
+        #[arg(long, short)]
+        project: Option<String>,
     },
 
     /// Show accumulated token savings over time.
@@ -216,6 +222,11 @@ enum Command {
         /// Number of days to show (default: 7).
         #[arg(long, default_value_t = 7)]
         days: u32,
+
+        /// Filter gains to a specific project directory.
+        /// Use "." for the current directory, or pass an absolute path.
+        #[arg(long, short)]
+        project: Option<String>,
     },
 
     /// Find missed savings opportunities by analyzing recent command history.
@@ -303,8 +314,8 @@ fn main() {
         Some(Command::Dashboard { port }) => cmd_dashboard(port),
         Some(Command::Proxy { port }) => cmd_proxy(port),
         Some(Command::Uninstall { yes }) => cmd_uninstall(yes),
-        Some(Command::Stats { session_id }) => cmd_stats(session_id),
-        Some(Command::Gain { days }) => cmd_gain(days),
+        Some(Command::Stats { session_id, project }) => cmd_stats(session_id, project),
+        Some(Command::Gain { days, project }) => cmd_gain(days, project),
         Some(Command::Discover { days }) => cmd_discover(days),
         Some(Command::Resume { session_id }) => cmd_resume(session_id),
         Some(Command::Hook { tool }) => cmd_hook(&tool),
@@ -699,11 +710,14 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
             let reduction = (1.0 - c.compression_ratio) * 100.0;
 
             // Log to session DB for cumulative stats
-            let _ = engine.session_store().log_compression(
+            let project = std::env::current_dir().ok();
+            let project_str = project.as_ref().map(|p| p.to_string_lossy().to_string());
+            let _ = engine.session_store().log_compression_with_project(
                 c.tokens_original,
                 c.tokens_compressed,
                 &c.stages_applied,
                 mode,
+                project_str.as_deref(),
             );
 
             if show_verify {
@@ -1099,11 +1113,14 @@ fn cmd_proxy(port: u16) {
                 }
 
                 // Log to session store
-                let _ = engine.session_store().log_compression(
+                let project = std::env::current_dir().ok();
+                let project_str = project.as_ref().map(|p| p.to_string_lossy().to_string());
+                let _ = engine.session_store().log_compression_with_project(
                     stats.tokens_original,
                     stats.tokens_compressed,
                     &["proxy".to_string()],
                     &format!("proxy:{:?}", format),
+                    project_str.as_deref(),
                 );
 
                 // Build the response with the compressed body.
@@ -1449,9 +1466,54 @@ fn cmd_uninstall(skip_confirm: bool) {
     println!("\n[sqz] uninstall complete.");
 }
 
+/// Resolve a `--project` value to a canonical absolute path.
+/// "." becomes the current directory; relative paths are resolved.
+fn resolve_project_filter(raw: &str) -> String {
+    if raw == "list" {
+        return raw.to_string();
+    }
+    let path = if raw == "." {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    } else {
+        let p = std::path::PathBuf::from(raw);
+        if p.is_absolute() {
+            p
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(p)
+        }
+    };
+    path.to_string_lossy().to_string()
+}
+
 /// `sqz stats [session-id]` — full compression stats report.
-fn cmd_stats(session_id: Option<String>) {
+fn cmd_stats(session_id: Option<String>, project: Option<String>) {
     let engine = require_engine();
+
+    // Handle --project list
+    if project.as_deref() == Some("list") {
+        let projects = engine.session_store().list_projects().unwrap_or_default();
+        if projects.is_empty() {
+            println!("[sqz] No per-project data yet. Compression events from older sqz versions don't have project info.");
+            println!("[sqz] New compressions will be tagged automatically.");
+            return;
+        }
+        println!();
+        println!("  Tracked projects:");
+        println!("  {}", "─".repeat(60));
+        for (dir, count, saved) in &projects {
+            println!("  {:>6} compressions  {:>8} saved  {}", count, saved, dir);
+        }
+        println!("  {}", "─".repeat(60));
+        println!();
+        println!("  Use: sqz stats --project <path>");
+        println!("       sqz gain --project <path>");
+        println!();
+        return;
+    }
+
+    let project_dir = project.as_deref().map(resolve_project_filter);
 
     // Table drawing helpers
     let bar = "├─────────────────────────┼──────────────────┤";
@@ -1461,18 +1523,38 @@ fn cmd_stats(session_id: Option<String>) {
         println!("│ {:<23} │ {:>16} │", label, val);
     };
 
+    let title = if let Some(ref dir) = project_dir {
+        // Shorten to last path component for display
+        let short = std::path::Path::new(dir)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| dir.clone());
+        format!("sqz stats — {}", short)
+    } else {
+        "sqz compression stats".to_string()
+    };
+
     println!();
     println!("{top}");
-    println!("│ {:^42} │", "sqz compression stats");
+    println!("│ {:^42} │", title);
     println!("{bar}");
 
-    // Cumulative compression stats
-    let cs = engine.session_store().compression_stats().unwrap_or_default();
+    // Cumulative compression stats (filtered or global)
+    let cs = if let Some(ref dir) = project_dir {
+        engine.session_store().compression_stats_for_project(dir).unwrap_or_default()
+    } else {
+        engine.session_store().compression_stats().unwrap_or_default()
+    };
     row("Total compressions", &format!("{}", cs.total_compressions));
     row("Tokens in (total)", &format!("{}", cs.total_tokens_in));
     row("Tokens out (total)", &format!("{}", cs.total_tokens_out));
     row("Tokens saved", &format!("{}", cs.tokens_saved()));
     row("Avg reduction", &format!("{:.1}%", cs.reduction_pct()));
+
+    if let Some(ref dir) = project_dir {
+        println!("{bar}");
+        row("Project", dir);
+    }
 
     // Session cost section (if session_id provided)
     if let Some(ref sid) = session_id {
@@ -1497,35 +1579,61 @@ fn cmd_stats(session_id: Option<String>) {
         }
     }
 
-    // Cache stats
-    let cache_entries = engine.session_store()
-        .list_cache_entries_lru()
-        .unwrap_or_default();
-    let cache_size: u64 = cache_entries.iter().map(|(_, sz)| sz).sum();
-    println!("{bar}");
-    row("Cache entries", &format!("{}", cache_entries.len()));
-    row("Cache size", &format_bytes(cache_size));
+    // Cache stats (global only — cache is shared across projects)
+    if project_dir.is_none() {
+        let cache_entries = engine.session_store()
+            .list_cache_entries_lru()
+            .unwrap_or_default();
+        let cache_size: u64 = cache_entries.iter().map(|(_, sz)| sz).sum();
+        println!("{bar}");
+        row("Cache entries", &format!("{}", cache_entries.len()));
+        row("Cache size", &format_bytes(cache_size));
+    }
 
     println!("{bot}");
     println!();
 }
 
 /// `sqz gain [--days N]` — show accumulated token savings over time.
-fn cmd_gain(days: u32) {
+fn cmd_gain(days: u32, project: Option<String>) {
     let engine = require_engine();
-    let gains = engine.session_store().daily_gains(days).unwrap_or_default();
-    let stats = engine.session_store().compression_stats().unwrap_or_default();
+    let project_dir = project.as_deref().map(resolve_project_filter);
+
+    let gains = if let Some(ref dir) = project_dir {
+        engine.session_store().daily_gains_for_project(days, dir).unwrap_or_default()
+    } else {
+        engine.session_store().daily_gains(days).unwrap_or_default()
+    };
+    let stats = if let Some(ref dir) = project_dir {
+        engine.session_store().compression_stats_for_project(dir).unwrap_or_default()
+    } else {
+        engine.session_store().compression_stats().unwrap_or_default()
+    };
 
     if gains.is_empty() {
-        println!("[sqz] No compression data yet. Run `sqz compress` to start tracking.");
+        if project_dir.is_some() {
+            println!("[sqz] No compression data for this project yet.");
+        } else {
+            println!("[sqz] No compression data yet. Run `sqz compress` to start tracking.");
+        }
         return;
     }
 
     let max_saved = gains.iter().map(|g| g.tokens_saved).max().unwrap_or(1).max(1);
     let bar_width: u64 = 30;
 
+    let header = if let Some(ref dir) = project_dir {
+        let short = std::path::Path::new(dir)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| dir.clone());
+        format!("sqz token savings — {} (last {} days)", short, days)
+    } else {
+        format!("sqz token savings (last {} days)", days)
+    };
+
     println!();
-    println!("  sqz token savings (last {} days)", days);
+    println!("  {}", header);
     println!("  {}", "─".repeat(50));
 
     for g in &gains {

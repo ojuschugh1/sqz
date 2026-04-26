@@ -137,6 +137,19 @@ pub(crate) fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !has_original {
         conn.execute("ALTER TABLE cache_entries ADD COLUMN original BLOB", [])?;
     }
+
+    // Additive migration: add `project_dir` TEXT column to compression_log.
+    // Enables per-project stats filtering (issue #13). NULL for rows
+    // written by older sqz versions — aggregate queries treat those as
+    // "unknown project".
+    let has_project_dir: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('compression_log') WHERE name = 'project_dir'")?
+        .query_row([], |_| Ok(()))
+        .is_ok();
+    if !has_project_dir {
+        conn.execute("ALTER TABLE compression_log ADD COLUMN project_dir TEXT", [])?;
+    }
+
     Ok(())
 }
 
@@ -634,11 +647,23 @@ impl SessionStore {
         stages: &[String],
         mode: &str,
     ) -> Result<()> {
+        self.log_compression_with_project(tokens_original, tokens_compressed, stages, mode, None)
+    }
+
+    /// Log a compression event tagged with a project directory.
+    pub fn log_compression_with_project(
+        &self,
+        tokens_original: u32,
+        tokens_compressed: u32,
+        stages: &[String],
+        mode: &str,
+        project_dir: Option<&str>,
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let stages_str = stages.join(",");
         self.db.execute(
-            "INSERT INTO compression_log (tokens_original, tokens_compressed, stages_applied, mode, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![tokens_original, tokens_compressed, stages_str, mode, now],
+            "INSERT INTO compression_log (tokens_original, tokens_compressed, stages_applied, mode, created_at, project_dir) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![tokens_original, tokens_compressed, stages_str, mode, now, project_dir],
         ).map_err(SqzError::SessionStore)?;
         Ok(())
     }
@@ -686,6 +711,77 @@ impl SessionStore {
             gains.push(row.map_err(SqzError::SessionStore)?);
         }
         Ok(gains)
+    }
+
+    /// Get cumulative compression stats for a specific project directory.
+    pub fn compression_stats_for_project(&self, project_dir: &str) -> Result<CompressionStats> {
+        let mut stmt = self.db.prepare(
+            "SELECT COUNT(*), COALESCE(SUM(tokens_original), 0), COALESCE(SUM(tokens_compressed), 0) \
+             FROM compression_log WHERE project_dir = ?1",
+        ).map_err(SqzError::SessionStore)?;
+
+        let stats = stmt.query_row(params![project_dir], |row| {
+            Ok(CompressionStats {
+                total_compressions: row.get::<_, u32>(0)?,
+                total_tokens_in: row.get::<_, u64>(1)?,
+                total_tokens_out: row.get::<_, u64>(2)?,
+            })
+        }).map_err(SqzError::SessionStore)?;
+
+        Ok(stats)
+    }
+
+    /// Get daily compression gains for a specific project directory.
+    pub fn daily_gains_for_project(&self, days: u32, project_dir: &str) -> Result<Vec<DailyGain>> {
+        let mut stmt = self.db.prepare(
+            "SELECT date(created_at) as d, COUNT(*), SUM(tokens_original), SUM(tokens_compressed) \
+             FROM compression_log \
+             WHERE created_at >= date('now', ?1) AND project_dir = ?2 \
+             GROUP BY d ORDER BY d",
+        ).map_err(SqzError::SessionStore)?;
+
+        let offset = format!("-{days} days");
+        let rows = stmt.query_map(params![offset, project_dir], |row| {
+            let tokens_in: u64 = row.get(2)?;
+            let tokens_out: u64 = row.get(3)?;
+            Ok(DailyGain {
+                date: row.get(0)?,
+                compressions: row.get(1)?,
+                tokens_in,
+                tokens_saved: tokens_in.saturating_sub(tokens_out),
+            })
+        }).map_err(SqzError::SessionStore)?;
+
+        let mut gains = Vec::new();
+        for row in rows {
+            gains.push(row.map_err(SqzError::SessionStore)?);
+        }
+        Ok(gains)
+    }
+
+    /// List distinct project directories that have compression data.
+    pub fn list_projects(&self) -> Result<Vec<(String, u32, u64)>> {
+        let mut stmt = self.db.prepare(
+            "SELECT project_dir, COUNT(*), COALESCE(SUM(tokens_original) - SUM(tokens_compressed), 0) \
+             FROM compression_log \
+             WHERE project_dir IS NOT NULL \
+             GROUP BY project_dir \
+             ORDER BY COUNT(*) DESC",
+        ).map_err(SqzError::SessionStore)?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u64>(2)?,
+            ))
+        }).map_err(SqzError::SessionStore)?;
+
+        let mut projects = Vec::new();
+        for row in rows {
+            projects.push(row.map_err(SqzError::SessionStore)?);
+        }
+        Ok(projects)
     }
 
     // ── Known files (persistent cross-command context tracking) ───────────

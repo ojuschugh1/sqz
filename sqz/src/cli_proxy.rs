@@ -275,9 +275,11 @@ impl CliProxy {
         let saved = original.saturating_sub(compressed);
         let pct = if original > 0 { (saved as f64 / original as f64 * 100.0) as u32 } else { 0 };
         eprintln!("[sqz] {}/{} tokens ({}% reduction) [{}]", compressed, original, pct, cmd);
-        // Also log to session store for `sqz gain` tracking
-        let _ = self.engine.session_store().log_compression(
+        let project = std::env::current_dir().ok();
+        let project_str = project.as_ref().map(|p| p.to_string_lossy().to_string());
+        let _ = self.engine.session_store().log_compression_with_project(
             original, compressed, &[], cmd,
+            project_str.as_deref(),
         );
     }
 
@@ -296,16 +298,15 @@ impl CliProxy {
     /// keeps the reporting internally consistent.
     fn log_dedup_hit(&self, _cmd: &str, output: &str) {
         let tokens_original = (output.len() as u32 + 3) / 4;
-        // A dedup ref is approximately 13 tokens; matches token_cost in
-        // CacheResult::Dedup and the tests that assert on it.
         const DEDUP_REF_TOKENS: u32 = 13;
-        // Tag with mode "dedup" so downstream analysis can distinguish
-        // pipeline compressions from cache hits.
-        let _ = self.engine.session_store().log_compression(
+        let project = std::env::current_dir().ok();
+        let project_str = project.as_ref().map(|p| p.to_string_lossy().to_string());
+        let _ = self.engine.session_store().log_compression_with_project(
             tokens_original,
             DEDUP_REF_TOKENS,
             &["dedup".to_string()],
             "dedup",
+            project_str.as_deref(),
         );
     }
 
