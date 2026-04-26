@@ -162,6 +162,36 @@ impl SqzEngine {
         Ok(result)
     }
 
+    /// Compress with dedup cache lookup.
+    ///
+    /// Unlike [`compress`], this method consults the persistent cache
+    /// (`~/.sqz/sessions.db`). On a hit with a fresh ref, it returns a
+    /// 13-token `§ref:HASH§` token instead of re-compressing. On a
+    /// near-duplicate, it returns a compact delta. On a cache miss, it
+    /// runs the full pipeline, stores the result, and returns it.
+    ///
+    /// This is the path the MCP `sqz_read_file` / `sqz_grep` /
+    /// `sqz_list_dir` tools use — repeat reads in the same session
+    /// (and across sessions if the DB survives) collapse to 13 tokens.
+    /// Reported on issue #12: the MCP file tools bypassed the cache so
+    /// dedup never fired, and users were getting 30%-range pipeline
+    /// compression instead of the 92% dedup path advertised in the
+    /// README.
+    pub fn compress_with_cache(&self, input: &str) -> Result<crate::cache_manager::CacheResult> {
+        let pipeline = self.pipeline.lock()
+            .map_err(|_| SqzError::Other("pipeline lock poisoned".into()))?;
+        // The `path` argument is informational only — cache keys are
+        // SHA-256 of the content bytes, not the path. Pass an empty
+        // path so we don't partition the cache by accidental file
+        // location differences (e.g. `./src/main.rs` vs
+        // `/abs/path/to/src/main.rs`).
+        self.cache_manager.get_or_compress(
+            std::path::Path::new(""),
+            input.as_bytes(),
+            &pipeline,
+        )
+    }
+
     /// Defensive compression: any input in, `CompressedContent` out, guaranteed.
     ///
     /// Unlike `compress()` which returns `Result`, this method never returns

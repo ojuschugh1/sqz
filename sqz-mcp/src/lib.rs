@@ -152,6 +152,24 @@ impl McpServer {
     /// Create a new `McpServer` loading presets from `preset_dir`.
     pub fn new(preset_dir: &Path) -> Result<Self> {
         let engine = SqzEngine::new()?;
+        Self::with_engine(preset_dir, engine)
+    }
+
+    /// Test-only helper: create a server backed by an isolated SQLite
+    /// store. Production code uses [`new`] which defaults to
+    /// `~/.sqz/sessions.db`; tests need a per-tempdir store so the
+    /// dedup cache (now wired up for issue #12 follow-up) doesn't
+    /// leak state across tests.
+    #[cfg(test)]
+    fn new_with_store(preset_dir: &Path, store_path: &Path) -> Result<Self> {
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), store_path)?;
+        Self::with_engine(preset_dir, engine)
+    }
+
+    /// Shared construction logic. Both `new` and the test helper land
+    /// here so the wiring of `ToolSelector`, `SharedState`, and
+    /// `preset_dir` stays in one place.
+    fn with_engine(preset_dir: &Path, engine: SqzEngine) -> Result<Self> {
         let preset = Preset::default();
         let model_path = Path::new("");
         let mut tool_selector = ToolSelector::new(model_path, &preset)?;
@@ -240,18 +258,23 @@ impl McpServer {
     }
 
     /// Compress pipeline — the historical default.
+    ///
+    /// Routes through the dedup cache so repeat calls with identical
+    /// input return a 13-token `§ref:HASH§` instead of re-compressing.
+    /// Same rationale as `handle_sqz_read_file`: the README's headline
+    /// "92% saved on repeated reads" number lives in the cache, so
+    /// every MCP tool that accepts arbitrary content should consult it.
     fn handle_compress(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
         // Serialize the input JSON to a string for compression.
         let raw_input = serde_json::to_string(&request.input)
             .map_err(|e| SqzError::Other(format!("input serialization error: {e}")))?;
 
         let tokens_original = estimate_tokens(&raw_input);
-        let compressed = self.engine.compress(&raw_input)?;
-        let tokens_compressed = compressed.tokens_compressed;
+        let (output, tokens_compressed) = self.compress_cached(&raw_input)?;
 
         Ok(ToolCallResponse {
             tool_id: request.tool_id,
-            output: compressed.data,
+            output,
             tokens_original,
             tokens_compressed,
         })
@@ -341,6 +364,35 @@ impl McpServer {
         })
     }
 
+    /// Compress `text` through the dedup cache, returning `(output, tokens)`.
+    ///
+    /// Unpacks a [`CacheResult`] into the shape the tool handlers need:
+    ///
+    ///   * `Dedup` → emit the 13-token `§ref:HASH§` token. On repeat
+    ///     reads in the same session (or across sessions if the DB
+    ///     survives) the file collapses to 13 tokens — the 92%-savings
+    ///     path the README advertises.
+    ///   * `Delta` → emit a compact diff against a near-duplicate. Not
+    ///     as compact as a full ref but still well below fresh
+    ///     compression for iterated edits.
+    ///   * `Fresh` → cache miss; emit the full compressed output.
+    ///
+    /// Added in response to issue #12 follow-up: `handle_sqz_read_file`
+    /// (and the grep / list_dir siblings) were calling
+    /// `engine.compress()` directly, bypassing the cache entirely.
+    /// Repeat reads got pipeline compression (~30%), not dedup refs
+    /// (~92%). Routing through `engine.compress_with_cache()` restores
+    /// the advertised behaviour.
+    fn compress_cached(&self, text: &str) -> Result<(String, u32)> {
+        use sqz_engine::CacheResult;
+        let result = self.engine.compress_with_cache(text)?;
+        Ok(match result {
+            CacheResult::Dedup { inline_ref, token_cost } => (inline_ref, token_cost),
+            CacheResult::Delta { delta_text, token_cost, .. } => (delta_text, token_cost),
+            CacheResult::Fresh { output } => (output.data, output.tokens_compressed),
+        })
+    }
+
     /// Read a file from disk and return the content compressed.
     ///
     /// This is the tool that bridges the gap Claude Code's architecture
@@ -418,7 +470,7 @@ impl McpServer {
         let raw_text = String::from_utf8_lossy(truncated_slice).into_owned();
 
         let tokens_original = estimate_tokens(&raw_text);
-        let compressed = self.engine.compress(&raw_text)?;
+        let (compressed_data, tokens_compressed) = self.compress_cached(&raw_text)?;
 
         // Attach a small header so the agent knows where the content
         // came from and whether it was truncated. The header lives
@@ -429,14 +481,14 @@ impl McpServer {
                 path.display(),
                 bytes.len(),
                 max_bytes,
-                compressed.data
+                compressed_data
             )
         } else {
             format!(
                 "[sqz_read_file path={} size={}]\n{}",
                 path.display(),
                 bytes.len(),
-                compressed.data
+                compressed_data
             )
         };
 
@@ -444,7 +496,7 @@ impl McpServer {
             tool_id: request.tool_id,
             output,
             tokens_original,
-            tokens_compressed: compressed.tokens_compressed,
+            tokens_compressed,
         })
     }
 
@@ -479,20 +531,20 @@ impl McpServer {
 
         let raw = lines.join("\n");
         let tokens_original = estimate_tokens(&raw);
-        let compressed = self.engine.compress(&raw)?;
+        let (compressed_data, tokens_compressed) = self.compress_cached(&raw)?;
 
         let output = format!(
             "[sqz_list_dir path={} entries={}]\n{}",
             root.display(),
             lines.len(),
-            compressed.data
+            compressed_data
         );
 
         Ok(ToolCallResponse {
             tool_id: request.tool_id,
             output,
             tokens_original,
-            tokens_compressed: compressed.tokens_compressed,
+            tokens_compressed,
         })
     }
 
@@ -564,21 +616,21 @@ impl McpServer {
 
         let raw = matches.join("\n");
         let tokens_original = estimate_tokens(&raw);
-        let compressed = self.engine.compress(&raw)?;
+        let (compressed_data, tokens_compressed) = self.compress_cached(&raw)?;
 
         let output = format!(
             "[sqz_grep pattern={:?} root={} matches={}]\n{}",
             pattern,
             root.display(),
             matches.len(),
-            compressed.data
+            compressed_data
         );
 
         Ok(ToolCallResponse {
             tool_id: request.tool_id,
             output,
             tokens_original,
-            tokens_compressed: compressed.tokens_compressed,
+            tokens_compressed,
         })
     }
 
@@ -1353,7 +1405,13 @@ mod tests {
 
     fn make_server() -> (McpServer, TempDir) {
         let dir = TempDir::new().expect("tempdir");
-        let server = McpServer::new(dir.path()).expect("McpServer::new");
+        // Use an isolated store per test so the dedup cache (wired up
+        // for issue #12 follow-up) doesn't leak state across tests.
+        // Otherwise test N+1's sqz_list_dir output for a tiny dir
+        // gets returned as a §ref:HASH§ token from test N's cache.
+        let store_path = dir.path().join("sessions.db");
+        let server = McpServer::new_with_store(dir.path(), &store_path)
+            .expect("McpServer::new_with_store");
         (server, dir)
     }
 
@@ -2071,6 +2129,57 @@ complexity_threshold = 0.4
             resp.output.contains("truncated_to=1024"),
             "truncation must be reported in header; got: {}",
             resp.output
+        );
+    }
+
+    /// Regression for issue #12 follow-up (@JCKodel): MCP file tools
+    /// bypassed the dedup cache, so repeat reads of the same file got
+    /// pipeline compression (~30%) instead of a 13-token `§ref:HASH§`
+    /// (~92%). The user saw 49 fresh compressions and wondered why
+    /// their stats weren't closer to the README's advertised numbers.
+    ///
+    /// After routing through `engine.compress_with_cache()`, a second
+    /// read of the same file MUST collapse to the dedup ref.
+    #[test]
+    fn test_sqz_read_file_dedup_fires_on_repeat_read() {
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("dedup_me.txt");
+        // Long enough to matter — the cache has a small-input guard so
+        // sub-100-byte strings don't pollute the store.
+        let content = "sqz dedup regression — issue #12 follow-up\n\
+                       this file should collapse to a 13-token ref on \
+                       the second read, proving the cache is wired up.\n"
+            .repeat(10);
+        std::fs::write(&file_path, &content).expect("write test file");
+
+        let req = || ToolCallRequest {
+            tool_id: "sqz_read_file".to_string(),
+            input: serde_json::json!({ "path": file_path.to_string_lossy() }),
+            intent: None,
+        };
+
+        // First read: cache miss → Fresh → full compressed content.
+        let first = server.handle_tool_call(req()).expect("first read");
+        assert!(
+            !first.output.contains("§ref:"),
+            "first read must emit full content, not a ref; got: {}",
+            first.output
+        );
+
+        // Second read of the SAME file: cache hit → Dedup → ref.
+        let second = server.handle_tool_call(req()).expect("second read");
+        assert!(
+            second.output.contains("§ref:"),
+            "second read must emit a §ref:HASH§ token (the whole point \
+             of the cache). If this fails, handle_sqz_read_file is \
+             calling engine.compress() instead of compress_with_cache. \
+             Got: {}",
+            second.output
+        );
+        assert!(
+            second.tokens_compressed < 30,
+            "dedup ref should be ~13 tokens, got {}",
+            second.tokens_compressed
         );
     }
 
