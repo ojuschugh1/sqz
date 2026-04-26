@@ -1033,11 +1033,22 @@ pub fn claude_user_settings_path() -> Option<PathBuf> {
 /// Returns `Ok(true)` if the file was created or changed, `Ok(false)`
 /// if our hook entries were already present identically.
 fn install_claude_global(sqz_path: &str) -> Result<bool> {
-    let path = claude_user_settings_path().ok_or_else(|| {
-        crate::error::SqzError::Other(
-            "Could not resolve home directory for ~/.claude/settings.json".to_string(),
-        )
-    })?;
+    install_claude_global_at(sqz_path, None)
+}
+
+/// Internal: home-dir-injectable counterpart used by tests. Avoids
+/// `std::env::set_var("HOME")` which races with parallel tests that
+/// also read HOME (e.g. the api_proxy property tests that open
+/// `~/.sqz/sessions.db`).
+fn install_claude_global_at(sqz_path: &str, home_override: Option<&Path>) -> Result<bool> {
+    let path = match home_override {
+        Some(h) => h.join(".claude").join("settings.json"),
+        None => claude_user_settings_path().ok_or_else(|| {
+            crate::error::SqzError::Other(
+                "Could not resolve home directory for ~/.claude/settings.json".to_string(),
+            )
+        })?,
+    };
 
     // Parse the existing file, or start from an empty object.
     let mut root: serde_json::Value = if path.exists() {
@@ -1164,8 +1175,20 @@ fn install_claude_global(sqz_path: &str) -> Result<bool> {
 /// * `Ok(None)` — file did not exist.
 /// * `Err(_)` — file existed but could not be read or parsed.
 pub fn remove_claude_global_hook() -> Result<Option<(PathBuf, bool)>> {
-    let Some(path) = claude_user_settings_path() else {
-        return Ok(None);
+    remove_claude_global_hook_at(None)
+}
+
+/// Internal: home-dir-injectable counterpart used by tests. See
+/// `install_claude_global_at` for rationale.
+fn remove_claude_global_hook_at(
+    home_override: Option<&Path>,
+) -> Result<Option<(PathBuf, bool)>> {
+    let path = match home_override {
+        Some(h) => h.join(".claude").join("settings.json"),
+        None => match claude_user_settings_path() {
+            Some(p) => p,
+            None => return Ok(None),
+        },
     };
     if !path.exists() {
         return Ok(None);
@@ -1845,85 +1868,45 @@ mod tests {
 mod global_install_tests {
     use super::*;
 
-    /// Run `body` with `HOME` (and `USERPROFILE` on Windows) pointing at
-    /// `tmp`, then restore the original values. Without this, the tests
-    /// would write to the real user's `~/.claude/settings.json` and
-    /// wreck their config.
-    ///
-    /// `dirs_next::home_dir` reads `HOME` on Unix and `USERPROFILE` on
-    /// Windows, so we set both — keeps the tests portable.
-    ///
-    /// SAFETY: `set_var` / `remove_var` are marked unsafe on the
-    /// unstable `std::env` edition; this helper stays on the stable
-    /// API that doesn't require `unsafe`. Tests that run in parallel
-    /// must serialize through a mutex because the process-level env
-    /// is shared.
-    fn with_fake_home<R>(tmp: &std::path::Path, body: impl FnOnce() -> R) -> R {
-        use std::sync::Mutex;
-        // Serialize so parallel tests don't race on $HOME.
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
-        std::env::set_var("HOME", tmp);
-        std::env::set_var("USERPROFILE", tmp);
-        let result = body();
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match prev_userprofile {
-            Some(v) => std::env::set_var("USERPROFILE", v),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        result
-    }
-
     #[test]
     fn global_install_creates_fresh_settings_json() {
         let tmp = tempfile::tempdir().unwrap();
-        with_fake_home(tmp.path(), || {
-            let changed = install_claude_global("/usr/local/bin/sqz").unwrap();
-            assert!(changed, "first install should report a change");
+        let changed = install_claude_global_at("/usr/local/bin/sqz", Some(tmp.path())).unwrap();
+        assert!(changed, "first install should report a change");
 
-            let path = tmp.path().join(".claude").join("settings.json");
-            assert!(path.exists(), "user settings.json should be created");
+        let path = tmp.path().join(".claude").join("settings.json");
+        assert!(path.exists(), "user settings.json should be created");
 
-            let content = std::fs::read_to_string(&path).unwrap();
-            let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-            // All three hook entries should be present.
-            let pre = &parsed["hooks"]["PreToolUse"];
-            assert!(pre.is_array(), "PreToolUse should be an array");
-            assert_eq!(pre.as_array().unwrap().len(), 1);
-            let cmd = pre[0]["hooks"][0]["command"].as_str().unwrap();
-            assert!(
-                cmd.contains("/usr/local/bin/sqz"),
-                "hook command should use the passed sqz_path, got: {cmd}"
-            );
-            assert!(cmd.contains("hook claude"));
+        // All three hook entries should be present.
+        let pre = &parsed["hooks"]["PreToolUse"];
+        assert!(pre.is_array(), "PreToolUse should be an array");
+        assert_eq!(pre.as_array().unwrap().len(), 1);
+        let cmd = pre[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("/usr/local/bin/sqz"),
+            "hook command should use the passed sqz_path, got: {cmd}"
+        );
+        assert!(cmd.contains("hook claude"));
 
-            let precompact = &parsed["hooks"]["PreCompact"];
-            assert!(precompact.is_array());
-            let precompact_cmd = precompact[0]["hooks"][0]["command"].as_str().unwrap();
-            assert!(precompact_cmd.contains("hook precompact"));
+        let precompact = &parsed["hooks"]["PreCompact"];
+        assert!(precompact.is_array());
+        let precompact_cmd = precompact[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(precompact_cmd.contains("hook precompact"));
 
-            let session = &parsed["hooks"]["SessionStart"];
-            assert!(session.is_array());
-            assert_eq!(
-                session[0]["matcher"].as_str().unwrap(),
-                "compact",
-                "SessionStart should only match /compact resume"
-            );
-        });
+        let session = &parsed["hooks"]["SessionStart"];
+        assert!(session.is_array());
+        assert_eq!(
+            session[0]["matcher"].as_str().unwrap(),
+            "compact",
+            "SessionStart should only match /compact resume"
+        );
     }
 
     #[test]
     fn global_install_preserves_existing_user_config() {
-        // This is the big safety guarantee: if the user already has
-        // permissions, env, statusLine, or unrelated hooks in
-        // ~/.claude/settings.json, sqz must NOT stomp on them.
         let tmp = tempfile::tempdir().unwrap();
         let settings = tmp.path().join(".claude").join("settings.json");
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
@@ -1954,95 +1937,78 @@ mod global_install_tests {
         });
         std::fs::write(&settings, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
 
-        with_fake_home(tmp.path(), || {
-            let changed = install_claude_global("/usr/local/bin/sqz").unwrap();
-            assert!(changed, "install should report a change on new hook");
+        let changed = install_claude_global_at("/usr/local/bin/sqz", Some(tmp.path())).unwrap();
+        assert!(changed, "install should report a change on new hook");
 
-            let content = std::fs::read_to_string(&settings).unwrap();
-            let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let content = std::fs::read_to_string(&settings).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-            // User's permissions survived.
-            assert_eq!(
-                parsed["permissions"]["allow"][0].as_str().unwrap(),
-                "Bash(npm test *)"
-            );
-            assert_eq!(
-                parsed["permissions"]["deny"][0].as_str().unwrap(),
-                "Read(./.env)"
-            );
-            // User's env block survived.
-            assert_eq!(parsed["env"]["FOO"].as_str().unwrap(), "bar");
-            // User's statusLine survived.
-            assert_eq!(
-                parsed["statusLine"]["command"].as_str().unwrap(),
-                "~/.claude/statusline.sh"
-            );
+        // User's permissions survived.
+        assert_eq!(
+            parsed["permissions"]["allow"][0].as_str().unwrap(),
+            "Bash(npm test *)"
+        );
+        assert_eq!(
+            parsed["permissions"]["deny"][0].as_str().unwrap(),
+            "Read(./.env)"
+        );
+        // User's env block survived.
+        assert_eq!(parsed["env"]["FOO"].as_str().unwrap(), "bar");
+        // User's statusLine survived.
+        assert_eq!(
+            parsed["statusLine"]["command"].as_str().unwrap(),
+            "~/.claude/statusline.sh"
+        );
 
-            // PreToolUse should now contain BOTH the user's format-on-edit
-            // hook and sqz's Bash hook — our install appends, not replaces.
-            let pre = parsed["hooks"]["PreToolUse"].as_array().unwrap();
-            assert_eq!(pre.len(), 2, "expected user's hook + sqz's hook, got: {pre:?}");
-            let matchers: Vec<&str> = pre
-                .iter()
-                .map(|e| e["matcher"].as_str().unwrap_or(""))
-                .collect();
-            assert!(matchers.contains(&"Edit"), "user's Edit hook must survive");
-            assert!(matchers.contains(&"Bash"), "sqz Bash hook must be present");
-        });
+        // PreToolUse should now contain BOTH the user's format-on-edit
+        // hook and sqz's Bash hook — our install appends, not replaces.
+        let pre = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2, "expected user's hook + sqz's hook, got: {pre:?}");
+        let matchers: Vec<&str> = pre
+            .iter()
+            .map(|e| e["matcher"].as_str().unwrap_or(""))
+            .collect();
+        assert!(matchers.contains(&"Edit"), "user's Edit hook must survive");
+        assert!(matchers.contains(&"Bash"), "sqz Bash hook must be present");
     }
 
     #[test]
     fn global_install_is_idempotent() {
-        // Running `sqz init --global` twice should leave exactly ONE sqz
-        // hook entry per event, not two. This is the foot-gun the
-        // upsert_sqz_hook_entry helper defends against.
         let tmp = tempfile::tempdir().unwrap();
-        with_fake_home(tmp.path(), || {
-            assert!(install_claude_global("sqz").unwrap());
-            // Second call: same sqz_path → no change reported, file is
-            // byte-identical.
-            assert!(
-                !install_claude_global("sqz").unwrap(),
-                "second install with identical args should report no change"
-            );
+        assert!(install_claude_global_at("sqz", Some(tmp.path())).unwrap());
+        assert!(
+            !install_claude_global_at("sqz", Some(tmp.path())).unwrap(),
+            "second install with identical args should report no change"
+        );
 
-            let path = tmp.path().join(".claude").join("settings.json");
-            let parsed: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            // Exactly one entry per hook event.
-            for event in &["PreToolUse", "PreCompact", "SessionStart"] {
-                let arr = parsed["hooks"][event].as_array().unwrap();
-                assert_eq!(
-                    arr.len(),
-                    1,
-                    "{event} must have exactly one sqz entry after 2 installs, got {arr:?}"
-                );
-            }
-        });
+        let path = tmp.path().join(".claude").join("settings.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for event in &["PreToolUse", "PreCompact", "SessionStart"] {
+            let arr = parsed["hooks"][event].as_array().unwrap();
+            assert_eq!(
+                arr.len(),
+                1,
+                "{event} must have exactly one sqz entry after 2 installs, got {arr:?}"
+            );
+        }
     }
 
     #[test]
     fn global_install_upgrades_stale_sqz_hook_in_place() {
-        // If a previous sqz release wrote a hook with a different sqz
-        // path, re-running `sqz init --global` should replace it, not
-        // leave two entries pointing at different binaries.
         let tmp = tempfile::tempdir().unwrap();
-        with_fake_home(tmp.path(), || {
-            // First install with old path.
-            install_claude_global("/old/path/sqz").unwrap();
-            // Second install with new path.
-            let changed = install_claude_global("/new/path/sqz").unwrap();
-            assert!(changed, "different sqz_path must be seen as a change");
+        install_claude_global_at("/old/path/sqz", Some(tmp.path())).unwrap();
+        let changed = install_claude_global_at("/new/path/sqz", Some(tmp.path())).unwrap();
+        assert!(changed, "different sqz_path must be seen as a change");
 
-            let path = tmp.path().join(".claude").join("settings.json");
-            let parsed: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            let pre = parsed["hooks"]["PreToolUse"].as_array().unwrap();
-            assert_eq!(pre.len(), 1, "stale sqz entry must be replaced, not duplicated");
-            let cmd = pre[0]["hooks"][0]["command"].as_str().unwrap();
-            assert!(cmd.contains("/new/path/sqz"));
-            assert!(!cmd.contains("/old/path/sqz"));
-        });
+        let path = tmp.path().join(".claude").join("settings.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pre = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "stale sqz entry must be replaced, not duplicated");
+        let cmd = pre[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.contains("/new/path/sqz"));
+        assert!(!cmd.contains("/old/path/sqz"));
     }
 
     #[test]
@@ -2069,82 +2035,61 @@ mod global_install_tests {
         )
         .unwrap();
 
-        with_fake_home(tmp.path(), || {
-            // Install so there's something to remove.
-            install_claude_global("/usr/local/bin/sqz").unwrap();
-            // And remove.
-            let result = remove_claude_global_hook().unwrap().unwrap();
-            assert_eq!(result.0, settings);
-            assert!(result.1, "should report that the file was modified");
+        install_claude_global_at("/usr/local/bin/sqz", Some(tmp.path())).unwrap();
+        let result = remove_claude_global_hook_at(Some(tmp.path())).unwrap().unwrap();
+        assert_eq!(result.0, settings);
+        assert!(result.1, "should report that the file was modified");
 
-            // File must still exist (user had non-sqz config in it).
-            assert!(settings.exists(), "settings.json should be preserved");
-            let parsed: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(settings.exists(), "settings.json should be preserved");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
 
-            // Permissions must survive.
-            assert_eq!(
-                parsed["permissions"]["allow"][0].as_str().unwrap(),
-                "Bash(git status)"
-            );
+        assert_eq!(
+            parsed["permissions"]["allow"][0].as_str().unwrap(),
+            "Bash(git status)"
+        );
 
-            // User's Edit hook must survive; sqz's Bash hook must be gone.
-            let pre = parsed["hooks"]["PreToolUse"].as_array().unwrap();
-            assert_eq!(pre.len(), 1, "only the user's Edit hook should remain");
-            assert_eq!(pre[0]["matcher"].as_str().unwrap(), "Edit");
+        let pre = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "only the user's Edit hook should remain");
+        assert_eq!(pre[0]["matcher"].as_str().unwrap(), "Edit");
 
-            // sqz-only hook events should be cleaned up entirely.
-            assert!(parsed["hooks"].get("PreCompact").is_none());
-            assert!(parsed["hooks"].get("SessionStart").is_none());
-        });
+        assert!(parsed["hooks"].get("PreCompact").is_none());
+        assert!(parsed["hooks"].get("SessionStart").is_none());
     }
 
     #[test]
     fn global_uninstall_deletes_settings_json_if_it_was_sqz_only() {
-        // If the user's ~/.claude/settings.json contained ONLY sqz's
-        // hooks (common case: sqz installed it from scratch), uninstall
-        // removes the whole file so there's no trace left.
         let tmp = tempfile::tempdir().unwrap();
-        with_fake_home(tmp.path(), || {
-            install_claude_global("sqz").unwrap();
-            let path = tmp.path().join(".claude").join("settings.json");
-            assert!(path.exists(), "precondition: install created the file");
+        install_claude_global_at("sqz", Some(tmp.path())).unwrap();
+        let path = tmp.path().join(".claude").join("settings.json");
+        assert!(path.exists(), "precondition: install created the file");
 
-            let result = remove_claude_global_hook().unwrap().unwrap();
-            assert!(result.1);
-            assert!(!path.exists(), "sqz-only settings.json should be removed on uninstall");
-        });
+        let result = remove_claude_global_hook_at(Some(tmp.path())).unwrap().unwrap();
+        assert!(result.1);
+        assert!(!path.exists(), "sqz-only settings.json should be removed on uninstall");
     }
 
     #[test]
     fn global_uninstall_on_missing_file_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
-        with_fake_home(tmp.path(), || {
-            assert!(
-                remove_claude_global_hook().unwrap().is_none(),
-                "missing file should return None, not error"
-            );
-        });
+        assert!(
+            remove_claude_global_hook_at(Some(tmp.path())).unwrap().is_none(),
+            "missing file should return None, not error"
+        );
     }
 
     #[test]
     fn global_uninstall_refuses_to_touch_unparseable_file() {
-        // If the user's ~/.claude/settings.json is corrupt (or they
-        // started editing it manually and saved mid-flight), uninstall
-        // should refuse rather than delete data.
         let tmp = tempfile::tempdir().unwrap();
         let settings = tmp.path().join(".claude").join("settings.json");
         std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
         std::fs::write(&settings, "{ invalid json because").unwrap();
 
-        with_fake_home(tmp.path(), || {
-            assert!(
-                remove_claude_global_hook().is_err(),
-                "bad JSON must surface as an error"
-            );
-        });
+        assert!(
+            remove_claude_global_hook_at(Some(tmp.path())).is_err(),
+            "bad JSON must surface as an error"
+        );
 
-        // File preserved, no data loss.
         let after = std::fs::read_to_string(&settings).unwrap();
         assert_eq!(after, "{ invalid json because");
     }
