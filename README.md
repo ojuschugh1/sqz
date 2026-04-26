@@ -159,6 +159,45 @@ Accepted names: `claude`, `cursor`, `windsurf`, `cline`, `gemini`,
 `opencode`, `codex`. Aliases (`claude-code`, `gemini-cli`, `roo`) also
 work. `--only` and `--skip` can't be combined.
 
+### Manual installation (preserve comments in your config)
+
+`sqz init` round-trips your config file through a JSON parser to merge
+the sqz entry, which drops any comments in your `opencode.jsonc` (and
+the analogous JSON-with-comments files other tools accept). If you've
+commented your config carefully and want to keep them, install by hand
+instead.
+
+**OpenCode** — two steps:
+
+1. Drop the plugin file in place. `sqz` prints the generated TS to
+   stdout so you don't have to hand-write the path-escaping logic:
+
+   ```sh
+   mkdir -p ~/.config/opencode/plugins
+   sqz print-opencode-plugin > ~/.config/opencode/plugins/sqz.ts
+   ```
+
+2. Add the MCP entry to your existing `opencode.jsonc` yourself.
+   Append this block inside the top-level `mcp` object (create the
+   `mcp` object if it doesn't exist):
+
+   ```jsonc
+   "sqz": {
+     "type": "local",
+     "command": ["sqz-mcp", "--transport", "stdio"],
+     "enabled": true
+   }
+   ```
+
+Comments in the rest of your file stay put. OpenCode auto-discovers
+the plugin file; no `plugin` array entry needed (adding one causes
+double-loading, see issue #10).
+
+**Other tools** — Claude Code, Cursor, Windsurf, Cline, Gemini CLI,
+and Codex use plain JSON configs without comment support, so the
+automated path is non-destructive there. Use `sqz init --only <tool>`
+for those.
+
 That's it. Shell hooks installed, AI tool hooks configured.
 
 ## How It Works

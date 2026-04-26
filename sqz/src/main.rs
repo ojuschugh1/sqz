@@ -242,6 +242,18 @@ enum Command {
     /// Proactively evict stale context to free tokens before compaction hits.
     /// Summarizes old items and outputs an eviction report.
     Compact,
+
+    /// Print the OpenCode plugin TypeScript to stdout for manual install.
+    ///
+    /// Lets users install sqz into OpenCode by hand — useful when an
+    /// existing `opencode.jsonc` has comments they want to preserve
+    /// (`sqz init` strips them on write because serde_json can't
+    /// round-trip JSONC). Reported on issue #6 by @Icaruk.
+    ///
+    /// Usage:
+    ///   sqz print-opencode-plugin > ~/.config/opencode/plugins/sqz.ts
+    #[command(name = "print-opencode-plugin")]
+    PrintOpencodePlugin,
 }
 
 #[derive(Subcommand)]
@@ -297,6 +309,7 @@ fn main() {
         Some(Command::Resume { session_id }) => cmd_resume(session_id),
         Some(Command::Hook { tool }) => cmd_hook(&tool),
         Some(Command::Compact) => cmd_compact(),
+        Some(Command::PrintOpencodePlugin) => cmd_print_opencode_plugin(),
     }
 }
 
@@ -1763,6 +1776,20 @@ fn cmd_compact() {
             eprintln!("[sqz] compact error: {e}");
         }
     }
+}
+
+/// `sqz print-opencode-plugin` — emit plugin TS for manual install.
+///
+/// Requested on issue #6: users with heavily-commented `opencode.jsonc`
+/// don't want `sqz init` to round-trip their file through serde_json
+/// (which drops comments). This lets them drop the plugin in by hand
+/// and register the MCP entry themselves without sqz touching the
+/// config file at all.
+fn cmd_print_opencode_plugin() {
+    let sqz_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "sqz".to_string());
+    print!("{}", sqz_engine::generate_opencode_plugin(&sqz_path));
 }
 
 // ── Hook command ──────────────────────────────────────────────────────────
