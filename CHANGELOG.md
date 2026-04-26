@@ -5,6 +5,26 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9] — 2026-04-23
+
+### Fixed
+
+- **MCP tools now use dedup cache** (issue #12 follow-up) — all 4 MCP tool
+  handlers (`compress`, `sqz_read_file`, `sqz_grep`, `sqz_list_dir`) were
+  calling `engine.compress()` directly, bypassing `CacheManager`. The dedup
+  cache — sqz's headline 92% savings feature — never fired through the MCP
+  path. Now routed through `compress_with_cache()`. Second read of the same
+  content returns a 13-token `§ref:HASH§` instead of re-compressing.
+- **Test isolation** — `make_server()` in sqz-mcp tests now uses a per-tempdir
+  SQLite store so cache state doesn't bleed between tests.
+
+### Added
+
+- **`sqz stats --project` / `sqz gain --project`** — filter stats and gain
+  charts to the current project directory.
+- **`sqz print-opencode-plugin`** — dump the generated OpenCode plugin to
+  stdout for manual install without running `sqz init`.
+
 ## [1.0.8] — 2026-04-23
 
 ### Fixed

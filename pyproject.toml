@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sqz"
-version = "1.0.8"
+version = "1.0.9"
 description = "Universal context intelligence layer — compresses LLM context across CLI, MCP, browser, and IDE"
 readme = "README.md"
 license = { text = "Elastic License 2.0 (ELv2)" }
