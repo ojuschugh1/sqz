@@ -267,6 +267,7 @@ sqz compress <text>           # Compress (or pipe from stdin)
 sqz compress --no-cache       # Compress without dedup (always full output)
 sqz expand <ref>              # Recover original content from a §ref:HASH§ token
 sqz compact                   # Evict stale context to free tokens
+sqz reset                     # Clear dedup cache or compression stats
 sqz gain                      # Show daily token savings (bar chart)
 sqz gain --project .          # Per-project daily gains
 sqz gain --days 30            # Last 30 days

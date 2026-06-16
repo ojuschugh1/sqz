@@ -1,8 +1,8 @@
-# API Proxy Mode (Planned)
+# API Proxy Mode
 
-> **Status: Not yet implemented.** This document describes the planned proxy feature for a future release. The `sqz proxy` subcommand is not available in v0.1.0.
+> **Status: Implemented (since v0.5.0).** The `sqz proxy` subcommand starts an HTTP proxy that compresses LLM API request payloads before forwarding them to the upstream provider.
 
-sqz will act as a transparent HTTP proxy that sits between your application and the OpenAI, Anthropic, or Google AI APIs. Every request will pass through the sqz compression pipeline before being forwarded, reducing token usage without changing your application code.
+sqz acts as a transparent HTTP proxy that sits between your application and the OpenAI, Anthropic, or Google AI APIs. Every request passes through the sqz compression pipeline before being forwarded, reducing token usage without changing your application code.
 
 ## How it works
 
