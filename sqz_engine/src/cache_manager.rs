@@ -162,7 +162,7 @@ impl CacheManager {
     }
 
     /// Compute the SHA-256 hex digest of `bytes`.
-    fn sha256_hex(bytes: &[u8]) -> String {
+    pub fn sha256_hex(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         format!("{:x}", hasher.finalize())
@@ -222,6 +222,12 @@ impl CacheManager {
     /// notify_compaction — which is never the same process that serves
     /// dedup hits.
     fn is_ref_fresh(&self, hash: &str) -> bool {
+        // Pinned entries bypass TTL and compaction-marker checks. They
+        // represent stable knowledge-base content that's persistently
+        // re-injected into every agent, so the original is never gone.
+        if let Ok(true) = self.store.is_cache_entry_pinned(hash) {
+            return true;
+        }
         let accessed = match self.store.get_cache_entry_accessed_at(hash) {
             Ok(Some(ts)) => ts,
             _ => return false,
@@ -834,6 +840,139 @@ mod tests {
         assert!(
             cm.check_dedup(content).unwrap().is_none(),
             "stale ref should not be returned by check_dedup"
+        );
+    }
+
+    #[test]
+    fn pinned_ref_stays_fresh_past_ttl() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::with_ref_age_duration(
+            store,
+            u64::MAX,
+            Duration::from_millis(10),
+        );
+        let pipeline = make_pipeline();
+        let content = b"wiki: stable knowledge base content";
+        let path = Path::new("wiki.md");
+
+        // Seed the cache, then pin.
+        cm.get_or_compress(path, content, &pipeline).unwrap();
+        let hash = CacheManager::sha256_hex(content);
+        assert!(cm.store.pin_cache_entry(&hash).unwrap());
+
+        // Wait well past the 10ms TTL.
+        std::thread::sleep(std::time::Duration::from_millis(40));
+
+        // Pinned: still dedup, even though accessed_at is way past TTL.
+        let result = cm.get_or_compress(path, content, &pipeline).unwrap();
+        assert!(
+            matches!(result, CacheResult::Dedup { .. }),
+            "pinned entry should stay fresh past TTL"
+        );
+        assert!(cm.check_dedup(content).unwrap().is_some());
+    }
+
+    #[test]
+    fn unpin_returns_to_ttl_behaviour() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::with_ref_age_duration(
+            store,
+            u64::MAX,
+            Duration::from_millis(10),
+        );
+        let pipeline = make_pipeline();
+        let content = b"transient session content";
+        let path = Path::new("file.txt");
+
+        cm.get_or_compress(path, content, &pipeline).unwrap();
+        let hash = CacheManager::sha256_hex(content);
+        cm.store.pin_cache_entry(&hash).unwrap();
+
+        // Pin keeps it fresh past TTL.
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert!(matches!(
+            cm.get_or_compress(path, content, &pipeline).unwrap(),
+            CacheResult::Dedup { .. }
+        ));
+
+        // Unpin and let TTL expire again.
+        cm.store.unpin_cache_entry(&hash).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let result = cm.get_or_compress(path, content, &pipeline).unwrap();
+        assert!(
+            matches!(result, CacheResult::Fresh { .. }),
+            "unpinned entry should obey TTL"
+        );
+    }
+
+    #[test]
+    fn pinned_ref_survives_compaction_marker() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::with_ref_age_duration(
+            store,
+            u64::MAX,
+            Duration::from_secs(3600),
+        );
+        let pipeline = make_pipeline();
+        let content = b"system prompt: shared across agents";
+        let path = Path::new("system.md");
+
+        cm.get_or_compress(path, content, &pipeline).unwrap();
+        let hash = CacheManager::sha256_hex(content);
+        cm.store.pin_cache_entry(&hash).unwrap();
+
+        // Compaction would normally invalidate every pre-marker entry.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        cm.notify_compaction();
+
+        // Pinned entry survives — wiki content is persistent across
+        // compactions because it's re-injected into every agent.
+        let result = cm.get_or_compress(path, content, &pipeline).unwrap();
+        assert!(
+            matches!(result, CacheResult::Dedup { .. }),
+            "pinned entry should survive compaction"
+        );
+    }
+
+    #[test]
+    fn pin_visible_across_cachemanager_instances() {
+        // Real-world scenario: agent A pins wiki content; agent B in a
+        // separate process queries the same SQLite store and gets the
+        // dedup hit because the pin lives in the shared store, not in
+        // any single CacheManager's memory.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.db");
+
+        let store_a = SessionStore::open_or_create(&path).unwrap();
+        let cm_a = CacheManager::with_ref_age_duration(
+            store_a,
+            u64::MAX,
+            Duration::from_millis(5),
+        );
+        let pipeline = make_pipeline();
+        let content = b"shared wiki content for multi-agent dedup";
+
+        cm_a.get_or_compress(Path::new("wiki.md"), content, &pipeline)
+            .unwrap();
+        let hash = CacheManager::sha256_hex(content);
+        cm_a.store.pin_cache_entry(&hash).unwrap();
+
+        // Drop agent A. Wait past TTL. Spin up agent B against the same DB.
+        drop(cm_a);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let store_b = SessionStore::open_or_create(&path).unwrap();
+        let cm_b = CacheManager::with_ref_age_duration(
+            store_b,
+            u64::MAX,
+            Duration::from_millis(5),
+        );
+        let result = cm_b
+            .get_or_compress(Path::new("wiki.md"), content, &pipeline)
+            .unwrap();
+        assert!(
+            matches!(result, CacheResult::Dedup { .. }),
+            "second agent should see the pin from the shared store"
         );
     }
 

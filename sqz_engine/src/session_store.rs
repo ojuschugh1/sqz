@@ -87,7 +87,13 @@ CREATE TABLE IF NOT EXISTS cache_entries (
     -- `§ref:…§` dedup tokens. Nullable because the column was added
     -- in an additive migration; rows written before that migration
     -- (or via callers that don't have the original bytes) have NULL.
-    original    BLOB
+    original    BLOB,
+    -- Pinned entries bypass the TTL freshness check. Used for stable
+    -- knowledge-base content (a wiki, project documentation, system
+    -- prompts) that's persistently re-injected into every agent and
+    -- therefore never gets compacted out of the LLM's context. See
+    -- `sqz pin` for the user-facing CLI.
+    pinned      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS compression_log (
@@ -148,6 +154,20 @@ pub(crate) fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
         .is_ok();
     if !has_project_dir {
         conn.execute("ALTER TABLE compression_log ADD COLUMN project_dir TEXT", [])?;
+    }
+
+    // Additive migration: add `pinned` flag to cache_entries. Pinned
+    // entries bypass the TTL freshness check so stable wiki / knowledge
+    // base content stays dedup-able forever.
+    let has_pinned: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('cache_entries') WHERE name = 'pinned'")?
+        .query_row([], |_| Ok(()))
+        .is_ok();
+    if !has_pinned {
+        conn.execute(
+            "ALTER TABLE cache_entries ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
 
     Ok(())
@@ -634,6 +654,113 @@ impl SessionStore {
             params![now, hash],
         )?;
         Ok(())
+    }
+
+    /// Resolve a hash prefix (or full hash) to the unique full hash of
+    /// the matching cache entry. Returns `Ok(None)` for non-existent
+    /// entries. Returns an error if the prefix is ambiguous (matches
+    /// more than one entry) so the caller can ask for a longer prefix.
+    /// Does not touch `accessed_at`.
+    pub fn resolve_cache_hash_by_prefix(&self, prefix: &str) -> Result<Option<String>> {
+        if prefix.is_empty()
+            || !prefix
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return Ok(None);
+        }
+        let pattern = format!("{prefix}%");
+        let mut stmt = self
+            .db
+            .prepare("SELECT hash FROM cache_entries WHERE hash LIKE ?1 LIMIT 2")?;
+        let mut rows = stmt.query(params![pattern])?;
+        let first: Option<String> = match rows.next()? {
+            Some(r) => Some(r.get(0)?),
+            None => None,
+        };
+        if rows.next()?.is_some() {
+            return Err(SqzError::Other(format!(
+                "cache: prefix '{prefix}' matches multiple entries — use a longer prefix"
+            )));
+        }
+        Ok(first)
+    }
+
+    /// Mark a cache entry as pinned so it bypasses the TTL freshness
+    /// check. Returns `Ok(true)` if a row was updated, `Ok(false)` if the
+    /// hash is not in the cache.
+    pub fn pin_cache_entry(&self, hash: &str) -> Result<bool> {
+        let n = self.db.execute(
+            "UPDATE cache_entries SET pinned = 1 WHERE hash = ?1",
+            params![hash],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Unpin a cache entry so it returns to normal TTL-based freshness.
+    /// Returns `Ok(true)` if a row was updated, `Ok(false)` otherwise.
+    pub fn unpin_cache_entry(&self, hash: &str) -> Result<bool> {
+        let n = self.db.execute(
+            "UPDATE cache_entries SET pinned = 0 WHERE hash = ?1",
+            params![hash],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Unpin every cache entry. Returns the count of rows that were
+    /// previously pinned.
+    pub fn unpin_all_cache_entries(&self) -> Result<usize> {
+        let n = self
+            .db
+            .execute("UPDATE cache_entries SET pinned = 0 WHERE pinned = 1", [])?;
+        Ok(n)
+    }
+
+    /// Whether the given hash is pinned. Returns `false` for unpinned
+    /// entries AND for hashes not in the cache.
+    pub fn is_cache_entry_pinned(&self, hash: &str) -> Result<bool> {
+        let result: rusqlite::Result<i64> = self.db.query_row(
+            "SELECT pinned FROM cache_entries WHERE hash = ?1",
+            params![hash],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(v) => Ok(v != 0),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(SqzError::SessionStore(e)),
+        }
+    }
+
+    /// List every pinned cache entry. Returns `(hash, accessed_at, size_bytes)`
+    /// tuples so the CLI can render a useful table.
+    pub fn list_pinned_cache_entries(
+        &self,
+    ) -> Result<Vec<(String, DateTime<Utc>, u64)>> {
+        let mut stmt = self
+            .db
+            .prepare(
+                "SELECT hash, accessed_at, length(data) FROM cache_entries \
+                 WHERE pinned = 1 ORDER BY accessed_at DESC",
+            )
+            .map_err(SqzError::SessionStore)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })
+            .map_err(SqzError::SessionStore)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (hash, accessed_at_str, size) = row?;
+            let accessed_at = accessed_at_str.parse::<DateTime<Utc>>().map_err(|e| {
+                SqzError::Other(format!("invalid accessed_at on pinned entry: {e}"))
+            })?;
+            out.push((hash, accessed_at, size));
+        }
+        Ok(out)
     }
 
     /// Set a metadata key/value. Persists across sqz process boundaries

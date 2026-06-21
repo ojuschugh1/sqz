@@ -322,6 +322,19 @@ enum Command {
         #[arg(long)]
         no_color: bool,
     },
+
+    /// Manage pinned cache entries.
+    ///
+    /// Pinned entries bypass the 30-minute TTL freshness check, so a
+    /// `§ref:HASH§` token to pinned content stays dedup-able forever.
+    /// Useful for stable knowledge-base content (a wiki, project
+    /// documentation, system prompts) that is persistently re-injected
+    /// into every agent and therefore never compacted out of the LLM's
+    /// context.
+    Pin {
+        #[command(subcommand)]
+        action: PinAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -332,6 +345,37 @@ enum TeeAction {
     Get {
         /// The tee entry id.
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PinAction {
+    /// Compress and pin a file or string. Pinned entries bypass the TTL
+    /// freshness check so dedup refs stay valid across long sessions.
+    Add {
+        /// File path, or `-` to read from stdin. A bare string is also
+        /// accepted and treated as literal content.
+        input: String,
+    },
+    /// Pin an already-cached hash by its full hash or short prefix.
+    /// Useful when you want to pin content that sqz has previously
+    /// compressed without re-compressing it.
+    Mark {
+        /// Cache entry hash (full or short prefix).
+        hash: String,
+    },
+    /// Remove the pin from a hash, returning it to normal TTL behaviour.
+    Remove {
+        /// Cache entry hash (full or short prefix).
+        hash: String,
+    },
+    /// List every pinned cache entry.
+    List,
+    /// Unpin every entry.
+    Clear {
+        /// Skip confirmation prompt.
+        #[arg(long, short)]
+        yes: bool,
     },
 }
 
@@ -382,6 +426,7 @@ fn main() {
         }
         Some(Command::PrintOpencodePlugin) => cmd_print_opencode_plugin(),
         Some(Command::Vizit { refresh, db, no_color }) => cmd_vizit(refresh, db, no_color),
+        Some(Command::Pin { action }) => cmd_pin(action),
     }
 }
 
@@ -2324,6 +2369,174 @@ fn cmd_reset(cache_only: bool, stats_only: bool, project: Option<String>, skip_c
 
     println!();
     println!("[sqz] reset complete.");
+}
+
+/// `sqz pin` — manage pinned cache entries.
+///
+/// Pinned entries bypass the 30-minute TTL freshness check so dedup
+/// refs to stable knowledge-base content stay valid forever. Useful
+/// when the original is persistently re-injected into every agent
+/// (e.g. project docs, system prompts, a wiki) and therefore never
+/// compacted out of the LLM's context.
+fn cmd_pin(action: PinAction) {
+    match action {
+        PinAction::Add { input } => cmd_pin_add(input),
+        PinAction::Mark { hash } => cmd_pin_set(hash, true),
+        PinAction::Remove { hash } => cmd_pin_set(hash, false),
+        PinAction::List => cmd_pin_list(),
+        PinAction::Clear { yes } => cmd_pin_clear(yes),
+    }
+}
+
+fn cmd_pin_add(input: String) {
+    use std::io::Read;
+
+    let content = if input == "-" {
+        let mut buf = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+            eprintln!("[sqz pin] read stdin: {e}");
+            std::process::exit(1);
+        }
+        buf
+    } else {
+        let path = std::path::Path::new(&input);
+        if path.exists() && path.is_file() {
+            match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[sqz pin] read {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            input.clone()
+        }
+    };
+
+    let engine = require_engine();
+    if let Err(e) = engine.compress_with_cache(&content) {
+        eprintln!("[sqz pin] compress: {e}");
+        std::process::exit(1);
+    }
+
+    let hash = sqz_engine::CacheManager::sha256_hex(content.as_bytes());
+    match engine.session_store().pin_cache_entry(&hash) {
+        Ok(true) => {
+            println!("[sqz] pinned {} ({} bytes)", &hash[..16.min(hash.len())], content.len());
+        }
+        Ok(false) => {
+            eprintln!("[sqz pin] cache entry missing after compress — internal error");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("[sqz pin] {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_pin_set(hash_or_prefix: String, pinned: bool) {
+    let engine = require_engine();
+    let store = engine.session_store();
+
+    let full = match store.resolve_cache_hash_by_prefix(&hash_or_prefix) {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            eprintln!("[sqz pin] no cache entry matches '{hash_or_prefix}'");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("[sqz pin] {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let result = if pinned {
+        store.pin_cache_entry(&full)
+    } else {
+        store.unpin_cache_entry(&full)
+    };
+
+    let verb = if pinned { "pinned" } else { "unpinned" };
+    match result {
+        Ok(true) => println!("[sqz] {verb} {}", &full[..16.min(full.len())]),
+        Ok(false) => {
+            eprintln!("[sqz pin] cache entry vanished mid-operation");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("[sqz pin] {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_pin_list() {
+    let engine = require_engine();
+    let store = engine.session_store();
+
+    let entries = match store.list_pinned_cache_entries() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[sqz pin] {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if entries.is_empty() {
+        println!("[sqz] no pinned entries. Use `sqz pin add <file>` to pin content.");
+        return;
+    }
+
+    println!("HASH              SIZE       LAST ACCESSED");
+    for (hash, accessed_at, size) in &entries {
+        let short = &hash[..16.min(hash.len())];
+        let size_str = format_size_bytes(*size);
+        let when = accessed_at.format("%Y-%m-%d %H:%M UTC");
+        println!("{short}  {size_str:<10} {when}");
+    }
+    println!();
+    println!("{} pinned entries.", entries.len());
+}
+
+fn cmd_pin_clear(skip_confirm: bool) {
+    use std::io::Write;
+
+    let engine = require_engine();
+    let store = engine.session_store();
+
+    if !skip_confirm {
+        print!("Unpin every cache entry? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut buf = String::new();
+        if std::io::stdin().read_line(&mut buf).is_err() {
+            eprintln!("[sqz pin] aborted.");
+            std::process::exit(1);
+        }
+        let ans = buf.trim().to_lowercase();
+        if ans != "y" && ans != "yes" {
+            println!("[sqz pin] aborted.");
+            return;
+        }
+    }
+
+    match store.unpin_all_cache_entries() {
+        Ok(n) => println!("[sqz] unpinned {n} entries."),
+        Err(e) => {
+            eprintln!("[sqz pin] {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn format_size_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 /// `sqz print-opencode-plugin` — emit plugin TS for manual install.
