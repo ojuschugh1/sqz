@@ -6,10 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   benchmarks:
     name: Benchmark gates (${{ matrix.os }} / Rust ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -21,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust ${{ matrix.rust }}
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master (as of 2026-07-10)
         with:
           toolchain: ${{ matrix.rust }}
 

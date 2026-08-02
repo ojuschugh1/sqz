@@ -10,10 +10,18 @@ on:
         required: true
         default: 'v0.1.2'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.workflow }}-${{ github.event.release.tag_name || github.event.inputs.tag_name }}
+  cancel-in-progress: false
+
 jobs:
   publish-npm:
     name: Publish to npm
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +46,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

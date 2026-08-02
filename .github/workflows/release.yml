@@ -31,6 +31,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -39,6 +43,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -73,7 +78,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (as of 2026-07-10)
         with:
           targets: ${{ matrix.target }}
 
@@ -166,6 +171,7 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
@@ -189,6 +195,7 @@ jobs:
     name: Publish to npm
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -234,6 +241,7 @@ jobs:
     name: Ping homebrew-sqz tap
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Dispatch update to homebrew-sqz
         env:
