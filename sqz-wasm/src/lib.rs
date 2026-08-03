@@ -265,10 +265,10 @@ enum ContentType {
 
 fn classify(input: &str) -> ContentType {
     let trimmed = input.trim();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
-            return ContentType::Json;
-        }
+    if (trimmed.starts_with('{') || trimmed.starts_with('['))
+        && serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
+    {
+        return ContentType::Json;
     }
     let lines: Vec<&str> = trimmed.lines().take(20).collect();
     let mut code_score = 0;

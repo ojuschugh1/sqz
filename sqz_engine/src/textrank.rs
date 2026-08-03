@@ -1,13 +1,13 @@
-/// TextRank — graph-based extractive compression for prose content.
-///
-/// Applies the TextRank algorithm (Mihalcea & Tarau 2004, same math as
-/// Google's PageRank) to rank sentences by importance. Builds a graph
-/// where sentences are nodes and edges are weighted by word overlap
-/// similarity. The stationary distribution of a random walk gives each
-/// sentence an importance score. Keeps the top-K sentences, drops the rest.
-///
-/// Convergence guarantee: Perron-Frobenius theorem ensures a unique
-/// stationary distribution for any connected graph with positive weights.
+//! TextRank — graph-based extractive compression for prose content.
+//!
+//! Applies the TextRank algorithm (Mihalcea & Tarau 2004, same math as
+//! Google's PageRank) to rank sentences by importance. Builds a graph
+//! where sentences are nodes and edges are weighted by word overlap
+//! similarity. The stationary distribution of a random walk gives each
+//! sentence an importance score. Keeps the top-K sentences, drops the rest.
+//!
+//! Convergence guarantee: Perron-Frobenius theorem ensures a unique
+//! stationary distribution for any connected graph with positive weights.
 
 use crate::error::Result;
 

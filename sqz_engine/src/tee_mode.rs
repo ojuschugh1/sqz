@@ -1,9 +1,9 @@
-/// Tee Mode — saves full uncompressed command output for later recovery.
-///
-/// Configurable as `always`, `failures` (non-zero exit), or `never` (default).
-/// Saved outputs are timestamped files in a configurable directory.
-///
-/// Requirements: 38.1, 38.2, 38.3, 38.4
+//! Tee Mode — saves full uncompressed command output for later recovery.
+//!
+//! Configurable as `always`, `failures` (non-zero exit), or `never` (default).
+//! Saved outputs are timestamped files in a configurable directory.
+//!
+//! Requirements: 38.1, 38.2, 38.3, 38.4
 
 use crate::{Result, SqzError};
 use chrono::Utc;
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 // ── TeeMode enum ─────────────────────────────────────────────────────────
 
 /// Controls when uncompressed output is saved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TeeMode {
     /// Save every command's uncompressed output.
@@ -21,13 +21,8 @@ pub enum TeeMode {
     /// Save only when the command exits with a non-zero code.
     Failures,
     /// Disabled (default).
+    #[default]
     Never,
-}
-
-impl Default for TeeMode {
-    fn default() -> Self {
-        Self::Never
-    }
 }
 
 impl std::fmt::Display for TeeMode {

@@ -136,7 +136,7 @@ impl RegretTracker {
         let mut sorted: Vec<_> = self.profiles.iter()
             .map(|(k, v)| (k.as_str(), v))
             .collect();
-        sorted.sort_by(|a, b| b.1.regret_count.cmp(&a.1.regret_count));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1.regret_count));
         sorted.truncate(top_n);
         sorted
     }

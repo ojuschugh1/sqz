@@ -35,7 +35,7 @@ pub enum CacheResult {
         similarity: f64,
     },
     /// Content not seen before — full compression result.
-    Fresh { output: CompressedContent },
+    Fresh { output: Box<CompressedContent> },
 }
 
 /// Result of resolving a dedup-ref prefix via
@@ -299,7 +299,7 @@ impl CacheManager {
                 let compressed = pipeline.compress(&text, &ctx, &preset)?;
                 // Record that we re-sent this content
                 self.record_ref_sent(&hash);
-                return Ok(CacheResult::Fresh { output: compressed });
+                return Ok(CacheResult::Fresh { output: Box::new(compressed) });
             }
         }
 
@@ -335,7 +335,7 @@ impl CacheManager {
         // Record that this content was sent at the current turn
         self.record_ref_sent(&hash);
 
-        Ok(CacheResult::Fresh { output: compressed })
+        Ok(CacheResult::Fresh { output: Box::new(compressed) })
     }
 
     /// Try to delta-encode content against recent cache entries.

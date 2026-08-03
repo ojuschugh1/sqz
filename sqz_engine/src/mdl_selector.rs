@@ -1,11 +1,11 @@
-/// Minimum Description Length (MDL) stage selection.
-///
-/// MDL principle (Rissanen 1978): the best compression is the one that
-/// minimizes description_length(model) + description_length(data|model).
-///
-/// Instead of running all 16 stages on every input, MDL selects the optimal
-/// subset of stages for each content type. Stages that add overhead (headers,
-/// legends) without sufficient compression are skipped.
+//! Minimum Description Length (MDL) stage selection.
+//!
+//! MDL principle (Rissanen 1978): the best compression is the one that
+//! minimizes description_length(model) + description_length(data|model).
+//!
+//! Instead of running all 16 stages on every input, MDL selects the optimal
+//! subset of stages for each content type. Stages that add overhead (headers,
+//! legends) without sufficient compression are skipped.
 
 /// A stage candidate with its estimated cost and benefit.
 #[derive(Debug, Clone)]
@@ -70,7 +70,7 @@ pub fn select_stages(profile: &ContentProfile) -> MdlSelection {
     let mut candidates = build_candidates(profile);
 
     // Sort by net benefit descending
-    candidates.sort_by(|a, b| b.net_benefit().cmp(&a.net_benefit()));
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.net_benefit()));
 
     let mut enabled = Vec::new();
     let mut skipped = Vec::new();
@@ -194,7 +194,7 @@ fn build_candidates(p: &ContentProfile) -> Vec<StageCandidate> {
 pub fn profile_content(text: &str) -> ContentProfile {
     let is_json = text.trim().starts_with('{') || text.trim().starts_with('[');
     let lines: Vec<&str> = text.lines().collect();
-    let tokens = (text.len() as u32 + 3) / 4;
+    let tokens = (text.len() as u32).div_ceil(4);
 
     // Check for repetition
     let mut has_repetition = false;

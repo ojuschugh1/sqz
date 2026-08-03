@@ -1,11 +1,11 @@
-/// Confidence-driven compression mode router.
-///
-/// Analyzes input content and selects the appropriate compression aggressiveness:
-/// - High-risk content (stack traces, configs, migrations) → safe preset
-/// - Low-entropy repetitive content → aggressive preset
-/// - Normal content → default preset
-///
-/// Based on entropy analysis and content pattern detection.
+//! Confidence-driven compression mode router.
+//!
+//! Analyzes input content and selects the appropriate compression aggressiveness:
+//! - High-risk content (stack traces, configs, migrations) → safe preset
+//! - Low-entropy repetitive content → aggressive preset
+//! - Normal content → default preset
+//!
+//! Based on entropy analysis and content pattern detection.
 
 use crate::entropy_analyzer::EntropyAnalyzer;
 

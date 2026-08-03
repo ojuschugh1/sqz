@@ -1,23 +1,23 @@
-/// Two-pass compression verifier.
-///
-/// After compression, the verifier checks that critical information was
-/// preserved. If confidence is below the threshold, it signals the caller
-/// to fall back to a safer (less aggressive) compression mode.
-///
-/// Checks performed:
-/// 1. Required JSON keys present (if original was JSON)
-/// 2. Numeric fields unchanged (no value corruption)
-/// 3. Error/warning lines retained (critical signal preservation)
-/// 4. Diff hunk headers present (if input was a git diff)
-/// 5. File paths preserved (no path truncation)
-/// 6. Minimum content retention (output not too short vs input)
-/// 7. Identifier/path/URL preservation — deterministic token scan covering
-///    filesystem paths, URLs, backtick-quoted code identifiers, environment
-///    variable names, and version numbers. Added after the sessions that
-///    produced the `packages → pkgs` / `configuration/` / `repository/` bug
-///    class — the idea (post-compression preservation check) was prompted
-///    by caveman-compress's validate.py, but the scan mechanism, inputs,
-///    and integration point are sqz-specific.
+//! Two-pass compression verifier.
+//!
+//! After compression, the verifier checks that critical information was
+//! preserved. If confidence is below the threshold, it signals the caller
+//! to fall back to a safer (less aggressive) compression mode.
+//!
+//! Checks performed:
+//! 1. Required JSON keys present (if original was JSON)
+//! 2. Numeric fields unchanged (no value corruption)
+//! 3. Error/warning lines retained (critical signal preservation)
+//! 4. Diff hunk headers present (if input was a git diff)
+//! 5. File paths preserved (no path truncation)
+//! 6. Minimum content retention (output not too short vs input)
+//! 7. Identifier/path/URL preservation — deterministic token scan covering
+//!    filesystem paths, URLs, backtick-quoted code identifiers, environment
+//!    variable names, and version numbers. Added after the sessions that
+//!    produced the `packages → pkgs` / `configuration/` / `repository/` bug
+//!    class — the idea (post-compression preservation check) was prompted
+//!    by caveman-compress's validate.py, but the scan mechanism, inputs,
+//!    and integration point are sqz-specific.
 
 use crate::types::VerifyResult;
 

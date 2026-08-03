@@ -121,11 +121,11 @@ impl HookManager {
                 let matches = context
                     .tool_name
                     .as_deref()
-                    .map_or(false, |t| t == filter)
+                    .is_some_and(|t| t == filter)
                     || context
                         .command
                         .as_deref()
-                        .map_or(false, |c| c.contains(filter));
+                        .is_some_and(|c| c.contains(filter));
                 if !matches {
                     continue;
                 }

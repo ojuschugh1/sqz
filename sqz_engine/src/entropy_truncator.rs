@@ -1,12 +1,12 @@
-/// Adaptive Entropy-Weighted Truncation (Rate-Distortion Theory).
-///
-/// Instead of using fixed thresholds for truncate_strings and collapse_arrays,
-/// this module computes per-segment entropy and keeps segments above the
-/// median entropy while dropping segments below it. This preserves the
-/// information-dense parts and drops the redundant tail.
-///
-/// Based on rate-distortion theory: the optimal cutoff depends on the
-/// information density of the content being truncated, not a fixed length.
+//! Adaptive Entropy-Weighted Truncation (Rate-Distortion Theory).
+//!
+//! Instead of using fixed thresholds for truncate_strings and collapse_arrays,
+//! this module computes per-segment entropy and keeps segments above the
+//! median entropy while dropping segments below it. This preserves the
+//! information-dense parts and drops the redundant tail.
+//!
+//! Based on rate-distortion theory: the optimal cutoff depends on the
+//! information density of the content being truncated, not a fixed length.
 
 use crate::error::Result;
 
@@ -123,10 +123,9 @@ impl EntropyTruncator {
         let total = scored.len();
 
         for seg in &mut scored {
-            if seg.text.len() < self.config.min_segment_length {
-                seg.kept = true;
-                kept_count += 1;
-            } else if seg.entropy >= threshold {
+            if seg.text.len() < self.config.min_segment_length
+                || seg.entropy >= threshold
+            {
                 seg.kept = true;
                 kept_count += 1;
             } else {
@@ -294,7 +293,7 @@ fn median(sorted: &[f64]) -> f64 {
         return 0.0;
     }
     let mid = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         (sorted[mid - 1] + sorted[mid]) / 2.0
     } else {
         sorted[mid]

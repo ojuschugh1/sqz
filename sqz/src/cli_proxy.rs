@@ -1,11 +1,11 @@
-/// CLI Proxy — intercepts command output and compresses it through SqzEngine.
-///
-/// `CliProxy::intercept_output` is the core entry point: it takes raw command
-/// output, runs it through per-command formatters first, then the compression
-/// pipeline, with SHA-256 dedup cache for repeated content.
-///
-/// On any failure it logs the error and returns the original output unchanged
-/// (transparent fallback, Requirement 1.5).
+//! CLI Proxy — intercepts command output and compresses it through SqzEngine.
+//!
+//! `CliProxy::intercept_output` is the core entry point: it takes raw command
+//! output, runs it through per-command formatters first, then the compression
+//! pipeline, with SHA-256 dedup cache for repeated content.
+//!
+//! On any failure it logs the error and returns the original output unchanged
+//! (transparent fallback, Requirement 1.5).
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -218,8 +218,8 @@ impl CliProxy {
 
         // Step 3: Try per-command formatter
         if let Some(formatted) = format_command(cmd, output) {
-            let tokens_original = (output.len() as u32 + 3) / 4;
-            let tokens_compressed = (formatted.len() as u32 + 3) / 4;
+            let tokens_original = (output.len() as u32).div_ceil(4);
+            let tokens_compressed = (formatted.len() as u32).div_ceil(4);
             if tokens_compressed < tokens_original {
                 // Persist to L2 cache — but skip if content contains secrets
                 // (confidence router detected high-risk patterns like API keys)
@@ -297,7 +297,7 @@ impl CliProxy {
     /// tiktoken counts is a separate follow-up; using the same heuristic
     /// keeps the reporting internally consistent.
     fn log_dedup_hit(&self, _cmd: &str, output: &str) {
-        let tokens_original = (output.len() as u32 + 3) / 4;
+        let tokens_original = (output.len() as u32).div_ceil(4);
         const DEDUP_REF_TOKENS: u32 = 13;
         let project = std::env::current_dir().ok();
         let project_str = project.as_ref().map(|p| p.to_string_lossy().to_string());

@@ -1,12 +1,12 @@
-/// Proactive Context Eviction — gives the agent explicit control over
-/// context management by summarizing and evicting stale content.
-///
-/// Unlike passive compaction (which the LLM harness does unpredictably),
-/// proactive eviction lets sqz decide what to keep and what to summarize
-/// based on recency, access frequency, and content importance.
-///
-/// The agent can call `sqz compact` to trigger eviction, or the engine
-/// can suggest eviction when the budget approaches the ceiling.
+//! Proactive Context Eviction — gives the agent explicit control over
+//! context management by summarizing and evicting stale content.
+//!
+//! Unlike passive compaction (which the LLM harness does unpredictably),
+//! proactive eviction lets sqz decide what to keep and what to summarize
+//! based on recency, access frequency, and content importance.
+//!
+//! The agent can call `sqz compact` to trigger eviction, or the engine
+//! can suggest eviction when the budget approaches the ceiling.
 
 use crate::error::Result;
 

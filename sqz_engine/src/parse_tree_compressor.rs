@@ -132,7 +132,7 @@ fn compute_median_entropy(entries: &[(usize, usize, f64)]) -> f64 {
     let mut entropies: Vec<f64> = entries.iter().map(|(_, _, e)| *e).collect();
     entropies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let mid = entropies.len() / 2;
-    if entropies.len() % 2 == 0 && entropies.len() >= 2 {
+    if entropies.len().is_multiple_of(2) && entropies.len() >= 2 {
         (entropies[mid - 1] + entropies[mid]) / 2.0
     } else {
         entropies[mid]

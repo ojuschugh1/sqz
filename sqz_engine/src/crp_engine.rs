@@ -1,21 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 /// Configurable CRP compression level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CrpLevel {
     /// No CRP injection.
+    #[default]
     Off,
     /// Basic abbreviated references — moderate token savings.
     Moderate,
     /// Full TDD shorthand protocol with extended symbol set.
     Aggressive,
-}
-
-impl Default for CrpLevel {
-    fn default() -> Self {
-        CrpLevel::Off
-    }
 }
 
 /// Context Reduction Protocol engine.

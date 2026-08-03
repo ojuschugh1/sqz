@@ -1,12 +1,12 @@
-/// Byte-Pair Encoding (BPE) for vocabulary compression.
-///
-/// Identifies the most frequent byte pairs in content, replaces them with
-/// single symbols, and iterates. Each BPE iteration reduces the total
-/// symbol count by at least 1 (the merged pair). After k iterations,
-/// the content has at most n-k symbols where n is the original count.
-///
-/// This is the same algorithm that GPT tokenizers use, but applied to
-/// compress content before it reaches the tokenizer.
+//! Byte-Pair Encoding (BPE) for vocabulary compression.
+//!
+//! Identifies the most frequent byte pairs in content, replaces them with
+//! single symbols, and iterates. Each BPE iteration reduces the total
+//! symbol count by at least 1 (the merged pair). After k iterations,
+//! the content has at most n-k symbols where n is the original count.
+//!
+//! This is the same algorithm that GPT tokenizers use, but applied to
+//! compress content before it reaches the tokenizer.
 
 use std::collections::HashMap;
 
@@ -74,9 +74,9 @@ pub fn bpe_compress(text: &str, config: &BpeConfig) -> Result<BpeResult> {
     }
 
     let mut merges = Vec::new();
-    let mut merge_idx = 0u32;
+    let mut merge_idx = 0usize;
 
-    for _ in 0..config.max_merges {
+    while merge_idx < config.max_merges {
         // Count all adjacent pairs
         let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
         for window in tokens.windows(2) {

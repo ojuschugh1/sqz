@@ -269,9 +269,8 @@ pub fn remove_claude_md_guidance(
     }
     // And forwards to include the trailing newline on the END line.
     let mut end = after_end_idx;
-    while end < content.len() && content.as_bytes()[end] == b'\n' {
-        end += 1;
-        break; // Exactly one trailing newline.
+    if end < content.len() && content.as_bytes()[end] == b'\n' {
+        end += 1; // Exactly one trailing newline.
     }
 
     let mut new_content = String::with_capacity(content.len() - (end - start));

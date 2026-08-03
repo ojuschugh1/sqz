@@ -213,13 +213,13 @@ impl<'a> SessionContinuityManager<'a> {
         // Active files: extract from conversation metadata (file paths mentioned).
         let mut seen_files = std::collections::HashSet::new();
         for record in &session.tool_usage {
-            if record.tool_name.contains("file") || record.tool_name.contains("read") {
-                if seen_files.insert(record.tool_name.clone()) {
-                    events.push(SnapshotEvent::new(
-                        SnapshotEventType::ActiveFile,
-                        record.tool_name.clone(),
-                    ));
-                }
+            if (record.tool_name.contains("file") || record.tool_name.contains("read"))
+                && seen_files.insert(record.tool_name.clone())
+            {
+                events.push(SnapshotEvent::new(
+                    SnapshotEventType::ActiveFile,
+                    record.tool_name.clone(),
+                ));
             }
         }
 

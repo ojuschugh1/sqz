@@ -1,32 +1,32 @@
-/// Structural summary extraction for source code files.
-///
-/// Instead of dumping entire files into LLM context, this module extracts
-/// just the structural skeleton: imports, function/method signatures, class
-/// definitions, and call relationships. The model sees the architecture
-/// without the implementation noise — typically ~70% fewer tokens while
-/// actually improving navigation.
-///
-/// Builds on top of `AstParser` (signature extraction) and `DependencyMapper`
-/// (import graph), adding **call graph extraction** — which functions call
-/// which other functions — to complete the structural picture.
-///
-/// Output format is a compact, LLM-friendly text representation:
-/// ```text
-/// # file: src/engine.rs
-/// ## imports
-/// use crate::pipeline::CompressionPipeline
-/// use crate::cache_manager::CacheManager
-/// ## types
-/// pub struct SqzEngine { ... }
-/// ## functions
-/// pub fn compress(&self, input: &str) -> Result<CompressedContent>
-///   → calls: pipeline.compress, cache.get_or_insert, verifier.check
-/// pub fn compress_with_mode(&self, input: &str, mode: CompressionMode) -> Result<CompressedContent>
-///   → calls: compress
-/// ## dependencies
-/// imports: pipeline, cache_manager, verifier
-/// imported by: main, cli_proxy
-/// ```
+//! Structural summary extraction for source code files.
+//!
+//! Instead of dumping entire files into LLM context, this module extracts
+//! just the structural skeleton: imports, function/method signatures, class
+//! definitions, and call relationships. The model sees the architecture
+//! without the implementation noise — typically ~70% fewer tokens while
+//! actually improving navigation.
+//!
+//! Builds on top of `AstParser` (signature extraction) and `DependencyMapper`
+//! (import graph), adding **call graph extraction** — which functions call
+//! which other functions — to complete the structural picture.
+//!
+//! Output format is a compact, LLM-friendly text representation:
+//! ```text
+//! # file: src/engine.rs
+//! ## imports
+//! use crate::pipeline::CompressionPipeline
+//! use crate::cache_manager::CacheManager
+//! ## types
+//! pub struct SqzEngine { ... }
+//! ## functions
+//! pub fn compress(&self, input: &str) -> Result<CompressedContent>
+//!   → calls: pipeline.compress, cache.get_or_insert, verifier.check
+//! pub fn compress_with_mode(&self, input: &str, mode: CompressionMode) -> Result<CompressedContent>
+//!   → calls: compress
+//! ## dependencies
+//! imports: pipeline, cache_manager, verifier
+//! imported by: main, cli_proxy
+//! ```
 
 use std::collections::{HashMap, HashSet};
 
@@ -312,8 +312,8 @@ fn extract_call_graph(
         // Don't include self-references
         seen.insert(func_name.clone());
 
-        for line_idx in *start..*end.min(&lines.len()) {
-            let line = lines[line_idx].trim();
+        for line in lines.iter().take(*end.min(&lines.len())).skip(*start) {
+            let line = line.trim();
 
             // Skip comments
             if line.starts_with("//") || line.starts_with('#') || line.starts_with("/*") {

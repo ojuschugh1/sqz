@@ -815,9 +815,7 @@ impl McpServer {
         // Notifications (no id) are one-way per JSON-RPC 2.0 and MUST NOT
         // receive a response. Responding to one makes strict clients like
         // Claude Code mark the server as failed. Reported in issue #12.
-        if req.id.is_none() {
-            return None;
-        }
+        req.id.as_ref()?;
 
         Some(match req.method.as_str() {
             "tools/list" => {

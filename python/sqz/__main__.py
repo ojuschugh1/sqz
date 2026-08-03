@@ -5,7 +5,6 @@ Requirement 16.2: pip install sqz entry point.
 Downloads the correct pre-built Rust binary on first run, then delegates to it.
 """
 
-import os
 import sys
 import platform
 import urllib.request

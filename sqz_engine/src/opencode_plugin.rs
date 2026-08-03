@@ -1,18 +1,18 @@
-/// OpenCode plugin support for sqz.
-///
-/// OpenCode uses TypeScript plugins loaded from `~/.config/opencode/plugins/`.
-/// The plugin hooks into `tool.execute.before` to rewrite bash commands,
-/// piping output through `sqz compress` for token savings.
-///
-/// Unlike Claude Code / Cursor / Gemini (which use JSON hook configs),
-/// OpenCode requires a TypeScript file that exports a factory function.
-///
-/// Plugin path: `~/.config/opencode/plugins/sqz.ts`
-/// Config path: `opencode.json` OR `opencode.jsonc` in the project root.
-/// The installer (`update_opencode_config`) discovers either variant and
-/// merges sqz's entries into whichever exists; a fresh install defaults
-/// to `opencode.json`. See issue #6 for the reason the installer must
-/// look past the `.json` extension.
+//! OpenCode plugin support for sqz.
+//!
+//! OpenCode uses TypeScript plugins loaded from `~/.config/opencode/plugins/`.
+//! The plugin hooks into `tool.execute.before` to rewrite bash commands,
+//! piping output through `sqz compress` for token savings.
+//!
+//! Unlike Claude Code / Cursor / Gemini (which use JSON hook configs),
+//! OpenCode requires a TypeScript file that exports a factory function.
+//!
+//! Plugin path: `~/.config/opencode/plugins/sqz.ts`
+//! Config path: `opencode.json` OR `opencode.jsonc` in the project root.
+//! The installer (`update_opencode_config`) discovers either variant and
+//! merges sqz's entries into whichever exists; a fresh install defaults
+//! to `opencode.json`. See issue #6 for the reason the installer must
+//! look past the `.json` extension.
 
 use std::path::{Path, PathBuf};
 
@@ -415,8 +415,8 @@ fn strip_trailing_commas(src: &str) -> String {
             if j < len && (bytes[j] == b']' || bytes[j] == b'}') {
                 // Drop the comma; emit the whitespace and let the
                 // main loop pick up the closing bracket.
-                for k in (i + 1)..j {
-                    out.push(bytes[k] as char);
+                for byte in bytes.iter().take(j).skip(i + 1) {
+                    out.push(*byte as char);
                 }
                 i = j;
                 continue;

@@ -203,7 +203,7 @@ impl SqzEngine {
         match self.compress(input) {
             Ok(result) => result,
             Err(_) => {
-                let tokens = (input.len() as u32 + 3) / 4;
+                let tokens = (input.len() as u32).div_ceil(4);
                 CompressedContent {
                     data: input.to_string(),
                     tokens_compressed: tokens,

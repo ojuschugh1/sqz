@@ -261,7 +261,15 @@ impl SandboxExecutor {
             Self::DEFAULT_MAX_OUTPUT_BYTES,
         )
     }
+}
 
+impl Default for SandboxExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SandboxExecutor {
     /// Create with custom timeout and max output size.
     pub fn with_config(timeout: Duration, max_output_bytes: usize) -> Self {
         let runtimes = detect_runtimes();
@@ -311,7 +319,7 @@ impl SandboxExecutor {
         let mut result = self.execute(code, language)?;
 
         let should_filter = result.stdout.len() > self.filter_threshold
-            && intent.map_or(false, |i| !i.trim().is_empty());
+            && intent.is_some_and(|i| !i.trim().is_empty());
 
         if should_filter {
             let intent_str = intent.unwrap(); // safe: checked above
@@ -370,7 +378,7 @@ impl SandboxExecutor {
             _ => "tmp",
         };
 
-        let tmp_dir = tempfile::tempdir().map_err(|e| SqzError::Io(e))?;
+        let tmp_dir = tempfile::tempdir().map_err(SqzError::Io)?;
         let script_path = tmp_dir.path().join(format!("sandbox_script.{ext}"));
         {
             let mut f = std::fs::File::create(&script_path)?;

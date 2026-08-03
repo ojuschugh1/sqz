@@ -1,10 +1,10 @@
-/// SimHash — Locality-Sensitive Hashing for O(1) near-duplicate detection.
-///
-/// Produces a 64-bit fingerprint where similar documents have similar
-/// fingerprints. Hamming distance between two SimHash values directly
-/// estimates cosine similarity (Charikar 2002).
-///
-/// P(hash collision) = cos(θ)/π — this is a proven locality-sensitive hash.
+//! SimHash — Locality-Sensitive Hashing for O(1) near-duplicate detection.
+//!
+//! Produces a 64-bit fingerprint where similar documents have similar
+//! fingerprints. Hamming distance between two SimHash values directly
+//! estimates cosine similarity (Charikar 2002).
+//!
+//! P(hash collision) = cos(θ)/π — this is a proven locality-sensitive hash.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -52,18 +52,18 @@ pub fn simhash(text: &str) -> SimHashFingerprint {
 
     for token in &tokens {
         let h = hash_token(token);
-        for i in 0..64 {
+        for (i, vi) in v.iter_mut().enumerate() {
             if (h >> i) & 1 == 1 {
-                v[i] += 1;
+                *vi += 1;
             } else {
-                v[i] -= 1;
+                *vi -= 1;
             }
         }
     }
 
     let mut fingerprint: u64 = 0;
-    for i in 0..64 {
-        if v[i] > 0 {
+    for (i, &vi) in v.iter().enumerate() {
+        if vi > 0 {
             fingerprint |= 1u64 << i;
         }
     }
@@ -81,18 +81,18 @@ pub fn simhash_weighted(features: &[(String, f64)]) -> SimHashFingerprint {
 
     for (token, weight) in features {
         let h = hash_token(token);
-        for i in 0..64 {
+        for (i, vi) in v.iter_mut().enumerate() {
             if (h >> i) & 1 == 1 {
-                v[i] += weight;
+                *vi += weight;
             } else {
-                v[i] -= weight;
+                *vi -= weight;
             }
         }
     }
 
     let mut fingerprint: u64 = 0;
-    for i in 0..64 {
-        if v[i] > 0.0 {
+    for (i, &vi) in v.iter().enumerate() {
+        if vi > 0.0 {
             fingerprint |= 1u64 << i;
         }
     }

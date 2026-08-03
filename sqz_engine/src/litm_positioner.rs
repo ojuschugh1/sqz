@@ -1,21 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 /// Strategy for LITM (Lost In The Middle) context reordering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LitmStrategy {
     /// Default: place high-priority content at edges of the context window.
+    #[default]
     Enabled,
     /// Preserve original section order — no reordering.
     Disabled,
     /// Extreme edge bias: high-priority at edges, drop lowest-priority middle sections.
     Aggressive,
-}
-
-impl Default for LitmStrategy {
-    fn default() -> Self {
-        Self::Enabled
-    }
 }
 
 /// The type of a context section, used to assign default priority scores.
@@ -106,7 +101,7 @@ impl LitmPositioner {
         }
 
         // Distribute to edges: alternate front / back.
-        let sorted: Vec<ContextSection> = sections.drain(..).collect();
+        let sorted: Vec<ContextSection> = std::mem::take(sections);
         let mut front = Vec::new();
         let mut back = Vec::new();
 

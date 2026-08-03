@@ -314,11 +314,11 @@ pub struct TruncateStringsStage;
 
 fn truncate_strings_recursive(value: &mut serde_json::Value, max_length: usize) {
     match value {
-        serde_json::Value::String(s) => {
-            if s.chars().count() > max_length {
-                let truncated: String = s.chars().take(max_length).collect();
-                *s = format!("{truncated}...");
-            }
+        serde_json::Value::String(s)
+            if s.chars().count() > max_length =>
+        {
+            let truncated: String = s.chars().take(max_length).collect();
+            *s = format!("{truncated}...");
         }
         serde_json::Value::Object(map) => {
             for v in map.values_mut() {
@@ -374,6 +374,7 @@ impl CompressionStage for TruncateStringsStage {
 /// Config options:
 ///   - `max_items` (u32, default 5)
 ///   - `summary_template` (string, default "... and {remaining} more items")
+///
 /// Non-JSON content passes through unchanged.
 pub struct CollapseArraysStage;
 
@@ -780,12 +781,16 @@ impl CompressionStage for GitDiffFoldStage {
             if is_changed[i] {
                 keep[i] = true;
                 // Keep max_ctx lines before
-                for j in i.saturating_sub(max_ctx)..i {
-                    keep[j] = true;
+                for keep_item in keep.iter_mut().take(i).skip(i.saturating_sub(max_ctx)) {
+                    *keep_item = true;
                 }
                 // Keep max_ctx lines after
-                for j in (i + 1)..n.min(i + 1 + max_ctx) {
-                    keep[j] = true;
+                for keep_item in keep
+                    .iter_mut()
+                    .take(n.min(i + 1 + max_ctx))
+                    .skip(i + 1)
+                {
+                    *keep_item = true;
                 }
             }
         }

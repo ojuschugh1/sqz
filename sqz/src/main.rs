@@ -1588,7 +1588,6 @@ mod colors {
     pub const YELLOW: &str = "\x1b[33m";
     pub const MAGENTA: &str = "\x1b[35m";
     pub const BLUE: &str = "\x1b[34m";
-    pub const WHITE: &str = "\x1b[97m";
 
     /// Returns true if color output is appropriate (TTY + no NO_COLOR).
     pub fn enabled() -> bool {
@@ -1718,8 +1717,8 @@ fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: boo
 
     // Stats table
     println!("  {:<22} {}", colors::dim("Compressions"), colors::bold(&format!("{}", cs.total_compressions)));
-    println!("  {:<22} {}", colors::dim("Tokens in"), format!("{}", cs.total_tokens_in));
-    println!("  {:<22} {}", colors::dim("Tokens out"), format!("{}", cs.total_tokens_out));
+    println!("  {:<22} {}", colors::dim("Tokens in"), cs.total_tokens_in);
+    println!("  {:<22} {}", colors::dim("Tokens out"), cs.total_tokens_out);
     println!("  {:<22} {}", colors::dim("Tokens saved"), colors::green(&format!("{}", cs.tokens_saved())));
     println!("  {:<22} {}", colors::dim("Avg reduction"), colors::bright_green(&format!("{:.1}%", cs.reduction_pct())));
 
@@ -1735,7 +1734,7 @@ fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: boo
                 println!("  {}", colors::bold(&colors::cyan("💰 Session Cost")));
                 println!("  {}", colors::dim(&"─".repeat(50)));
                 println!("  {:<22} {}", colors::dim("Session"), colors::magenta(sid));
-                println!("  {:<22} {}", colors::dim("Total tokens"), format!("{}", cost.total_tokens));
+                println!("  {:<22} {}", colors::dim("Total tokens"), cost.total_tokens);
                 println!("  {:<22} {}", colors::dim("Total cost"), colors::yellow(&format!("${:.6}", cost.total_usd)));
                 println!("  {:<22} {}", colors::dim("Cache savings"), colors::green(&format!("${:.6}", cost.cache_savings_usd)));
                 println!("  {:<22} {}", colors::dim("Compression savings"), colors::green(&format!("${:.6}", cost.compression_savings_usd)));
@@ -1747,7 +1746,7 @@ fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: boo
             Err(e) => {
                 println!();
                 println!("  {:<22} {}", colors::dim("Session"), sid);
-                println!("  {:<22} {}", colors::dim("Error"), format!("{e}"));
+                println!("  {:<22} {}", colors::dim("Error"), e);
             }
         }
     }
@@ -1761,7 +1760,7 @@ fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: boo
         println!();
         println!("  {}", colors::bold(&colors::cyan("🗄️  Cache")));
         println!("  {}", colors::dim(&"─".repeat(50)));
-        println!("  {:<22} {}", colors::dim("Entries"), format!("{}", cache_entries.len()));
+        println!("  {:<22} {}", colors::dim("Entries"), cache_entries.len());
         println!("  {:<22} {}", colors::dim("Size"), format_bytes(cache_size));
     }
 
@@ -1804,7 +1803,7 @@ fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: boo
                 let cmd_colored = colors::magenta(&cmd_display);
                 // Pad to 20 visible chars (accounting for ANSI codes)
                 let visible_len = cmd_display.len();
-                let pad_needed = if visible_len < 20 { 20 - visible_len } else { 0 };
+                let pad_needed = 20_usize.saturating_sub(visible_len);
                 let padded_cmd = format!("{}{}", cmd_colored, " ".repeat(pad_needed));
 
                 println!(
@@ -1891,7 +1890,7 @@ fn cmd_gain(days: u32, project: Option<String>) {
 
         println!(
             "  {} │{}{}│ {} saved",
-            colors::dim(&g.date[5..].to_string()),
+            colors::dim(&g.date[5..]),
             colored_bar,
             pad,
             saved_str,
@@ -2112,7 +2111,7 @@ fn cmd_compact() {
             content: format!("[cached content, {} bytes]", size),
             last_accessed_turn: current_turn.saturating_sub(cache_entries.len() as u64 - i as u64),
             access_count: 1,
-            tokens: (*size as u32 + 3) / 4,
+            tokens: (*size as u32).div_ceil(4),
             pinned: false,
         })
         .collect();
@@ -2247,7 +2246,7 @@ fn cmd_vizit(refresh_secs: u64, db_path: Option<std::path::PathBuf>, no_color: b
     }
 
     // Validate refresh_secs range
-    if refresh_secs < 1 || refresh_secs > 60 {
+    if !(1..=60).contains(&refresh_secs) {
         eprintln!("[sqz vizit] --refresh must be between 1 and 60, got {refresh_secs}");
         std::process::exit(1);
     }
@@ -2413,10 +2412,9 @@ fn install_completions(hook: &ShellHook) {
         std::fs::write(&dest, content)
     };
 
-    match write_result {
-        Ok(()) => println!("[sqz] completions installed to {}", dest.display()),
-        Err(_) => {} // silently skip — completions are optional
-    }
+    if let Ok(()) = write_result {
+        println!("[sqz] completions installed to {}", dest.display());
+    } // Err: silently skip — completions are optional
 }
 
 const DEFAULT_PRESET_TOML: &str = r#"[meta]

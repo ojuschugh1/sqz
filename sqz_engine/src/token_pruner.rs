@@ -1,12 +1,12 @@
-/// Self-Information Token Pruning (inspired by CompactPrompt, arxiv 2510.18043).
-///
-/// Uses n-gram frequency as a lightweight proxy for token predictability.
-/// Tokens with high predictability (low self-information) are prunable
-/// without affecting LLM comprehension — grounded in Shannon's source
-/// coding theorem: only the "surprise" bits need to be transmitted.
-///
-/// This module uses a built-in trigram frequency table derived from common
-/// code/prose patterns rather than shipping a large external asset.
+//! Self-Information Token Pruning (inspired by CompactPrompt, arxiv 2510.18043).
+//!
+//! Uses n-gram frequency as a lightweight proxy for token predictability.
+//! Tokens with high predictability (low self-information) are prunable
+//! without affecting LLM comprehension — grounded in Shannon's source
+//! coding theorem: only the "surprise" bits need to be transmitted.
+//!
+//! This module uses a built-in trigram frequency table derived from common
+//! code/prose patterns rather than shipping a large external asset.
 
 use std::collections::HashMap;
 
@@ -267,7 +267,7 @@ impl TokenPruner {
 
         // Rank words by frequency (descending)
         let mut ranked: Vec<(String, usize)> = freq_map.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         // Compute expected Zipf frequency for each rank
         // f_expected(r) = C / r, where C = total_words / H_n (harmonic number)

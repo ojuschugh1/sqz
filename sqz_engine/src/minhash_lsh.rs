@@ -129,10 +129,10 @@ impl MinHashLsh {
         let mut min_hashes = vec![u64::MAX; NUM_HASHES];
 
         for shingle in &shingles {
-            for i in 0..NUM_HASHES {
+            for (i, min_hash) in min_hashes.iter_mut().enumerate() {
                 let h = Self::hash_with_seed(shingle, i as u64);
-                if h < min_hashes[i] {
-                    min_hashes[i] = h;
+                if h < *min_hash {
+                    *min_hash = h;
                 }
             }
         }

@@ -22,7 +22,7 @@ fn main() {
                             // Default SSE port; may be overridden by --port.
                             transport = McpTransport::Sse { port: 3000 };
                         }
-                        "stdio" | _ => {
+                        _ => {
                             transport = McpTransport::Stdio;
                         }
                     }

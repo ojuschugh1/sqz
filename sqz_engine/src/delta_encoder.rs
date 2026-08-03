@@ -1,13 +1,13 @@
-/// Delta Encoding for Near-Duplicate Content.
-///
-/// When a file changes by a few lines, the SHA-256 dedup cache misses and
-/// the entire file is re-compressed. Delta encoding computes a line-level
-/// diff between the cached version and the new version, sending only the
-/// changed lines prefixed with a cache reference.
-///
-/// The similarity check uses a rolling hash fingerprint over fixed-size
-/// blocks to quickly determine if two pieces of content are "near-duplicate"
-/// (similarity > threshold) before computing the full diff.
+//! Delta Encoding for Near-Duplicate Content.
+//!
+//! When a file changes by a few lines, the SHA-256 dedup cache misses and
+//! the entire file is re-compressed. Delta encoding computes a line-level
+//! diff between the cached version and the new version, sending only the
+//! changed lines prefixed with a cache reference.
+//!
+//! The similarity check uses a rolling hash fingerprint over fixed-size
+//! blocks to quickly determine if two pieces of content are "near-duplicate"
+//! (similarity > threshold) before computing the full diff.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};

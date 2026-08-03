@@ -1,13 +1,13 @@
-/// Dictionary-based JSON Compression.
-///
-/// Exploits cross-document redundancy by maintaining a dictionary of common
-/// JSON field names, value patterns, and structural elements. Each new JSON
-/// document is compressed relative to this shared dictionary, achieving
-/// better ratios than compressing in isolation.
-///
-/// This is a pure-Rust implementation that avoids adding the zstd crate
-/// (which would add ~200KB to the binary). Instead, it uses a dictionary
-/// substitution approach optimized for JSON payloads.
+//! Dictionary-based JSON Compression.
+//!
+//! Exploits cross-document redundancy by maintaining a dictionary of common
+//! JSON field names, value patterns, and structural elements. Each new JSON
+//! document is compressed relative to this shared dictionary, achieving
+//! better ratios than compressing in isolation.
+//!
+//! This is a pure-Rust implementation that avoids adding the zstd crate
+//! (which would add ~200KB to the binary). Instead, it uses a dictionary
+//! substitution approach optimized for JSON payloads.
 
 use std::collections::HashMap;
 
@@ -154,7 +154,7 @@ impl DictCompressor {
 
         // Sort entries by pattern length (longest first) to avoid partial matches
         let mut sorted_entries: Vec<&DictEntry> = self.entries.values().collect();
-        sorted_entries.sort_by(|a, b| b.pattern.len().cmp(&a.pattern.len()));
+        sorted_entries.sort_by_key(|b| std::cmp::Reverse(b.pattern.len()));
 
         for entry in &sorted_entries {
             // Only substitute in JSON key positions: "field_name":
@@ -246,8 +246,7 @@ fn build_builtin_dictionary() -> Vec<DictEntry> {
 
     common_fields
         .iter()
-        .enumerate()
-        .map(|(_, &(pattern, code))| DictEntry {
+        .map(|&(pattern, code)| DictEntry {
             pattern: pattern.to_string(),
             code: code.to_string(),
             frequency: 100, // built-in entries have high base frequency

@@ -1,12 +1,12 @@
-/// N-gram Abbreviation for Recurrent Patterns (inspired by CompactPrompt).
-///
-/// Identifies frequently recurring multi-word phrases across a session and
-/// replaces occurrences 2+ with short abbreviations, injecting a legend at
-/// the top. This is dictionary-based compression at the phrase level.
-///
-/// For a phrase of length L tokens appearing K times, savings are:
-///   (K-1) × L - (legend_cost + K × abbrev_cost)
-/// Profitable when K > (legend_cost + abbrev_cost) / (L - abbrev_cost).
+//! N-gram Abbreviation for Recurrent Patterns (inspired by CompactPrompt).
+//!
+//! Identifies frequently recurring multi-word phrases across a session and
+//! replaces occurrences 2+ with short abbreviations, injecting a legend at
+//! the top. This is dictionary-based compression at the phrase level.
+//!
+//! For a phrase of length L tokens appearing K times, savings are:
+//!   (K-1) × L - (legend_cost + K × abbrev_cost)
+//! Profitable when K > (legend_cost + abbrev_cost) / (L - abbrev_cost).
 
 use std::collections::HashMap;
 

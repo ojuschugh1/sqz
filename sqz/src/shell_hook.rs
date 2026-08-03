@@ -1,7 +1,7 @@
-/// Shell hook installation for Bash, Zsh, Fish, Nushell, and PowerShell.
-///
-/// Each variant knows how to detect its RC file and append the sqz hook
-/// function that pipes command output through `sqz compress`.
+//! Shell hook installation for Bash, Zsh, Fish, Nushell, and PowerShell.
+//!
+//! Each variant knows how to detect its RC file and append the sqz hook
+//! function that pipes command output through `sqz compress`.
 
 use std::path::{Path, PathBuf};
 

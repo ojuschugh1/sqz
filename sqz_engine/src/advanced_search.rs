@@ -114,10 +114,7 @@ fn extract_snippet(content: &str, query_terms: &[&str], window: usize) -> String
         }
     }
 
-    let pos = match best_pos {
-        Some(p) => p,
-        None => 0,
-    };
+    let pos = best_pos.unwrap_or_default();
 
     let start = pos.saturating_sub(window);
     let end = (pos + window).min(content.len());
@@ -136,11 +133,11 @@ fn extract_snippet(content: &str, query_terms: &[&str], window: usize) -> String
 
     let mut snippet = String::new();
     if start > 0 {
-        snippet.push_str("…");
+        snippet.push('…');
     }
     snippet.push_str(&content[start..end]);
     if end < content.len() {
-        snippet.push_str("…");
+        snippet.push('…');
     }
     snippet
 }
@@ -328,10 +325,11 @@ impl AdvancedSearch {
             let mut best: Option<(usize, String)> = None;
             for word in &vocab {
                 let dist = levenshtein(&lower, word);
-                if dist > 0 && dist <= 2 {
-                    if best.as_ref().map_or(true, |(d, _)| dist < *d) {
-                        best = Some((dist, word.clone()));
-                    }
+                if dist > 0
+                    && dist <= 2
+                    && best.as_ref().is_none_or(|(d, _)| dist < *d)
+                {
+                    best = Some((dist, word.clone()));
                 }
             }
             if let Some((_dist, correction)) = best {
@@ -378,7 +376,7 @@ impl AdvancedSearch {
 
     /// Proximity reranking: boost results where query terms appear close
     /// together in the document content.
-    fn proximity_rerank(&self, results: &mut Vec<SearchResult>, query_terms: &[&str]) {
+    fn proximity_rerank(&self, results: &mut [SearchResult], query_terms: &[&str]) {
         for r in results.iter_mut() {
             let content = match self.get_content(&r.id) {
                 Ok(c) => c,

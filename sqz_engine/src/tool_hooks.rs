@@ -1,27 +1,27 @@
-/// PreToolUse hook integration for AI coding tools.
-///
-/// Provides transparent command interception: when an AI tool (Claude Code,
-/// Cursor, Copilot, etc.) executes a bash command, the hook rewrites it to
-/// pipe output through sqz for compression. The AI tool never knows it
-/// happened — it just sees smaller output.
-///
-/// Supported hook formats (tools that support command rewriting via hooks):
-/// - Claude Code: .claude/settings.local.json (nested PreToolUse, matcher: "Bash")
-/// - Gemini CLI: .gemini/settings.json (nested BeforeTool, matcher: "run_shell_command")
-/// - OpenCode: ~/.config/opencode/plugins/sqz.ts (TypeScript plugin, tool.execute.before)
-///
-/// Tools that do NOT support command rewriting via hooks (use prompt-level
-/// guidance via rules files instead):
-/// - Codex: only supports deny in PreToolUse; updatedInput is parsed but ignored
-/// - Windsurf: no documented hook API; uses .windsurfrules prompt-level guidance
-/// - Cline: PreToolUse cannot rewrite commands; uses .clinerules prompt-level guidance
-/// - Cursor: beforeShellExecution hook can allow/deny/ask only; the response
-///   has no documented field for rewriting the command. Uses .cursor/rules/sqz.mdc
-///   prompt-level guidance instead. The `sqz hook cursor` subcommand remains
-///   available and well-formed for users who configure hooks manually, but
-///   Cursor's documented hook schema (per GitButler deep-dive and Cupcake
-///   reference docs) confirms the response is `{permission, continue,
-///   userMessage, agentMessage}` only — no `updated_input`.
+//! PreToolUse hook integration for AI coding tools.
+//!
+//! Provides transparent command interception: when an AI tool (Claude Code,
+//! Cursor, Copilot, etc.) executes a bash command, the hook rewrites it to
+//! pipe output through sqz for compression. The AI tool never knows it
+//! happened — it just sees smaller output.
+//!
+//! Supported hook formats (tools that support command rewriting via hooks):
+//! - Claude Code: .claude/settings.local.json (nested PreToolUse, matcher: "Bash")
+//! - Gemini CLI: .gemini/settings.json (nested BeforeTool, matcher: "run_shell_command")
+//! - OpenCode: ~/.config/opencode/plugins/sqz.ts (TypeScript plugin, tool.execute.before)
+//!
+//! Tools that do NOT support command rewriting via hooks (use prompt-level
+//! guidance via rules files instead):
+//! - Codex: only supports deny in PreToolUse; updatedInput is parsed but ignored
+//! - Windsurf: no documented hook API; uses .windsurfrules prompt-level guidance
+//! - Cline: PreToolUse cannot rewrite commands; uses .clinerules prompt-level guidance
+//! - Cursor: beforeShellExecution hook can allow/deny/ask only; the response
+//!   has no documented field for rewriting the command. Uses .cursor/rules/sqz.mdc
+//!   prompt-level guidance instead. The `sqz hook cursor` subcommand remains
+//!   available and well-formed for users who configure hooks manually, but
+//!   Cursor's documented hook schema (per GitButler deep-dive and Cupcake
+//!   reference docs) confirms the response is `{permission, continue,
+//!   userMessage, agentMessage}` only — no `updated_input`.
 
 use std::path::{Path, PathBuf};
 
@@ -607,18 +607,17 @@ not on PATH, run commands normally.
         ToolHookConfig {
             tool_name: "OpenCode".to_string(),
             config_path: PathBuf::from("opencode.json"),
-            config_content: format!(
-                r#"{{
+            config_content: r#"{
   "$schema": "https://opencode.ai/config.json",
-  "mcp": {{
-    "sqz": {{
+  "mcp": {
+    "sqz": {
       "type": "local",
       "command": ["sqz-mcp", "--transport", "stdio"]
-    }}
-  }},
+    }
+  },
   "plugin": ["sqz"]
-}}"#
-            ),
+}"#
+            .to_string(),
             scope: HookScope::Project,
         },
         // Codex (openai/codex) — no stable per-tool-call hook, only a
@@ -704,10 +703,11 @@ pub enum InstallScope {
 /// helper normalises user input (lowercase, hyphens/underscores/spaces
 /// collapsed, known aliases) so `Opencode`, `open-code`, `opencode`,
 /// `OPENCODE` all refer to the same tool.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ToolFilter {
     /// Install hook configs for every supported tool. The historical
     /// default of `sqz init`.
+    #[default]
     All,
     /// Install hook configs only for the named tools. Unknown names are
     /// surfaced to the caller as errors by the canonicalisation layer
@@ -718,12 +718,6 @@ pub enum ToolFilter {
     /// one integration skipped (e.g. a project shared with collaborators
     /// who don't want a `.windsurfrules` file in the repo).
     Skip(Vec<String>),
-}
-
-impl Default for ToolFilter {
-    fn default() -> Self {
-        ToolFilter::All
-    }
 }
 
 impl ToolFilter {
@@ -961,10 +955,7 @@ pub fn install_tool_hooks_scoped_filtered(
         // belong to Claude Code conceptually — if you're installing the
         // hook, you want the guidance and MCP wiring too.
         if config.tool_name == "Claude Code" && scope == InstallScope::Global {
-            let hook_installed = match install_claude_global(sqz_path) {
-                Ok(v) => v,
-                Err(_) => false,
-            };
+            let hook_installed = install_claude_global(sqz_path).unwrap_or_default();
             let md_changed = crate::claude_md_integration::install_claude_md_guidance(
                 project_dir, sqz_path,
             )

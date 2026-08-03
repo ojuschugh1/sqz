@@ -1,18 +1,18 @@
-/// Schema-Aware JSON Projection — strips JSON to only the fields
-/// relevant to the current context.
-///
-/// Unlike `strip_nulls` (removes null values) or `keep_fields` (requires
-/// an explicit field list), projection automatically identifies and removes
-/// low-value fields based on content patterns:
-///
-/// - Internal/debug fields: `_id`, `__v`, `debug_*`, `internal_*`, `trace_*`
-/// - Metadata bloat: `created_by`, `updated_by`, `etag`, `_links`, `_embedded`
-/// - Redundant timestamps: keeps `created_at`, drops `modified_at` if same day
-/// - Empty collections: `[]`, `{}`
-/// - Verbose nested objects below a depth threshold
-///
-/// The projection is conservative — it only removes fields that are
-/// demonstrably low-value for LLM comprehension.
+//! Schema-Aware JSON Projection — strips JSON to only the fields
+//! relevant to the current context.
+//!
+//! Unlike `strip_nulls` (removes null values) or `keep_fields` (requires
+//! an explicit field list), projection automatically identifies and removes
+//! low-value fields based on content patterns:
+//!
+//! - Internal/debug fields: `_id`, `__v`, `debug_*`, `internal_*`, `trace_*`
+//! - Metadata bloat: `created_by`, `updated_by`, `etag`, `_links`, `_embedded`
+//! - Redundant timestamps: keeps `created_at`, drops `modified_at` if same day
+//! - Empty collections: `[]`, `{}`
+//! - Verbose nested objects below a depth threshold
+//!
+//! The projection is conservative — it only removes fields that are
+//! demonstrably low-value for LLM comprehension.
 
 use crate::error::Result;
 

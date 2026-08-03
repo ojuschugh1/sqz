@@ -334,7 +334,7 @@ impl SessionStore {
                LIMIT 1"#,
         ).map_err(SqzError::SessionStore)?;
 
-        let rows = stmt.query_map([], |row| {
+        let mut rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -344,7 +344,7 @@ impl SessionStore {
             ))
         }).map_err(SqzError::SessionStore)?;
 
-        for row in rows {
+        if let Some(row) = rows.next() {
             let (id, project_dir, compressed_summary, created_at, updated_at) =
                 row.map_err(SqzError::SessionStore)?;
             return Ok(Some(row_to_summary(id, project_dir, compressed_summary, created_at, updated_at)?));

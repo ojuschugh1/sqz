@@ -1,11 +1,11 @@
-/// Run-Length Encoding (RLE) for structured repetition patterns.
-///
-/// Generalizes the condense stage to catch repeated patterns within lines
-/// and repeated structured blocks, not just consecutive identical lines.
-///
-/// RLE is provably optimal for data with runs of identical symbols
-/// (Shannon 1948). This implementation works at the token/phrase level
-/// rather than the byte level, making it effective for CLI output patterns.
+//! Run-Length Encoding (RLE) for structured repetition patterns.
+//!
+//! Generalizes the condense stage to catch repeated patterns within lines
+//! and repeated structured blocks, not just consecutive identical lines.
+//!
+//! RLE is provably optimal for data with runs of identical symbols
+//! (Shannon 1948). This implementation works at the token/phrase level
+//! rather than the byte level, making it effective for CLI output patterns.
 
 use crate::error::Result;
 
@@ -51,7 +51,7 @@ pub fn rle_compress(text: &str, min_run_length: usize) -> Result<RleResult> {
             // same text can be recovered from "{text} [×N]".
             output.push(format!("{} [×{}]", lines[i], run_len));
             runs_collapsed += 1;
-            let line_tokens = (lines[i].len() as u32 + 3) / 4;
+            let line_tokens = (lines[i].len() as u32).div_ceil(4);
             tokens_saved += line_tokens * (run_len as u32 - 1);
             i += run_len;
         } else {
@@ -115,7 +115,7 @@ pub fn sliding_window_dedup(text: &str, min_match_words: usize) -> Result<Slidin
                 // This exact line appeared before — replace with back-reference
                 output.push(format!("[→L{}]", first_line + 1));
                 dedup_count += 1;
-                tokens_saved += (phrase.len() as u32 + 3) / 4;
+                tokens_saved += (phrase.len() as u32).div_ceil(4);
                 continue;
             }
         }

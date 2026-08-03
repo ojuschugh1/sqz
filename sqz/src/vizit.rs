@@ -14,7 +14,6 @@ use rusqlite::{Connection, OpenFlags};
 
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
-const GREEN: &str = "\x1b[32m";
 const BRIGHT_GREEN: &str = "\x1b[92m";
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
@@ -105,8 +104,7 @@ pub fn is_color_enabled() -> bool {
         return false;
     }
     // SAFETY: isatty is a simple syscall with no side effects.
-    let is_tty = unsafe { libc::isatty(libc::STDOUT_FILENO) } != 0;
-    is_tty
+    (unsafe { libc::isatty(libc::STDOUT_FILENO) } != 0)
 }
 
 // ── Terminal size ─────────────────────────────────────────────────────────────
@@ -210,7 +208,7 @@ static RESIZE_REQUESTED: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 fn register_sigwinch_handler() {
     unsafe {
-        libc::signal(libc::SIGWINCH, sigwinch_handler as libc::sighandler_t);
+        libc::signal(libc::SIGWINCH, sigwinch_handler as *const () as libc::sighandler_t);
     }
 }
 
@@ -243,18 +241,12 @@ pub struct AgentRow {
     pub agent_name: String,
     /// Display path: last 2 components of `project_dir` joined with `"/"`.
     pub project_display: String,
-    /// Full `project_dir` value used for DB queries.
-    pub project_dir: String,
     /// Tokens saved today (since midnight UTC).
     pub tokens_saved_today: u64,
-    /// All-time tokens saved for this project.
-    pub tokens_saved_total: u64,
     /// Overall compression ratio for this project (`0.0`–`1.0`, lower = better).
     pub compression_ratio: f64,
     /// Timestamp of the most recent compression event for this project.
     pub last_activity: DateTime<Utc>,
-    /// Number of compressions recorded today for this project.
-    pub compressions_today: u32,
 }
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
@@ -274,8 +266,6 @@ pub struct VizitSnapshot {
     pub captured_at: DateTime<Utc>,
     /// Terminal width (columns) at capture time.
     pub term_cols: u16,
-    /// Terminal height (rows) at capture time.
-    pub term_rows: u16,
 }
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -329,7 +319,7 @@ impl VizitDb {
             .execute_batch("COMMIT")
             .map_err(|e| format!("[sqz vizit] failed to commit transaction: {e}"))?;
 
-        let (term_cols, term_rows) = terminal_size();
+        let (term_cols, _term_rows) = terminal_size();
 
         Ok(VizitSnapshot {
             rows,
@@ -338,7 +328,6 @@ impl VizitDb {
             overall_ratio,
             captured_at: Utc::now(),
             term_cols,
-            term_rows,
         })
     }
 
@@ -347,14 +336,10 @@ impl VizitDb {
         const SQL: &str = r#"
             SELECT
                 project_dir,
-                COUNT(*)                                                    AS compressions_total,
-                COALESCE(SUM(tokens_original) - SUM(tokens_compressed), 0) AS tokens_saved_total,
                 CAST(
                     COALESCE(SUM(tokens_compressed), 0) AS REAL
                 ) / NULLIF(COALESCE(SUM(tokens_original), 0), 0)           AS compression_ratio,
                 MAX(created_at)                                             AS last_activity,
-                SUM(CASE WHEN date(created_at) = date('now') THEN 1 ELSE 0 END)
-                                                                            AS compressions_today,
                 COALESCE(SUM(CASE WHEN date(created_at) = date('now')
                     THEN tokens_original - tokens_compressed ELSE 0 END), 0)
                                                                             AS tokens_saved_today
@@ -373,52 +358,28 @@ impl VizitDb {
         let rows = stmt
             .query_map([], |row| {
                 let project_dir: String = row.get(0)?;
-                let compressions_total: u32 = row.get::<_, i64>(1)? as u32;
-                let tokens_saved_total: u64 = row.get::<_, i64>(2)? as u64;
-                let compression_ratio: f64 = row.get::<_, Option<f64>>(3)?.unwrap_or(0.0);
-                let last_activity_str: String = row.get(4)?;
-                let compressions_today: u32 = row.get::<_, i64>(5)? as u32;
-                let tokens_saved_today: u64 = row.get::<_, i64>(6)? as u64;
+                let compression_ratio: f64 = row.get::<_, Option<f64>>(1)?.unwrap_or(0.0);
+                let last_activity_str: String = row.get(2)?;
+                let tokens_saved_today: u64 = row.get::<_, i64>(3)? as u64;
 
-                Ok((
-                    project_dir,
-                    compressions_total,
-                    tokens_saved_total,
-                    compression_ratio,
-                    last_activity_str,
-                    compressions_today,
-                    tokens_saved_today,
-                ))
+                Ok((project_dir, compression_ratio, last_activity_str, tokens_saved_today))
             })
             .map_err(|e| format!("[sqz vizit] failed to query agent rows: {e}"))?;
 
         let mut agent_rows = Vec::new();
         for row in rows {
-            let (
-                project_dir,
-                compressions_today,
-                tokens_saved_total,
-                compression_ratio,
-                last_activity_str,
-                compressions_today_count,
-                tokens_saved_today,
-            ) = row.map_err(|e| format!("[sqz vizit] failed to read agent row: {e}"))?;
+            let (project_dir, compression_ratio, last_activity_str, tokens_saved_today) =
+                row.map_err(|e| format!("[sqz vizit] failed to read agent row: {e}"))?;
 
             let last_activity = parse_datetime(&last_activity_str);
 
             agent_rows.push(AgentRow {
                 agent_name: detect_agent_name(&project_dir),
                 project_display: format_project_display(&project_dir),
-                project_dir,
                 tokens_saved_today,
-                tokens_saved_total,
                 compression_ratio,
                 last_activity,
-                compressions_today: compressions_today_count,
             });
-
-            // suppress unused variable warning for compressions_today (total)
-            let _ = compressions_today;
         }
 
         Ok(agent_rows)
@@ -1277,23 +1238,17 @@ mod tests {
         fn arb_agent_row()(
             agent_name in "[a-zA-Z0-9-]{1,16}",
             project_display in "[a-zA-Z0-9/-]{1,20}",
-            project_dir in "[a-zA-Z0-9/]{1,40}",
             tokens_saved_today in 0u64..=10_000_000u64,
-            tokens_saved_total in 0u64..=100_000_000u64,
             compression_ratio in 0.0f64..=1.0f64,
             secs_ago in 0i64..=86400i64,
-            compressions_today in 0u32..=1000u32,
         ) -> AgentRow {
             let last_activity = Utc::now() - chrono::Duration::seconds(secs_ago);
             AgentRow {
                 agent_name,
                 project_display,
-                project_dir,
                 tokens_saved_today,
-                tokens_saved_total,
                 compression_ratio,
                 last_activity,
-                compressions_today,
             }
         }
     }
@@ -1428,7 +1383,6 @@ mod tests {
                 overall_ratio,
                 captured_at: Utc::now(),
                 term_cols: 120,
-                term_rows: 40,
             }
         }
     }

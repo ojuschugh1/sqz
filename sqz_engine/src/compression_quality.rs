@@ -1,15 +1,15 @@
-/// Compression Quality Measurement using information-theoretic bounds.
-///
-/// Shannon's source coding theorem: the minimum average bits per symbol
-/// is the entropy H(X). Arithmetic coding achieves within 1 bit of this
-/// bound. By comparing sqz's actual output size to the theoretical minimum,
-/// we get a scientifically grounded "compression efficiency" metric.
-///
-/// efficiency = H(input) / actual_bits_per_symbol
-///
-/// A value of 1.0 means sqz achieved the theoretical optimum.
-/// Values < 1.0 indicate room for improvement.
-/// Values > 1.0 are impossible (would violate Shannon's theorem).
+//! Compression Quality Measurement using information-theoretic bounds.
+//!
+//! Shannon's source coding theorem: the minimum average bits per symbol
+//! is the entropy H(X). Arithmetic coding achieves within 1 bit of this
+//! bound. By comparing sqz's actual output size to the theoretical minimum,
+//! we get a scientifically grounded "compression efficiency" metric.
+//!
+//! efficiency = H(input) / actual_bits_per_symbol
+//!
+//! A value of 1.0 means sqz achieved the theoretical optimum.
+//! Values < 1.0 indicate room for improvement.
+//! Values > 1.0 are impossible (would violate Shannon's theorem).
 
 /// Compression quality metrics for a single compression operation.
 #[derive(Debug, Clone)]
@@ -74,9 +74,7 @@ pub fn measure_quality(
     // Clamp: theoretical min can't exceed original
     let theoretical_min_tokens = theoretical_min_tokens.min(tokens_original);
 
-    let efficiency = if tokens_compressed == 0 {
-        1.0
-    } else if theoretical_min_tokens == 0 {
+    let efficiency = if tokens_compressed == 0 || theoretical_min_tokens == 0 {
         1.0
     } else {
         (theoretical_min_tokens as f64 / tokens_compressed as f64).min(1.0)

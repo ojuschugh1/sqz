@@ -1,9 +1,9 @@
-/// Per-command output formatters — hand-tuned compression for the top 10
-/// most common CLI commands in AI coding sessions.
-///
-/// Each formatter takes raw command output and returns a compact version
-/// that preserves all actionable information while stripping noise.
-/// Formatters are stateless and infallible (return original on any issue).
+//! Per-command output formatters — hand-tuned compression for the top 10
+//! most common CLI commands in AI coding sessions.
+//!
+//! Each formatter takes raw command output and returns a compact version
+//! that preserves all actionable information while stripping noise.
+//! Formatters are stateless and infallible (return original on any issue).
 
 /// Route command output to the appropriate formatter.
 /// Returns `None` if no specialized formatter matches (use generic pipeline).
@@ -149,13 +149,13 @@ fn format_git_diff(output: &str) -> String {
     let mut context_count = 0;
 
     for line in output.lines() {
-        if line.starts_with("diff --git") || line.starts_with("---") || line.starts_with("+++") {
-            result.push(line.to_string());
-            context_count = 0;
-        } else if line.starts_with("@@") {
-            result.push(line.to_string());
-            context_count = 0;
-        } else if line.starts_with('+') || line.starts_with('-') {
+        if line.starts_with("diff --git")
+            || line.starts_with("---")
+            || line.starts_with("+++")
+            || line.starts_with("@@")
+            || line.starts_with('+')
+            || line.starts_with('-')
+        {
             result.push(line.to_string());
             context_count = 0;
         } else {
@@ -315,10 +315,10 @@ fn format_test_failures(output: &str) -> String {
             }
         }
         // "test ... FAILED" individual lines
-        if line.contains("... FAILED") || line.contains("FAILED") && line.starts_with("test ") {
-            if !failures.iter().any(|f| f.contains(line)) {
-                failures.push(line.to_string());
-            }
+        if (line.contains("... FAILED") || line.contains("FAILED") && line.starts_with("test "))
+            && !failures.iter().any(|f| f.contains(line))
+        {
+            failures.push(line.to_string());
         }
     }
     if !failure_buf.is_empty() {

@@ -507,8 +507,8 @@ impl FileReader {
         for &line_idx in &changed_lines {
             let start = line_idx.saturating_sub(ctx);
             let end = (line_idx + ctx + 1).min(new_lines.len());
-            for j in start..end {
-                included[j] = true;
+            for included_item in included.iter_mut().take(end).skip(start) {
+                *included_item = true;
             }
         }
 
@@ -706,9 +706,9 @@ impl FileReader {
 
         let mut output = Vec::new();
         output.push(format!("// lines {}-{} (of {})", start + 1, end, total));
-        for i in ctx_start..ctx_end {
+        for (i, line) in lines.iter().enumerate().take(ctx_end).skip(ctx_start) {
             let marker = if i >= start && i < end { ">" } else { " " };
-            output.push(format!("{marker} {:4} | {}", i + 1, lines[i]));
+            output.push(format!("{marker} {:4} | {}", i + 1, line));
         }
 
         let content = output.join("\n");
