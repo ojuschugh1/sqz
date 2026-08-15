@@ -448,3 +448,15 @@ cargo build --release
    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ojuschugh1/sqz&type=Date" width="600" />
  </picture>
 </a>
+
+## Contributors
+
+Thanks to everyone who has contributed code, fixes, and ideas to sqz:
+
+<a href="https://github.com/ojuschugh1/sqz/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=ojuschugh1/sqz" alt="sqz contributors" />
+</a>
+
+And to everyone who filed the detailed bug reports behind our fixes — precise repros make this project better with every release. Want to join them? PRs are reviewed fast: see the [open issues](https://github.com/ojuschugh1/sqz/issues) to get started.
+
+<sub>Contributor grid made with [contrib.rocks](https://contrib.rocks).</sub>
