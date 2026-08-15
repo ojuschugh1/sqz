@@ -261,6 +261,23 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         shell_escape(command),
     );
 
+    // Claude Code's updatedInput REPLACES the whole input object (per
+    // code.claude.com/docs/en/hooks), so unchanged fields like
+    // run_in_background, timeout, or description must be carried over or
+    // they are silently dropped. Start from the original tool_input and
+    // swap only the command. Gemini merges server-side, so it keeps the
+    // minimal {command} form.
+    let mut updated_input = parsed
+        .get("tool_input")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    updated_input.insert(
+        "command".to_string(),
+        serde_json::Value::String(rewritten.clone()),
+    );
+    let updated_input = serde_json::Value::Object(updated_input);
+
     // Build platform-specific output.
     //
     // Each AI tool expects a different JSON response format. Using the wrong
@@ -292,9 +309,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
                 "permissionDecisionReason": "sqz: command output will be compressed for token savings",
-                "updatedInput": {
-                    "command": rewritten
-                }
+                "updatedInput": updated_input
             }
         }),
         HookPlatform::Cursor => serde_json::json!({
@@ -320,9 +335,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "allow",
                     "permissionDecisionReason": "sqz: command output will be compressed for token savings",
-                    "updatedInput": {
-                        "command": rewritten
-                    }
+                    "updatedInput": updated_input
                 }
             })
         }
@@ -1669,6 +1682,20 @@ fn is_interactive_command(cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_claude_updated_input_preserves_sibling_fields() {
+        // Claude Code's updatedInput replaces the whole input object, so
+        // run_in_background / timeout / description must survive the rewrite.
+        let input = r#"{"tool_name":"Bash","tool_input":{"command":"cargo test","run_in_background":true,"timeout":120000,"description":"Run tests"}}"#;
+        let result = process_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let updated = &parsed["hookSpecificOutput"]["updatedInput"];
+        assert!(updated["command"].as_str().unwrap().contains("sqz compress"));
+        assert_eq!(updated["run_in_background"], true);
+        assert_eq!(updated["timeout"], 120000);
+        assert_eq!(updated["description"], "Run tests");
+    }
 
     #[test]
     fn test_process_hook_rewrites_bash_command() {
