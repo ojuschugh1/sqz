@@ -5,6 +5,64 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-08-15
+
+### Added
+- **`sqz pin`** — pinned cache entries that bypass the 30-minute TTL
+  freshness check, so `§ref:HASH§` tokens to stable knowledge-base content
+  (project docs, system prompts, a wiki) stay dedup-able forever and across
+  agents sharing the session store. Subcommands: `add` (file/stdin/literal),
+  `mark`/`remove` (by hash or short prefix), `list`, `clear`.
+- **Zed editor support** (#38) — `sqz init` now configures the Zed Agent:
+  guidance goes into the instruction file Zed actually reads (`.rules` when
+  present, else `AGENTS.md`) and `sqz-mcp` is registered under
+  `context_servers` in Zed's settings.json, exposing the compress/expand
+  tools and the cached file-read tools — especially useful with local
+  models. JSONC settings files are never rewritten; sqz prints the snippet
+  for manual paste instead. `zed` joins `--only`/`--skip`.
+- **`--no-abbrev` / `SQZ_NO_ABBREV=1`** (#29, thanks @zacwolfe) — opt out of
+  n-gram phrase abbreviation. The abbreviator keeps only the first
+  occurrence of a repeated phrase; when a SHA/path/URL lives inside it,
+  later references became `«A1»` and copy-paste broke. Mirrors the
+  `--no-cache`/`SQZ_NO_DEDUP` convention; documented in all generated
+  agent rules.
+
+### Fixed
+- **Panic on multi-byte UTF-8 input** (#34) — byte-offset slicing landed
+  mid-character on densely non-ASCII text (Cyrillic, CJK, Arabic, emoji)
+  and killed sqz mid-pipeline, losing the command's output entirely. All
+  ten affected sites now go through a boundary-safe `text_boundary` module;
+  property tests cover arbitrary strings and cut points.
+- **MCP file-read tools are now lossless** (#32, thanks @pm7y) —
+  `sqz_read_file`/`sqz_grep`/`sqz_list_dir` previously ran the full
+  pipeline including entropy truncation, silently dropping roughly half of
+  any non-JSON file over 500 bytes. File reads are now byte-faithful apart
+  from ANSI stripping; token savings on that path come from the dedup
+  `§ref` cache on repeat reads. The general `compress` tool stays
+  aggressive.
+- **`git status` parser on non-English locales** (#30, thanks
+  @nandanadileep) — the short-format fallback matched any line with `M` in
+  the first two characters, corrupting localized headers ("Modifiche…" →
+  `M ifiche…`) and dropping every file. Porcelain lines are now parsed
+  strictly, long-format section headers are matched against git's own
+  translations (it/de/fr/es/pt_PT, verified against git's po files), and
+  anything unrecognized passes through raw instead of emitting a wrong
+  summary.
+- **Dashboard SSE connection leak** (#36) — interrupted `/events` clients
+  left sockets in CLOSE_WAIT and eventually made the dashboard unresponsive
+  until restart. The server now handles each connection on its own thread
+  and detects client disconnects the moment the FIN arrives.
+- **Stale Claude Code hook configs now heal on re-init** (#26) — the
+  PowerShell fix in 1.3.0 only helped fresh installs; `sqz init` skipped
+  existing project settings, so pre-fix Windows installs kept the
+  `Bash`-only matcher forever. Re-running `sqz init` now upserts sqz's
+  entries in place (matcher upgraded, binary path refreshed) while
+  preserving the user's own settings.
+- **CI test flakiness** (thanks @pm7y, @nandanadileep) — cli_proxy tests
+  no longer race on the shared `~/.sqz/sessions.db` under parallel
+  `cargo test`, and ref-freshness timing tests are deterministic instead
+  of wall-clock-sensitive.
+
 ## [1.3.0] — 2026-06-21
 
 ### Added
