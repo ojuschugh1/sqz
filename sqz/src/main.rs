@@ -651,6 +651,31 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
         }
 
         let full_path = project_dir.join(&config.config_path);
+
+        // Claude Code at project scope merges into an existing
+        // settings.local.json rather than skipping it, so the plan must
+        // probe whether the merge would change anything — otherwise a
+        // stale install (e.g. the pre-PowerShell "Bash"-only matcher
+        // from before the issue #26 fix) reports "everything is already
+        // set up" and never heals.
+        if config.tool_name == "Claude Code" && full_path.exists() {
+            match sqz_engine::claude_project_settings_needs_update(&full_path, &sqz_path) {
+                Ok(true) => {
+                    plan.push((
+                        full_path.display().to_string(),
+                        format!(
+                            "{} hook config (update stale sqz entries)",
+                            config.tool_name
+                        ),
+                        false,
+                    ));
+                }
+                Ok(false) => { /* current — nothing to announce */ }
+                Err(_) => { /* unparseable — installer will leave it alone */ }
+            }
+            continue;
+        }
+
         if !full_path.exists() {
             plan.push((
                 full_path.display().to_string(),

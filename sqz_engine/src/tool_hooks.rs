@@ -1000,11 +1000,17 @@ pub fn install_tool_hooks_scoped_filtered(
 
         // Don't overwrite existing hook configs
         if full_path.exists() {
-            // Project-scope Claude Code file already exists — but the
-            // companion CLAUDE.md guidance and MCP registration might
-            // not. Install those idempotently (they're no-ops if
-            // already present).
+            // Project-scope Claude Code file already exists. Don't skip:
+            // merge our entries in, replacing any stale sqz entries. This
+            // is what upgrades a pre-issue-#26 `"matcher": "Bash"` install
+            // to `"Bash|PowerShell"` when the user re-runs `sqz init` —
+            // with the old skip-if-exists behavior, Windows installs kept
+            // the stale matcher forever and PowerShell tool calls never
+            // reached the hook. User keys (permissions, env, other hooks)
+            // are preserved; only sqz's own entries are replaced.
             if config.tool_name == "Claude Code" {
+                let hook_changed =
+                    merge_sqz_hooks_into_settings(&full_path, sqz_path).unwrap_or(false);
                 let md_changed =
                     crate::claude_md_integration::install_claude_md_guidance(
                         project_dir, sqz_path,
@@ -1013,7 +1019,7 @@ pub fn install_tool_hooks_scoped_filtered(
                 let mcp_changed =
                     crate::claude_md_integration::install_claude_mcp_config()
                         .unwrap_or(false);
-                if (md_changed || mcp_changed)
+                if (hook_changed || md_changed || mcp_changed)
                     && !installed.iter().any(|n| n == "Claude Code")
                 {
                     installed.push("Claude Code".to_string());
@@ -1114,7 +1120,96 @@ fn install_claude_global_at(sqz_path: &str, home_override: Option<&Path>) -> Res
             )
         })?,
     };
+    merge_sqz_hooks_into_settings(&path, sqz_path)
+}
 
+/// Dry-run probe for `sqz init`'s plan phase: would merging sqz's hook
+/// entries change the Claude Code settings file at `path`?
+///
+/// Returns `Ok(true)` when the file is missing, or exists with stale or
+/// absent sqz entries (e.g. the pre-issue-#26 `"Bash"`-only matcher, or
+/// an outdated binary path). Returns `Ok(false)` when our entries are
+/// already present identically. Errors on unparseable files — same as
+/// the real merge, which refuses to touch those.
+///
+/// Without this probe the CLI's plan phase treated any existing file as
+/// "nothing to do" and exited before the installer ran, so the healing
+/// merge below was unreachable in practice.
+pub fn claude_project_settings_needs_update(path: &Path, sqz_path: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(true);
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        crate::error::SqzError::Other(format!("read {}: {e}", path.display()))
+    })?;
+    let mut root: serde_json::Value = if content.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(&content).map_err(|e| {
+            crate::error::SqzError::Other(format!("parse {}: {e}", path.display()))
+        })?
+    };
+    let Some(root_obj) = root.as_object_mut() else {
+        return Err(crate::error::SqzError::Other(format!(
+            "{} is not a JSON object",
+            path.display()
+        )));
+    };
+
+    let before = serde_json::to_string(&root_obj).unwrap_or_default();
+    let hooks = root_obj
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(hooks_obj) = hooks.as_object_mut() else {
+        return Ok(true);
+    };
+    for (event, entry, sentinel) in sqz_hook_entries(sqz_path) {
+        upsert_sqz_hook_entry(hooks_obj, event, entry, sentinel);
+    }
+    let after = serde_json::to_string(&root_obj).unwrap_or_default();
+    Ok(before != after)
+}
+
+/// The three hook entries sqz installs into Claude Code settings files,
+/// as `(event_name, entry_json, sentinel)` tuples. Single source of
+/// truth for both the real merge and the dry-run probe.
+fn sqz_hook_entries(sqz_path: &str) -> [(&'static str, serde_json::Value, &'static str); 3] {
+    [
+        (
+            "PreToolUse",
+            serde_json::json!({
+                "matcher": "Bash|PowerShell",
+                "hooks": [{ "type": "command", "command": format!("{sqz_path} hook claude") }]
+            }),
+            "hook claude",
+        ),
+        (
+            "PreCompact",
+            serde_json::json!({
+                "hooks": [{ "type": "command", "command": format!("{sqz_path} hook precompact") }]
+            }),
+            "hook precompact",
+        ),
+        (
+            "SessionStart",
+            serde_json::json!({
+                "matcher": "compact",
+                "hooks": [{ "type": "command", "command": format!("{sqz_path} resume") }]
+            }),
+            "resume",
+        ),
+    ]
+}
+
+/// Merge sqz's three hook entries into a Claude Code settings JSON at
+/// `path` — either `~/.claude/settings.json` (global scope) or a
+/// project's `.claude/settings.local.json`. Shared by both install
+/// scopes so re-running `sqz init` upgrades stale sqz entries (an old
+/// `"Bash"`-only matcher, an outdated binary path) at project scope
+/// too, instead of skipping any file that already exists. That skip is
+/// how Windows installs from before the issue #26 fix stayed broken:
+/// their project settings kept the pre-PowerShell matcher forever.
+fn merge_sqz_hooks_into_settings(path: &Path, sqz_path: &str) -> Result<bool> {
     // Parse the existing file, or start from an empty object.
     let mut root: serde_json::Value = if path.exists() {
         let content = std::fs::read_to_string(&path).map_err(|e| {
@@ -1146,19 +1241,6 @@ fn install_claude_global_at(sqz_path: &str, home_override: Option<&Path>) -> Res
         ))
     })?;
 
-    // Build our three hook entries as fresh JSON values.
-    let pre_tool_use = serde_json::json!({
-        "matcher": "Bash|PowerShell",
-        "hooks": [{ "type": "command", "command": format!("{sqz_path} hook claude") }]
-    });
-    let pre_compact = serde_json::json!({
-        "hooks": [{ "type": "command", "command": format!("{sqz_path} hook precompact") }]
-    });
-    let session_start = serde_json::json!({
-        "matcher": "compact",
-        "hooks": [{ "type": "command", "command": format!("{sqz_path} resume") }]
-    });
-
     // Snapshot the "before" state for change detection.
     let before = serde_json::to_string(&root_obj).unwrap_or_default();
 
@@ -1173,9 +1255,9 @@ fn install_claude_global_at(sqz_path: &str, home_override: Option<&Path>) -> Res
         ))
     })?;
 
-    upsert_sqz_hook_entry(hooks_obj, "PreToolUse", pre_tool_use, "hook claude");
-    upsert_sqz_hook_entry(hooks_obj, "PreCompact", pre_compact, "hook precompact");
-    upsert_sqz_hook_entry(hooks_obj, "SessionStart", session_start, "resume");
+    for (event, entry, sentinel) in sqz_hook_entries(sqz_path) {
+        upsert_sqz_hook_entry(hooks_obj, event, entry, sentinel);
+    }
 
     let after = serde_json::to_string(&root_obj).unwrap_or_default();
     if before == after && path.exists() {
@@ -1958,13 +2040,109 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // First install
         install_tool_hooks(dir.path(), "sqz");
-        // Write a custom file to one of the paths
+        // Write a custom file to one of the paths. It is deliberately NOT
+        // valid JSON: the Claude Code merge path refuses to touch files it
+        // can't parse, and every other tool's config is skip-if-exists.
         let custom_path = dir.path().join(".claude/settings.local.json");
         std::fs::write(&custom_path, "custom content").unwrap();
-        // Second install should not overwrite
+        // Second install must leave the unparseable file alone.
         install_tool_hooks(dir.path(), "sqz");
         let content = std::fs::read_to_string(&custom_path).unwrap();
         assert_eq!(content, "custom content", "should not overwrite existing config");
+    }
+
+    /// Regression for the issue #26 leftover: a project-scope settings file
+    /// from a pre-PowerShell install (matcher "Bash", old binary path) must
+    /// be upgraded in place when `sqz init` runs again — while every key
+    /// the user added themselves survives untouched. The old behavior was
+    /// skip-if-exists, which left Windows installs on the stale matcher
+    /// forever.
+    #[test]
+    fn test_reinit_upgrades_stale_project_scope_matcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join(".claude").join("settings.local.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+
+        // A pre-issue-#26 install: Bash-only matcher, stale binary path,
+        // plus keys the user added by hand.
+        let stale = serde_json::json!({
+            "permissions": { "allow": ["Bash(ls:*)"] },
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": "/old/path/sqz hook claude" }]
+                    },
+                    {
+                        "matcher": "Edit",
+                        "hooks": [{ "type": "command", "command": "my-linter --check" }]
+                    }
+                ]
+            }
+        });
+        std::fs::write(&settings_path, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
+
+        install_tool_hooks(dir.path(), "/new/path/sqz");
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // sqz's entry: matcher upgraded, binary path refreshed, no duplicate.
+        let pre = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+        let sqz_entries: Vec<_> = pre
+            .iter()
+            .filter(|e| {
+                e["hooks"][0]["command"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("hook claude"))
+            })
+            .collect();
+        assert_eq!(sqz_entries.len(), 1, "exactly one sqz PreToolUse entry: {content}");
+        assert_eq!(
+            sqz_entries[0]["matcher"].as_str().unwrap(),
+            "Bash|PowerShell",
+            "stale Bash-only matcher must be upgraded"
+        );
+        assert!(
+            sqz_entries[0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("/new/path/sqz"),
+            "binary path must be refreshed"
+        );
+
+        // The user's own entries survive.
+        assert!(
+            pre.iter().any(|e| e["matcher"] == "Edit"),
+            "user's non-sqz PreToolUse entry must be preserved"
+        );
+        assert_eq!(
+            parsed["permissions"]["allow"][0].as_str().unwrap(),
+            "Bash(ls:*)",
+            "user's permissions must be preserved"
+        );
+
+        // The other two sqz hooks got added too (full heal, not partial).
+        assert!(parsed["hooks"]["PreCompact"].is_array());
+        assert!(parsed["hooks"]["SessionStart"].is_array());
+    }
+
+    /// Re-running init on an already-current project file is a no-op.
+    #[test]
+    fn test_reinit_is_idempotent_at_project_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        install_tool_hooks(dir.path(), "/usr/bin/sqz");
+        let settings_path = dir.path().join(".claude").join("settings.local.json");
+        let first = std::fs::read_to_string(&settings_path).unwrap();
+
+        install_tool_hooks(dir.path(), "/usr/bin/sqz");
+        let second = std::fs::read_to_string(&settings_path).unwrap();
+
+        let a: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let b: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(a, b, "second init must not change project settings");
+        // No duplicated sqz entries.
+        assert_eq!(b["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
     }
 }
 
