@@ -5,6 +5,57 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-08-16
+
+### Added
+- **Log-template compaction** — consecutive log lines identical except for
+  timestamps, durations, or percentages collapse to the first line plus an
+  explicit `[×N similar lines; only timestamps/durations vary]` marker.
+  Deliberately identifier-safe: lines containing hex ids, UUIDs, filenames,
+  or plain integers never collapse.
+- **MinHash fuzzy dedup** — the LSH index now feeds delta encoding, so a
+  near-duplicate of any content stored earlier in the session resolves as
+  a compact delta, not just duplicates within the 10 most recent entries.
+  Closes the whitepaper's sub-file dedup future-work item at whole-content
+  granularity.
+- **Identifier factsheet** — when entropy truncation drops segments, exact
+  identifiers from the dropped region (SHAs, UUIDs, ticket codes, versions)
+  ride along in a capped `[ids in omitted segments: ...]` line.
+- **GitHub Copilot CLI support** — 10th integration. `sqz init` installs a
+  `preToolUse` hook at `~/.copilot/hooks/sqz.json` (honors `COPILOT_HOME`);
+  Copilot's documented `modifiedArgs` makes it a full command-rewrite host
+  like Claude Code and Gemini. `copilot` joins `--only`/`--skip`.
+- **BPE benchmark verification** — the formatter benchmark fixtures are
+  re-measured with the real `cl100k_base` tokenizer on every test run;
+  current divergence from the chars/4 unit is 1.7 points, and CI fails if
+  it ever reaches 10.
+
+### Changed
+- **Net-win gate** — generic-path compressions that save fewer than 16
+  tokens now pass the original through verbatim instead of trading markers
+  for negligible savings. Repeat content still resolves to dedup refs.
+- **Benign-aware truncation** — output with no error markers gets 2x the
+  entropy-truncation threshold, so clean builds and passing test runs stay
+  verbatim.
+- **Kiro integration rebuilt** — the old hook file used a schema Kiro never
+  recognized (and Kiro hooks can't rewrite tool input regardless). `sqz
+  init` now installs an always-on steering file plus MCP registration in
+  `.kiro/settings/mcp.json`, and cleans up the legacy hook file.
+- **Windsurf** — rules now install to the documented `.windsurf/rules/`
+  directory; a legacy sqz-authored `.windsurfrules` is migrated
+  automatically.
+- **Cline** — `.clinerules`-as-directory projects now get
+  `.clinerules/sqz.md` instead of being silently skipped.
+
+### Fixed
+- **Claude Code `updatedInput` field loss** — the hook rewrite replaced the
+  whole tool input with just the command, silently dropping
+  `run_in_background`, `timeout`, and `description`. Sibling fields are now
+  carried over. (Windsurf hook path fixed identically.)
+- **Uninstall over-deletion** — `sqz uninstall` no longer deletes a
+  user-authored `.clinerules` file it never wrote, and no longer deletes
+  `AGENTS.md` through Zed's placeholder path.
+
 ## [1.4.0] — 2026-08-15
 
 ### Added
