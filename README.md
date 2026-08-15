@@ -349,6 +349,8 @@ $ sqz stats --breakdown
   git status                4         56          8      86%
   ──────────────────────────────────────────────────────────────────────
 ```
+<img width="3456" height="1918" alt="image" src="https://github.com/user-attachments/assets/d308bc60-81f3-4935-9728-b30534e5b5e5" />
+
 
 **Per-project filtering:**
 
