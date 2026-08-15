@@ -5,8 +5,8 @@
 //! every 5 seconds.
 
 use std::fmt::Write as FmtWrite;
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -418,103 +418,177 @@ impl DashboardServer {
 
     /// Start listening.  This blocks the calling thread.
     ///
+    /// Each accepted connection is served on its own thread, so a
+    /// long-lived `/events` SSE stream (or a half-open client) can never
+    /// block the accept loop. See [`Self::run_on`] for the routing table
+    /// and the history of issue #36.
+    pub fn run(&self) -> crate::error::Result<()> {
+        let addr = format!("127.0.0.1:{}", self.config.port);
+        let listener = TcpListener::bind(&addr)?;
+        eprintln!("[sqz] dashboard listening on http://{addr}");
+        self.run_on(listener)
+    }
+
+    /// Serve on an already-bound listener. This blocks the calling thread.
+    ///
+    /// Split out from [`Self::run`] so tests can bind port 0 and learn the
+    /// real port via `listener.local_addr()` before starting the server.
+    ///
     /// For each incoming connection the server reads the HTTP request line,
     /// then either:
     /// - `GET /`        → responds with the full HTML page
     /// - `GET /events`  → responds with an SSE stream (pushes metrics JSON
     ///                     every 5 seconds until the client disconnects)
     /// - anything else  → 404
-    pub fn run(&self) -> crate::error::Result<()> {
-        let addr = format!("127.0.0.1:{}", self.config.port);
-        let listener = TcpListener::bind(&addr)?;
-        eprintln!("[sqz] dashboard listening on http://{addr}");
-
-        let html = DashboardHtml::render(self.config.port);
+    ///
+    /// Concurrency model: one thread per connection. The previous design
+    /// served every connection inline on the accept thread, which meant a
+    /// single connected SSE client parked the whole server in its push
+    /// loop, and an interrupted SSE client parked it for up to two 5-second
+    /// ticks (the first write after a peer FIN succeeds into the send
+    /// buffer; only the next one observes the RST — and `TcpStream::flush`
+    /// is a no-op, so it detects nothing). Meanwhile every other connection
+    /// sat unaccepted in the kernel backlog showing CLOSE_WAIT, and the
+    /// dashboard page's EventSource auto-reconnect turned the pile-up into
+    /// a permanent hang (issue #36).
+    pub fn run_on(&self, listener: TcpListener) -> crate::error::Result<()> {
+        let html = Arc::new(DashboardHtml::render(self.config.port));
 
         for stream in listener.incoming() {
-            let mut stream = match stream {
+            let stream = match stream {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-
-            // Read the request line.
-            let mut reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| {
-                // Fallback: just use the stream directly (shouldn't happen).
-                stream.try_clone().expect("clone failed")
-            }));
-            let mut request_line = String::new();
-            if reader.read_line(&mut request_line).is_err() {
-                continue;
-            }
-
-            // Drain remaining headers (we don't need them).
-            let mut header = String::new();
-            loop {
-                header.clear();
-                match reader.read_line(&mut header) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        if header.trim().is_empty() {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if request_line.starts_with("GET /events") {
-                // SSE endpoint
-                let response_header = "HTTP/1.1 200 OK\r\n\
-                    Content-Type: text/event-stream\r\n\
-                    Cache-Control: no-cache\r\n\
-                    Connection: keep-alive\r\n\
-                    Access-Control-Allow-Origin: *\r\n\r\n";
-                if stream.write_all(response_header.as_bytes()).is_err() {
-                    continue;
-                }
-
-                // Push metrics every 5 seconds until the client disconnects.
-                loop {
-                    let json = {
-                        let m = self.metrics.lock().unwrap();
-                        m.to_json()
-                    };
-                    let event = format!("data: {json}\n\n");
-                    if stream.write_all(event.as_bytes()).is_err() {
-                        break;
-                    }
-                    if stream.flush().is_err() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(5));
-                }
-            } else if request_line.starts_with("GET / ")
-                || request_line.starts_with("GET / HTTP")
-            {
-                // Serve HTML
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\n\
-                     Content-Type: text/html; charset=utf-8\r\n\
-                     Content-Length: {}\r\n\
-                     Connection: close\r\n\r\n{}",
-                    html.len(),
-                    html,
-                );
-                let _ = stream.write_all(response.as_bytes());
-            } else {
-                let body = "404 Not Found";
-                let response = format!(
-                    "HTTP/1.1 404 Not Found\r\n\
-                     Content-Type: text/plain\r\n\
-                     Content-Length: {}\r\n\
-                     Connection: close\r\n\r\n{}",
-                    body.len(),
-                    body,
-                );
-                let _ = stream.write_all(response.as_bytes());
-            }
+            let metrics = Arc::clone(&self.metrics);
+            let html = Arc::clone(&html);
+            std::thread::spawn(move || {
+                handle_connection(stream, metrics, &html);
+            });
         }
 
         Ok(())
+    }
+}
+
+/// How long an SSE connection may sit idle before we probe it. Also the
+/// upper bound on how long a half-open client can hold its handler thread
+/// between events.
+const SSE_TICK: Duration = Duration::from_secs(5);
+
+/// Read timeout for the initial request line + headers. A client that
+/// connects and never sends a request gets its thread reclaimed after this
+/// long, instead of holding it forever.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Serve a single accepted connection. Runs on its own thread.
+fn handle_connection(mut stream: TcpStream, metrics: Arc<Mutex<DashboardMetrics>>, html: &str) {
+    // Bound the initial read so half-open clients can't pin the thread.
+    let _ = stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(REQUEST_READ_TIMEOUT));
+
+    // Read the request line.
+    let Ok(clone) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = BufReader::new(clone);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
+
+    // Drain remaining headers (we don't need them).
+    let mut header = String::new();
+    loop {
+        header.clear();
+        match reader.read_line(&mut header) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                if header.trim().is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+
+    if request_line.starts_with("GET /events") {
+        serve_sse(stream, metrics);
+    } else if request_line.starts_with("GET / ") || request_line.starts_with("GET / HTTP") {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/html; charset=utf-8\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            html.len(),
+            html,
+        );
+        let _ = stream.write_all(response.as_bytes());
+    } else {
+        let body = "404 Not Found";
+        let response = format!(
+            "HTTP/1.1 404 Not Found\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        );
+        let _ = stream.write_all(response.as_bytes());
+    }
+    // `stream` (and the BufReader clone) drop here, fully closing the
+    // socket — no CLOSE_WAIT lingering past the handler's lifetime.
+}
+
+/// Push metrics to an SSE client until it disconnects.
+///
+/// Disconnect detection: instead of sleeping blindly between events, we
+/// spend the inter-event gap in a read with a short timeout. SSE clients
+/// never send data after the request, so the read returns:
+/// - `Ok(0)` → orderly EOF: the client closed (curl --max-time, tab
+///   closed). Tear down immediately — this is what turns the peer's FIN
+///   into an instant close instead of a CLOSE_WAIT that lingers until the
+///   next write cycle.
+/// - `Err(WouldBlock/TimedOut)` → still connected, keep going.
+/// - `Err(other)` / RST → tear down.
+fn serve_sse(mut stream: TcpStream, metrics: Arc<Mutex<DashboardMetrics>>) {
+    let response_header = "HTTP/1.1 200 OK\r\n\
+        Content-Type: text/event-stream\r\n\
+        Cache-Control: no-cache\r\n\
+        Connection: keep-alive\r\n\
+        Access-Control-Allow-Origin: *\r\n\r\n";
+    if stream.write_all(response_header.as_bytes()).is_err() {
+        return;
+    }
+
+    let mut buf = [0u8; 512];
+    loop {
+        let json = {
+            let m = metrics.lock().unwrap();
+            m.to_json()
+        };
+        let event = format!("data: {json}\n\n");
+        if stream.write_all(event.as_bytes()).is_err() {
+            return;
+        }
+
+        // Wait out the tick watching the socket for FIN/RST.
+        if stream.set_read_timeout(Some(SSE_TICK)).is_err() {
+            return;
+        }
+        match stream.read(&mut buf) {
+            // EOF — the client closed its end.
+            Ok(0) => return,
+            // Clients aren't supposed to send anything on an SSE stream;
+            // tolerate stray bytes and keep streaming.
+            Ok(_) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // Tick elapsed with the connection still healthy.
+            }
+            // RST or anything else — connection is gone.
+            Err(_) => return,
+        }
     }
 }
 
@@ -688,6 +762,144 @@ mod tests {
         // Original Arc should reflect the change
         let m = metrics.lock().unwrap();
         assert_eq!(m.tokens_saved, 42);
+    }
+
+    // -----------------------------------------------------------------------
+    // Live server: issue #36 regression (SSE must not wedge the server)
+    // -----------------------------------------------------------------------
+
+    use std::io::Read as IoRead;
+    use std::net::{SocketAddr, TcpStream as ClientStream};
+
+    /// Bind port 0, start the server on a background thread, return the
+    /// real address. The thread is detached — `run_on` never returns — and
+    /// the OS reclaims the socket when the test process exits.
+    fn start_test_server() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test port");
+        let addr = listener.local_addr().expect("local addr");
+        let metrics = Arc::new(Mutex::new(DashboardMetrics::default()));
+        let server = DashboardServer::new(DashboardConfig { port: addr.port() }, metrics);
+        std::thread::spawn(move || {
+            let _ = server.run_on(listener);
+        });
+        addr
+    }
+
+    /// GET `path` and return the raw response bytes read within `timeout`.
+    fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> std::io::Result<Vec<u8>> {
+        let mut s = ClientStream::connect_timeout(&addr.into(), timeout)?;
+        s.set_read_timeout(Some(timeout))?;
+        s.set_write_timeout(Some(timeout))?;
+        write!(s, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match s.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    // For SSE the stream never ends; stop after the first data frame.
+                    if buf.windows(6).any(|w| w == b"data: ") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        Ok(buf)
+    }
+
+    /// Regression for issue #36: interrupted `/events` clients (connect,
+    /// read a little, hard-close — curl --max-time behaviour) must not
+    /// stop the server from answering subsequent requests.
+    #[test]
+    fn interrupted_sse_clients_do_not_block_server() {
+        let addr = start_test_server();
+
+        // Six aborted SSE connections, like the reproduction script.
+        for _ in 0..6 {
+            let mut s = ClientStream::connect_timeout(&addr.into(), Duration::from_secs(2))
+                .expect("connect sse");
+            let _ = write!(s, "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            let mut first = [0u8; 256];
+            s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+            let _ = s.read(&mut first);
+            drop(s); // hard close while the server-side stream is open
+        }
+
+        // The old single-threaded server would sit in the dead SSE loops
+        // for many seconds; the fixed server must answer immediately.
+        let start = std::time::Instant::now();
+        let resp = http_get(addr, "/", Duration::from_secs(3)).expect("GET / after aborted SSE");
+        let text = String::from_utf8_lossy(&resp);
+        assert!(
+            text.starts_with("HTTP/1.1 200 OK"),
+            "expected 200 after aborted SSE clients, got: {}",
+            &text[..text.len().min(80)]
+        );
+        assert!(text.contains("<!DOCTYPE html>"), "should serve the dashboard page");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "server must stay responsive, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// A healthy, connected SSE client must not block other requests
+    /// either (this is what made the hang permanent: the dashboard tab's
+    /// EventSource reconnects and then holds the connection).
+    #[test]
+    fn live_sse_client_does_not_block_other_requests() {
+        let addr = start_test_server();
+
+        // Open an SSE stream and keep it open.
+        let mut sse = ClientStream::connect_timeout(&addr.into(), Duration::from_secs(2))
+            .expect("connect sse");
+        write!(sse, "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        sse.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut first = [0u8; 512];
+        let n = sse.read(&mut first).expect("first SSE frame");
+        assert!(
+            String::from_utf8_lossy(&first[..n]).contains("text/event-stream"),
+            "SSE header expected"
+        );
+
+        // While it's connected, `/` must still answer.
+        let resp = http_get(addr, "/", Duration::from_secs(3)).expect("GET / during live SSE");
+        assert!(
+            String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 200 OK"),
+            "GET / must succeed while an SSE client is connected"
+        );
+
+        // And a second SSE client can connect concurrently.
+        let resp2 = http_get(addr, "/events", Duration::from_secs(3)).expect("second SSE client");
+        let text2 = String::from_utf8_lossy(&resp2);
+        assert!(text2.contains("data: "), "second SSE client should receive a frame");
+        drop(sse);
+    }
+
+    /// Unknown paths still 404 under the threaded handler.
+    #[test]
+    fn unknown_path_returns_404() {
+        let addr = start_test_server();
+        let resp = http_get(addr, "/nope", Duration::from_secs(3)).expect("GET /nope");
+        assert!(String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 404"));
+    }
+
+    /// A client that connects and never sends a request must not hold its
+    /// handler thread past the request read timeout — and must never affect
+    /// other requests at all.
+    #[test]
+    fn half_open_client_does_not_block_server() {
+        let addr = start_test_server();
+
+        // Connect and send nothing.
+        let idle = ClientStream::connect_timeout(&addr.into(), Duration::from_secs(2))
+            .expect("idle connect");
+
+        let resp = http_get(addr, "/", Duration::from_secs(3)).expect("GET / with idle peer");
+        assert!(String::from_utf8_lossy(&resp).starts_with("HTTP/1.1 200 OK"));
+        drop(idle);
     }
 
     // -----------------------------------------------------------------------
