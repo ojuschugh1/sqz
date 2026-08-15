@@ -129,12 +129,30 @@ fn test_compress_reports_token_reduction() {
 
 #[test]
 fn test_compress_stdin() {
-    let o = run_with_stdin(&["compress"], r#"{"key":"value","null_field":null}"#);
+    // Large enough that compression clears the net-win gate — tiny inputs
+    // now pass through verbatim by design.
+    let items: Vec<String> = (0..12)
+        .map(|i| format!(r#"{{"id":{i},"name":"item_{i}","status":"active","null_field":null}}"#))
+        .collect();
+    let json = format!("[{}]", items.join(","));
+    let o = run_with_stdin(&["compress"], &json);
     assert!(o.status.success());
     let out = stdout(&o);
     // Output is either TOON-encoded (fresh) or a dedup reference (cached from prior run)
     assert!(out.contains("TOON:") || out.starts_with("§ref:"),
         "stdin JSON should be TOON-encoded or dedup ref: {out}");
+}
+
+#[test]
+fn test_compress_stdin_tiny_input_passes_through() {
+    // Sub-threshold savings: the net-win gate returns the input verbatim.
+    let o = run_with_stdin(&["compress", "--no-cache"], r#"{"key":"value","null_field":null}"#);
+    assert!(o.status.success());
+    let out = stdout(&o);
+    assert!(
+        out.contains(r#"{"key":"value","null_field":null}"#) || out.starts_with("§ref:"),
+        "tiny stdin input should pass through (or hit dedup): {out}"
+    );
 }
 
 #[test]
