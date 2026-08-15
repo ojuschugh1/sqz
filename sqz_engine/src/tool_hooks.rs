@@ -663,6 +663,26 @@ not on PATH, run commands normally.
             ),
             scope: HookScope::Project,
         },
+        // Zed (issue #38) has no command-rewrite hooks, so the
+        // integration is instructions + MCP registration:
+        //
+        //   1. Project guidance appended to the file Zed's Agent
+        //      actually reads (`.rules` when present — it shadows
+        //      everything — otherwise `AGENTS.md`).
+        //   2. `context_servers.sqz` merged into Zed's settings.json
+        //      (user-level), which exposes the sqz MCP tools to the
+        //      Zed Agent — including local models.
+        //
+        // The config_path/content below are placeholders for the
+        // install plan display; the real install goes through
+        // `crate::zed_integration` so existing files are appended to,
+        // not clobbered, and JSONC settings are never rewritten.
+        ToolHookConfig {
+            tool_name: "Zed".to_string(),
+            config_path: PathBuf::from("AGENTS.md"),
+            config_content: crate::zed_integration::zed_guidance_block(sqz_path_raw),
+            scope: HookScope::Project,
+        },
     ]
 }
 
@@ -711,10 +731,10 @@ pub enum InstallScope {
 /// Which tools `sqz init` should configure.
 ///
 /// By default sqz init writes hook configs for every supported tool
-/// (Claude Code, Cursor, Windsurf, Cline, Gemini CLI, OpenCode, Codex).
-/// Users who only use one agent have asked (issue #11, @shochdoerfer)
-/// for a way to say "just OpenCode, please, leave the rest alone." This
-/// filter is the plumbing for that.
+/// (Claude Code, Cursor, Windsurf, Cline, Gemini CLI, OpenCode, Codex,
+/// Zed). Users who only use one agent have asked (issue #11,
+/// @shochdoerfer) for a way to say "just OpenCode, please, leave the
+/// rest alone." This filter is the plumbing for that.
 ///
 /// Matching is by canonical tool name. The [`canonicalize_tool_name`]
 /// helper normalises user input (lowercase, hyphens/underscores/spaces
@@ -780,6 +800,7 @@ pub const SUPPORTED_TOOL_NAMES: &[&str] = &[
     "Kiro",
     "OpenCode",
     "Codex",
+    "Zed",
 ];
 
 /// Normalise a tool name or alias to its canonical form.
@@ -819,6 +840,7 @@ pub fn canonicalize_tool_name(name: &str) -> String {
         "kiro" | "kirocli" | "kiroide" => "kiro".to_string(),
         "opencode" => "opencode".to_string(),
         "codex" => "codex".to_string(),
+        "zed" | "zededitor" | "zedagent" => "zed".to_string(),
         other => other.to_string(),
     }
 }
@@ -963,6 +985,25 @@ pub fn install_tool_hooks_scoped_filtered(
                 && !installed.iter().any(|n| n == "Codex")
             {
                 installed.push("Codex".to_string());
+            }
+            continue;
+        }
+
+        // Zed (issue #38): guidance into the instruction file Zed
+        // actually reads, plus context_servers.sqz in the user-level
+        // settings.json. Both are surgical; JSONC settings are never
+        // rewritten (the CLI surfaces manual instructions instead).
+        if config.tool_name == "Zed" {
+            let guidance_changed =
+                crate::zed_integration::install_zed_guidance(project_dir, sqz_path)
+                    .unwrap_or(false);
+            let mcp_changed = matches!(
+                crate::zed_integration::install_zed_mcp_config(),
+                Ok(crate::zed_integration::ZedMcpInstall::Created)
+                    | Ok(crate::zed_integration::ZedMcpInstall::Merged)
+            );
+            if (guidance_changed || mcp_changed) && !installed.iter().any(|n| n == "Zed") {
+                installed.push("Zed".to_string());
             }
             continue;
         }

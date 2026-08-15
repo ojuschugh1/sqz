@@ -64,8 +64,8 @@ enum Command {
         /// tools get configured; all others are skipped.
         ///
         /// Accepts: claude, cursor, windsurf, cline, gemini, opencode,
-        /// codex. Aliases like `claude-code`, `gemini-cli`, `roo`
-        /// (= cline) are also recognised.
+        /// codex, zed. Aliases like `claude-code`, `gemini-cli`, `roo`
+        /// (= cline), `zed-editor` are also recognised.
         ///
         /// Example: `sqz init --only opencode`
         ///          `sqz init --only opencode,codex`
@@ -629,6 +629,63 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             continue;
         }
 
+        // Zed (issue #38): guidance file + user-level settings.json
+        // MCP registration. Announce what will actually happen — in
+        // particular, a JSONC settings file will NOT be edited; the
+        // install step prints a copy-paste snippet instead.
+        if config.tool_name == "Zed" {
+            let guidance_target = sqz_engine::zed_guidance_target(&project_dir);
+            let guidance_current = guidance_target.exists()
+                && std::fs::read_to_string(&guidance_target)
+                    .map(|s| s.contains("BEGIN sqz-zed-guidance"))
+                    .unwrap_or(false);
+            if !guidance_current {
+                plan.push((
+                    guidance_target.display().to_string(),
+                    if guidance_target.exists() {
+                        "Zed Agent guidance (append sqz block)".to_string()
+                    } else {
+                        "Zed Agent guidance".to_string()
+                    },
+                    !guidance_target.exists(),
+                ));
+            }
+
+            let zed_settings = sqz_engine::zed_settings_path();
+            if !zed_settings.exists() {
+                plan.push((
+                    zed_settings.display().to_string(),
+                    "Zed MCP registration (create settings.json with context_servers.sqz)"
+                        .to_string(),
+                    true,
+                ));
+            } else {
+                match std::fs::read_to_string(&zed_settings) {
+                    Ok(text) if serde_json::from_str::<serde_json::Value>(&text).is_ok() => {
+                        let has_sqz = serde_json::from_str::<serde_json::Value>(&text)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("context_servers")?.get("sqz").map(|_| ())
+                            })
+                            .is_some();
+                        if !has_sqz {
+                            plan.push((
+                                zed_settings.display().to_string(),
+                                "Zed MCP registration (merge context_servers.sqz)".to_string(),
+                                false,
+                            ));
+                        }
+                    }
+                    _ => {
+                        // JSONC or unreadable — we won't touch it; the
+                        // install step prints manual instructions. No
+                        // plan line since no file will change.
+                    }
+                }
+            }
+            continue;
+        }
+
         // Claude Code at global scope: we merge into ~/.claude/settings.json
         // instead of creating a project-level .claude/settings.local.json.
         // Show the real target in the plan so the user can see we're
@@ -759,6 +816,29 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
         sqz_engine::install_tool_hooks_scoped_filtered(&project_dir, &sqz_path, scope, &filter);
     for tool in &installed_tools {
         println!("[sqz] ✓ {} hook installed", tool);
+    }
+
+    // Zed's settings.json is JSONC more often than not (Zed's template
+    // ships comments), and sqz refuses to rewrite JSONC (issue #6
+    // lesson). When that happened above, hand the user the snippet.
+    if filter.includes("Zed") {
+        let zed_settings = sqz_engine::zed_settings_path();
+        if let Ok(text) = std::fs::read_to_string(&zed_settings) {
+            let is_strict_json = serde_json::from_str::<serde_json::Value>(&text).is_ok();
+            if !is_strict_json && !text.contains("\"sqz\"") {
+                println!();
+                println!(
+                    "[sqz] note: {} contains comments (JSONC), so sqz did not edit it.",
+                    zed_settings.display()
+                );
+                println!("      To finish Zed setup, add this to the file yourself:");
+                println!();
+                println!("{}", sqz_engine::zed_mcp_snippet());
+                println!();
+                println!("      (In Zed: run the 'zed: open settings file' action, paste,");
+                println!("       then 'zed: reload context servers'.)");
+            }
+        }
     }
 
     println!();
@@ -1449,6 +1529,14 @@ fn cmd_uninstall(skip_confirm: bool) {
         if config.tool_name == "Codex" {
             continue;
         }
+        // Zed is surgical too: its placeholder config_path is AGENTS.md
+        // (shared with Codex and the user's own content) and its MCP
+        // entry lives inside the user's Zed settings.json. Deleting
+        // either whole file would destroy unrelated content. Handled
+        // in dedicated cleanup blocks further down.
+        if config.tool_name == "Zed" {
+            continue;
+        }
         let full = project_dir.join(&config.config_path);
         if full.exists() {
             files_to_remove.push((full.display().to_string(), true));
@@ -1490,6 +1578,33 @@ fn cmd_uninstall(skip_confirm: bool) {
     if codex_toml_exists {
         files_to_remove.push((
             format!("{} ([mcp_servers.sqz] only)", codex_toml.display()),
+            true,
+        ));
+    }
+
+    // Zed: strip the sqz guidance block from .rules / AGENTS.md and
+    // remove context_servers.sqz from the user's Zed settings.json.
+    let zed_guidance_present = [".rules", "AGENTS.md"].iter().any(|f| {
+        let p = project_dir.join(f);
+        p.exists()
+            && std::fs::read_to_string(&p)
+                .map(|s| s.contains("BEGIN sqz-zed-guidance"))
+                .unwrap_or(false)
+    });
+    if zed_guidance_present {
+        files_to_remove.push((
+            format!("{} (sqz Zed guidance block only)", project_dir.display()),
+            true,
+        ));
+    }
+    let zed_settings = sqz_engine::zed_settings_path();
+    let zed_settings_has_sqz = zed_settings.exists()
+        && std::fs::read_to_string(&zed_settings)
+            .map(|s| s.contains("\"sqz\""))
+            .unwrap_or(false);
+    if zed_settings_has_sqz {
+        files_to_remove.push((
+            format!("{} (context_servers.sqz only)", zed_settings.display()),
             true,
         ));
     }
@@ -1678,6 +1793,46 @@ fn cmd_uninstall(skip_confirm: bool) {
                     codex_toml.display()
                 );
             }
+        }
+    }
+
+    // Zed: strip the sqz guidance block from .rules / AGENTS.md, then
+    // remove context_servers.sqz from the user's Zed settings.json.
+    // JSONC settings are left alone with a manual note (issue #6 rule).
+    if zed_guidance_present {
+        match sqz_engine::remove_zed_guidance(&project_dir) {
+            Ok(changed) => {
+                for path in changed {
+                    if path.exists() {
+                        println!("[sqz] ✓ removed sqz Zed block from {}", path.display());
+                    } else {
+                        println!("[sqz] ✓ removed {}", path.display());
+                    }
+                }
+            }
+            Err(e) => eprintln!("[sqz] ✗ could not clean up Zed guidance: {e}"),
+        }
+    }
+    if zed_settings_has_sqz {
+        match sqz_engine::remove_zed_mcp_config() {
+            Ok(sqz_engine::ZedMcpRemove::Removed) => {
+                println!(
+                    "[sqz] ✓ removed context_servers.sqz from {}",
+                    zed_settings.display()
+                );
+            }
+            Ok(sqz_engine::ZedMcpRemove::SkippedJsonc) => {
+                println!(
+                    "[sqz] ! {} contains comments (JSONC); remove the \
+                     \"sqz\" entry under \"context_servers\" by hand.",
+                    zed_settings.display()
+                );
+            }
+            Ok(sqz_engine::ZedMcpRemove::NotPresent) => {}
+            Err(e) => eprintln!(
+                "[sqz] ✗ could not clean up {}: {e}",
+                zed_settings.display()
+            ),
         }
     }
 

@@ -111,6 +111,7 @@ pub mod session_store;
 pub mod stages;
 pub mod structural_summary;
 pub mod text_boundary;
+pub mod zed_integration;
 pub mod tee_mode;
 pub mod terse_mode;
 pub mod token_counter;
@@ -163,6 +164,11 @@ pub use claude_md_integration::{
     claude_md_guidance_block, claude_md_path, claude_user_json_path,
     install_claude_md_guidance, install_claude_mcp_config,
     remove_claude_md_guidance, remove_claude_mcp_config,
+};
+pub use zed_integration::{
+    install_zed_guidance, install_zed_mcp_config, remove_zed_guidance,
+    remove_zed_mcp_config, zed_guidance_block, zed_guidance_target,
+    zed_mcp_snippet, zed_settings_path, ZedMcpInstall, ZedMcpRemove,
 };
 pub use token_pruner::{TokenPruner, PrunerConfig, PruneResult};
 pub use tool_selector::{ToolDefinition, ToolSelector};
