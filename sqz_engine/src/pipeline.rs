@@ -189,7 +189,12 @@ impl CompressionPipeline {
 
         // Entropy-weighted truncation for long non-JSON content.
         // LOSSY — skipped on the lossless file-read path (issue #32).
-        if !lossless && !is_json && content.raw.len() > 500 {
+        // Benign-aware threshold: output with no error markers (clean
+        // builds, passing test runs) gets 2x headroom before truncation
+        // kicks in, since dropping detail from a success costs more than
+        // it saves.
+        let entropy_threshold = if looks_benign(&content.raw) { 1000 } else { 500 };
+        if !lossless && !is_json && content.raw.len() > entropy_threshold {
             if let Ok(trunc_result) = self.entropy_truncator.truncate_string(&content.raw) {
                 if trunc_result.segments_dropped > 0 {
                     content.raw = trunc_result.text;
@@ -427,6 +432,17 @@ fn stage_is_lossless(name: &str) -> bool {
     matches!(name, "ansi_strip" | "custom_transforms")
 }
 
+/// True when the output carries no error markers — a clean build, passing
+/// tests, an uneventful log. Benign output earns a higher truncation
+/// threshold.
+fn looks_benign(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    const MARKERS: &[&str] = &[
+        "error", "panic", "traceback", "failed", "failure", "exception", "fatal",
+    ];
+    !MARKERS.iter().any(|m| lower.contains(m))
+}
+
 /// Heuristic: does this text look like prose (documentation, error messages,
 /// README content) rather than code or structured data?
 fn looks_like_prose(text: &str) -> bool {
@@ -554,7 +570,9 @@ mod tests {
         // 10 distinct, blank-line-separated segments with bimodal entropy,
         // well over the 500-byte entropy-truncation threshold.
         let mut segments = Vec::new();
-        for i in 0..10 {
+        // 24 segments so the fixture clears the benign-aware 1000-byte
+        // threshold (this content has no error markers).
+        for i in 0..24 {
             if i % 2 == 0 {
                 segments.push(format!("SEG{i} llllllllllllllllllllllllllllllllllllllll"));
             } else {
@@ -564,7 +582,7 @@ mod tests {
             }
         }
         let input = segments.join("\n\n");
-        assert!(input.len() > 500, "input must exceed truncation threshold");
+        assert!(input.len() > 1000, "input must exceed the benign truncation threshold");
 
         // The default path is lossy — it drops below-median-entropy segments.
         let lossy = pipeline.compress(&input, &ctx(), &preset).unwrap();
@@ -634,6 +652,40 @@ mod tests {
             "lossless must return repeated content verbatim"
         );
         assert!(!result.stages_applied.contains(&"rle".to_owned()));
+    }
+
+    /// Benign-aware threshold: the same sub-1000-byte shape truncates when
+    /// it carries an error marker and stays whole when it doesn't.
+    #[test]
+    fn benign_output_gets_double_truncation_headroom() {
+        let preset = default_preset();
+        let pipeline = CompressionPipeline::new(&preset);
+
+        let mut segments = Vec::new();
+        for i in 0..12 {
+            if i % 2 == 0 {
+                segments.push(format!("SEG{i} llllllllllllllllllllllllllllllllllllllll"));
+            } else {
+                segments.push(format!(
+                    "SEG{i} the quick brown fox jumps over {i} lazy dogs by rivers"
+                ));
+            }
+        }
+        let benign = segments.join("\n\n");
+        assert!(benign.len() > 500 && benign.len() < 1000, "fixture must sit between thresholds: {}", benign.len());
+
+        let result = pipeline.compress(&benign, &ctx(), &preset).unwrap();
+        assert!(
+            !result.stages_applied.contains(&"entropy_truncate".to_owned()),
+            "benign content under 1000 bytes must not be truncated"
+        );
+
+        let with_error = format!("error: something broke\n\n{benign}");
+        let result = pipeline.compress(&with_error, &ctx(), &preset).unwrap();
+        assert!(
+            result.stages_applied.contains(&"entropy_truncate".to_owned()),
+            "error-bearing content over 500 bytes should truncate"
+        );
     }
 
     #[test]

@@ -637,7 +637,8 @@ mod tests {
         // >500 bytes of multi-segment non-JSON "source" that the lossy path
         // entropy-truncates by roughly half.
         let mut segs = Vec::new();
-        for i in 0..10 {
+        // 24 segments: clears the benign-aware 1000-byte threshold.
+        for i in 0..24 {
             if i % 2 == 0 {
                 segs.push(format!("SEG{i} llllllllllllllllllllllllllllllllllllllll"));
             } else {
@@ -647,7 +648,7 @@ mod tests {
             }
         }
         let content = segs.join("\n\n");
-        assert!(content.len() > 500);
+        assert!(content.len() > 1000);
 
         // Lossy path (the general `compress` tool) still truncates.
         let (s1, _d1) = in_memory_store();

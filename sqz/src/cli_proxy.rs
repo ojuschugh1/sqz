@@ -277,7 +277,6 @@ impl CliProxy {
                     let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
                 }
                 self.l1_cache.borrow_mut().insert(fast_hash);
-                self.log_compression(cmd, tokens_original, tokens_compressed);
 
                 // N-gram abbreviation (opt-out, default ON).
                 //
@@ -297,20 +296,37 @@ impl CliProxy {
                 // hook environment. See the regression tests
                 // `abbreviator_opt_out_preserves_repeated_identifiers` and
                 // `abbreviator_default_on_still_abbreviates` below.
-                if !opts.abbreviate {
-                    return self.apply_context_refs(&compressed.data);
-                }
-
-                let mut abbr = self.abbreviator.borrow_mut();
-                abbr.observe(&compressed.data);
-                let abbreviated = match abbr.abbreviate(&compressed.data) {
-                    Ok(result) if result.total_tokens_saved > 0 => {
-                        eprintln!("[sqz] n-gram abbreviation: {} tokens saved", result.total_tokens_saved);
-                        result.text
+                let abbreviated = if opts.abbreviate {
+                    let mut abbr = self.abbreviator.borrow_mut();
+                    abbr.observe(&compressed.data);
+                    match abbr.abbreviate(&compressed.data) {
+                        Ok(result) if result.total_tokens_saved > 0 => {
+                            eprintln!(
+                                "[sqz] n-gram abbreviation: {} tokens saved",
+                                result.total_tokens_saved
+                            );
+                            result.text
+                        }
+                        _ => compressed.data,
                     }
-                    _ => compressed.data,
+                } else {
+                    compressed.data
                 };
 
+                // Net-win gate: the stats header itself costs context tokens
+                // in the hook pipeline, and marker-laden output that saves
+                // only a handful of tokens is a bad trade. Judged on the
+                // final output (post-abbreviation); below the threshold, the
+                // original passes through and no savings are recorded. The
+                // L2 store above still happens, so a repeat of this content
+                // resolves to a dedup ref.
+                const NET_WIN_MIN_TOKENS: u32 = 16;
+                let tokens_final = (abbreviated.len() as u32).div_ceil(4);
+                if tokens_original.saturating_sub(tokens_final) < NET_WIN_MIN_TOKENS {
+                    return self.apply_context_refs(output);
+                }
+
+                self.log_compression(cmd, tokens_original, tokens_final.min(tokens_compressed));
                 self.apply_context_refs(&abbreviated)
             }
             Err(e) => {
@@ -795,6 +811,20 @@ mod tests {
     /// With abbreviation opted out (`SQZ_NO_ABBREV` equivalent), a SHA that
     /// repeats inside an identical phrase must survive on EVERY line — never
     /// collapsed to «A1». This is the fix for the corruption bug.
+    /// Net-win gate: output whose compression saves fewer than the
+    /// threshold tokens passes through verbatim — no markers, no header
+    /// worth of savings eaten by the rewrite.
+    #[test]
+    fn net_win_gate_passes_small_savings_through() {
+        let (proxy, _dir) = isolated_proxy();
+        let tag = unique_sha();
+        // Short unique prose: nothing here compresses meaningfully.
+        let output = format!("one unique diagnostic line mentioning {tag} and nothing else\n");
+        let opts = InterceptOptions { no_cache: true, abbreviate: true };
+        let result = proxy.intercept_output_with_options("build", &output, opts);
+        assert_eq!(result, output, "sub-threshold savings must pass through verbatim");
+    }
+
     #[test]
     fn abbreviator_opt_out_preserves_repeated_identifiers() {
         let (proxy, _dir) = isolated_proxy();
@@ -842,8 +872,11 @@ mod tests {
         // Unique tag keeps this a cache miss; the repeated long phrase is
         // what the abbreviator should fold.
         let tag = unique_sha();
-        let phrase = format!("recurring diagnostic phrase {tag} marker");
-        let output = format!("{phrase} one\n{phrase} two\n{phrase} three\n{phrase} four\n");
+        let phrase = format!("recurring diagnostic phrase with extra words {tag} marker");
+        // Enough repetitions that abbreviation clears the net-win gate.
+        let output: String = (0..12)
+            .map(|i| format!("{phrase} occurrence number {i}\n"))
+            .collect();
 
         // Explicit default — abbreviation enabled.
         let opts = InterceptOptions::default();

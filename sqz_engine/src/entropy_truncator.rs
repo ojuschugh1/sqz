@@ -168,6 +168,20 @@ impl EntropyTruncator {
             text.push_str(&format!(
                 "\n[{segments_dropped} low-information segments omitted]"
             ));
+            // Identifier factsheet: exact identifiers living in the dropped
+            // segments (SHAs, UUIDs, ticket codes, versions) ride along so
+            // lossy truncation can never silently lose a hash the agent
+            // needs to copy-paste. Deterministic and budget-capped.
+            let dropped_text: Vec<&str> = scored
+                .iter()
+                .filter(|s| !s.kept)
+                .map(|s| s.text.as_str())
+                .collect();
+            let kept_joined = kept_texts.join("\n");
+            let ids = extract_identifiers(&dropped_text.join("\n"), &kept_joined);
+            if !ids.is_empty() {
+                text.push_str(&format!("\n[ids in omitted segments: {}]", ids.join(", ")));
+            }
         }
 
         Ok(EntropyTruncResult {
@@ -266,6 +280,61 @@ pub struct EntropyTruncArrayResult {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Compute Shannon entropy of a string in bits.
+/// Extract exact identifiers from `dropped` that do not also appear in
+/// `kept`: hex ids/SHAs (7+ chars containing a digit), UUIDs, ticket codes
+/// (ABC-123), and semantic versions. Capped at 16 entries / 256 chars total
+/// so the factsheet can't become its own bloat. Order follows first
+/// appearance, deduplicated.
+fn extract_identifiers(dropped: &str, kept: &str) -> Vec<String> {
+    const MAX_IDS: usize = 16;
+    const MAX_CHARS: usize = 256;
+
+    let mut out: Vec<String> = Vec::new();
+    let mut budget = 0usize;
+    let mut push = |candidate: &str, out: &mut Vec<String>, budget: &mut usize| {
+        if out.len() >= MAX_IDS || *budget + candidate.len() > MAX_CHARS {
+            return;
+        }
+        if kept.contains(candidate) || out.iter().any(|s| s == candidate) {
+            return;
+        }
+        *budget += candidate.len() + 2;
+        out.push(candidate.to_string());
+    };
+
+    for token in dropped.split(|c: char| c.is_whitespace() || "()[]{}<>\"'`,;".contains(c)) {
+        let token = token.trim_end_matches(|c: char| c == '.' || c == ':');
+        if token.len() < 5 || token.len() > 64 {
+            continue;
+        }
+        let is_hex_id = token.len() >= 7
+            && token.chars().all(|c| c.is_ascii_hexdigit())
+            && token.chars().any(|c| c.is_ascii_digit())
+            && token.chars().any(|c| c.is_ascii_alphabetic());
+        let is_uuid = token.len() == 36
+            && token
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == '-')
+            && token.matches('-').count() == 4;
+        let is_ticket = token.contains('-')
+            && token.split('-').count() == 2
+            && token.split('-').next().is_some_and(|p| {
+                (2..=10).contains(&p.len()) && p.chars().all(|c| c.is_ascii_uppercase())
+            })
+            && token.split('-').nth(1).is_some_and(|p| {
+                !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())
+            });
+        let is_version = token.starts_with('v')
+            && token[1..].split('.').count() >= 2
+            && token[1..].split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+
+        if is_hex_id || is_uuid || is_ticket || is_version {
+            push(token, &mut out, &mut budget);
+        }
+    }
+    out
+}
+
 fn shannon_entropy(text: &str) -> f64 {
     if text.is_empty() {
         return 0.0;
@@ -333,6 +402,57 @@ fn split_segments(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn factsheet_preserves_ids_from_dropped_segments() {
+        let truncator = EntropyTruncator::new();
+        // Low-entropy segments carrying identifiers, high-entropy segments
+        // without them. The low ones get dropped; their ids must survive
+        // in the factsheet line.
+        let low_a = format!("{} deadbeef42 PROJ-1482", "aaaaaaaaaa ".repeat(8));
+        let low_b = format!(
+            "{} 550e8400-e29b-41d4-a716-446655440000 v1.4.0",
+            "bbbbbbbbbb ".repeat(8)
+        );
+        let high_a = "The quick brown fox jumps over the lazy dog by silver rivers today.";
+        let high_b = "Zephyrs quickly vex jumbled gnomes while quartz dwarfs mix pyjamas.";
+        let input = format!("{low_a}\n\n{high_a}\n\n{low_b}\n\n{high_b}");
+
+        let result = truncator.truncate_string(&input).unwrap();
+        assert!(result.segments_dropped > 0, "fixture must drop segments");
+        assert!(result.text.contains("[ids in omitted segments:"), "{}", result.text);
+        for id in ["deadbeef42", "PROJ-1482", "550e8400-e29b-41d4-a716-446655440000", "v1.4.0"] {
+            assert!(result.text.contains(id), "lost id {id}: {}", result.text);
+        }
+    }
+
+    #[test]
+    fn factsheet_skips_ids_already_kept() {
+        // An id present in a KEPT segment must not be repeated in the sheet.
+        let dropped = "deadbeef42 and cafe1234567";
+        let kept = "deadbeef42 remains visible";
+        let ids = extract_identifiers(dropped, kept);
+        assert!(!ids.contains(&"deadbeef42".to_string()));
+        assert!(ids.contains(&"cafe1234567".to_string()));
+    }
+
+    #[test]
+    fn factsheet_is_budget_capped() {
+        let dropped: String = (0..50)
+            .map(|i| format!("PROJ-{}{:04}", 1000 + i, i))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ids = extract_identifiers(&dropped, "");
+        assert!(ids.len() <= 16, "cap at 16 facts, got {}", ids.len());
+        let total: usize = ids.iter().map(|s| s.len() + 2).sum();
+        assert!(total <= 256 + 16, "char budget exceeded: {total}");
+    }
+
+    #[test]
+    fn factsheet_ignores_plain_words_and_numbers() {
+        let ids = extract_identifiers("building the module quickly 123456789 finished", "");
+        assert!(ids.is_empty(), "plain words/ints are not ids: {ids:?}");
+    }
 
     #[test]
     fn test_shannon_entropy_empty() {
