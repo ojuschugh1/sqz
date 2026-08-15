@@ -2,7 +2,7 @@
 
 **Ojus Chugh** (ojuschugh@gmail.com)
 
-*May 2026*
+*May 2026 — revised August 2026 to reflect sqz 1.4.0*
 
 ---
 
@@ -58,7 +58,9 @@ Agentic sessions exhibit high repetition: the same file is read multiple times, 
 
 This is analogous to the demand paging concept described in [8], where context content is loaded on-demand rather than kept resident. The key insight is that in coding sessions, **the dominant savings come not from compressing individual outputs harder, but from recognizing that the same content appears repeatedly.**
 
-Measured empirically: dedup accounts for 93% reduction on repeat reads, compared to 21-58% from first-pass structural compression.
+A reference is only emitted while the content it points at is plausibly still in the model's context: refs expire after a freshness window (30 minutes of wall-clock time by default, tunable in turns) and are invalidated eagerly when the agent framework compacts its history, at which point the content is re-sent in full. As of 1.4.0, entries can also be **pinned** (`sqz pin`), exempting them from the freshness check — useful for stable knowledge-base content (project docs, system prompts) that multiple agents sharing the session store reference across days.
+
+Measured empirically: dedup accounts for 92% reduction on repeat reads, compared to 21-58% from first-pass structural compression.
 
 ### 2.3 Adaptive Pressure-Aware Compression
 
@@ -82,9 +84,17 @@ sqz uses Shannon entropy analysis combined with pattern detection to classify co
 
 This addresses the concern raised in [11] that compression methods which rely on generic importance metrics can inadvertently remove functionally critical tokens.
 
+Version 1.4.0 extended the safety model with three fidelity guarantees derived from field reports:
+
+- **Byte-faithful file reads.** The MCP file tools (`sqz_read_file`, `sqz_grep`, `sqz_list_dir`) bypass every content-altering pipeline stage — a file read returns its bytes verbatim apart from ANSI stripping. Token savings on this path come exclusively from dedup references on repeat reads, never from dropping content. (Previously, entropy truncation could silently remove below-median-entropy segments from source files.)
+- **Refuse-to-guess formatting.** Structural formatters bail out to raw passthrough rather than emit a partial or misclassified summary. The `git status` formatter, for example, parses porcelain output strictly, matches localized long-format section headers against git's own translation files (it/de/fr/es/pt_PT), and passes any unrecognized locale or section through unmodified — a wrong summary is strictly worse than no compression.
+- **UTF-8 boundary safety.** All truncation and splitting of user-controlled text rounds to character boundaries, so densely non-ASCII output (Cyrillic, CJK, Arabic, emoji) can never crash the compressor mid-pipeline; the property is enforced by randomized tests over arbitrary strings and cut points.
+
 ### 2.5 N-gram Abbreviation
 
 For session-level compression beyond dedup, sqz observes recurring multi-token phrases across the session and introduces compact abbreviations. This technique is inspired by BPE (Byte Pair Encoding) applied at the output level rather than the tokenizer level — frequently co-occurring phrases are replaced with shorter representations.
+
+Abbreviation is deliberately **lossy for identifiers**: only the first occurrence of a repeated phrase survives verbatim, so a commit SHA or file path embedded in a repeated phrase would be replaced by its abbreviation symbol on later lines. Since 1.4.0 the technique is opt-out (`--no-abbrev` or `SQZ_NO_ABBREV=1`, mirroring the dedup opt-out) and the generated agent guidance documents the escape hatch, so an agent that needs to copy-paste identifiers verbatim can disable it per command.
 
 ---
 
@@ -94,12 +104,15 @@ Unlike prompt compression tools that require API interception or model-specific 
 
 | Framework | Hook Mechanism |
 |-----------|---------------|
-| Claude Code | PreToolUse JSON hook |
+| Claude Code | PreToolUse JSON hook (Bash and PowerShell tools) |
 | Cursor | .cursor/rules/*.mdc |
+| Windsurf | .windsurfrules guidance |
+| Cline / Roo Code | .clinerules guidance |
 | Kiro | .kiro/hooks/ JSON schema |
 | Gemini CLI | BeforeTool hook |
 | OpenCode | TypeScript plugin |
-| Codex | AGENTS.md guidance |
+| Codex | AGENTS.md guidance + config.toml MCP entry |
+| Zed | .rules/AGENTS.md instructions + context_servers MCP entry |
 
 A single `sqz init` command detects installed frameworks and configures the appropriate hooks. The compression is transparent — the agent receives compressed output without knowing sqz exists.
 
@@ -158,12 +171,12 @@ sqz is implemented as a single Rust binary with zero runtime dependencies. Compr
 
 ## 6. Limitations and Future Work
 
-- **Token counting heuristic**: sqz uses a byte/4 approximation rather than exact tiktoken counts. This is internally consistent but means reported savings are approximate.
-- **JSONC round-trip**: For tools using JSON-with-comments configs (OpenCode), the merge step strips comments. A manual install path mitigates this.
+- **Token counting**: the compression pipeline counts tokens with real BPE tokenizers (tiktoken `o200k_base` for OpenAI models — exact; `cl100k_base` as a ~5%-variance approximation for Claude and Gemini; chars/4 for unknown local models). The dedup fast path and MCP-side estimates still use the chars/4 heuristic for latency, so aggregate savings figures mix exact and approximate counts.
+- **JSONC round-trip**: For tools using JSON-with-comments configs, programmatic merging cannot preserve comments. sqz warns before merging OpenCode configs and refuses to rewrite Zed settings files entirely, printing a copy-paste snippet instead — safe, but it leaves one manual step for those users.
 - **No semantic compression**: sqz does not use an LLM to summarize content. This is by design (zero latency, zero cost, deterministic), but means it cannot capture semantic redundancy across structurally different outputs.
 - **Dedup granularity**: Currently whole-content SHA-256. Sub-file dedup (paragraph-level) could capture partial overlaps in modified files.
 
-Future directions include sub-file dedup via MinHash LSH [14], integration with KV cache compression methods [7], and learned formatters that adapt to project-specific output patterns.
+Future directions include wiring the existing MinHash LSH primitive [14] into sub-file dedup, integration with KV cache compression methods [7], and learned formatters that adapt to project-specific output patterns.
 
 ---
 
@@ -213,7 +226,7 @@ sqz demonstrates that significant token savings (24.7% average, 92% on dedup hit
   title = {sqz: Pre-Injection Context Compression for Agentic Code Generation},
   year = {2026},
   url = {https://github.com/ojuschugh1/sqz},
-  version = {1.1.0}
+  version = {1.4.0}
 }
 ```
 
