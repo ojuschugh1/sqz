@@ -155,8 +155,13 @@ impl ConfidenceRouter {
         let mut commit_lines = 0;
         for line in &lines {
             let trimmed = line.trim();
-            // Short hash prefix: "abc1234 feat: ..."
-            if trimmed.len() > 8 && trimmed[..7].chars().all(|c| c.is_ascii_hexdigit()) {
+            // Short hash prefix: "abc1234 feat: ...". Take chars (not a
+            // byte slice) — byte 7 can land inside a multi-byte character
+            // and panic (issue #34: Cyrillic output + a password marker).
+            if trimmed.len() > 8
+                && trimmed.chars().take(7).all(|c| c.is_ascii_hexdigit())
+                && trimmed.chars().count() > 7
+            {
                 commit_lines += 1;
             }
             // Conventional commit prefix
@@ -193,6 +198,39 @@ mod tests {
         let router = ConfidenceRouter::new();
         let migration = "ALTER TABLE users ADD COLUMN email VARCHAR(255) NOT NULL;\nCREATE TABLE sessions (id UUID PRIMARY KEY, user_id INT REFERENCES users(id));";
         assert_eq!(router.route(migration), CompressionMode::Safe);
+    }
+
+    /// Regression for issue #34: routing multi-byte text through the
+    /// commit-log heuristic panicked on `trimmed[..7]` when byte 7 landed
+    /// inside a multi-byte character. The password marker is what pulls
+    /// the input into `looks_like_commit_log`; the Cyrillic line is what
+    /// used to blow up there.
+    #[test]
+    fn multibyte_input_with_password_marker_does_not_panic() {
+        let router = ConfidenceRouter::new();
+        // Must clear the router's 100-byte minimum or is_high_risk (and
+        // the vulnerable heuristic behind it) never runs.
+        let content = "Привет мир строка номер 0\n\
+                       Привет мир строка номер 1\n\
+                       Привет мир строка номер 2\n\
+                       пароль тут\n\
+                       password: тайна";
+        assert!(content.len() >= 100, "fixture must reach is_high_risk");
+        // High-risk (password) content routes to Safe; the point of the
+        // test is that `route` returns at all instead of panicking.
+        assert_eq!(router.route(content), CompressionMode::Safe);
+    }
+
+    /// Same class, CJK + emoji: no byte offset in these strings may be
+    /// assumed to be a char boundary.
+    #[test]
+    fn cjk_and_emoji_input_does_not_panic() {
+        let router = ConfidenceRouter::new();
+        let cjk = "私はガラスを食べられます。それは私を傷つけません。\n\
+                   api_key = 秘密🦀\n\
+                   日本語のテキストの行がもう一つあります";
+        assert!(cjk.len() >= 100);
+        let _ = router.route(cjk);
     }
 
     #[test]

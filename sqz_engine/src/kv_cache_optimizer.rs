@@ -73,7 +73,11 @@ pub fn compress_with_sinks(content: &str, model_family: &ModelFamily) -> String 
     };
 
     // Clamp to content length
-    let protected_prefix = protected_prefix.min(content.len());
+    // Clamp to length AND to a char boundary — sink_chars is a byte
+    // estimate (tokens × 4) that can land mid-character on non-ASCII
+    // content (issue #34 class).
+    let protected_prefix =
+        crate::text_boundary::floor_char_boundary(content, protected_prefix);
 
     // Split content into protected and compressible regions
     let protected = &content[..protected_prefix];
@@ -117,7 +121,8 @@ pub fn compress_with_custom_sinks(
         ModelFamily::GoogleGemini | ModelFamily::Local(_) => sink_chars,
     };
 
-    let protected_prefix = protected_prefix.min(content.len());
+    let protected_prefix =
+        crate::text_boundary::floor_char_boundary(content, protected_prefix);
     let protected = &content[..protected_prefix];
     let compressible = &content[protected_prefix..];
 

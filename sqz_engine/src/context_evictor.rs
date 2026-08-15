@@ -203,7 +203,7 @@ fn compute_retention_score(
 fn summarize_for_eviction(content: &str) -> String {
     let first_line = content.lines().next().unwrap_or("");
     let truncated = if first_line.len() > 80 {
-        format!("{}...", &first_line[..77])
+        format!("{}...", crate::text_boundary::truncate_str(first_line, 77))
     } else {
         first_line.to_string()
     };

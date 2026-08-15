@@ -1935,9 +1935,11 @@ fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: boo
                     colors::dim(&pct_str)
                 };
 
-                // Truncate command name to 18 visible chars
-                let cmd_display = if c.command.len() > 18 {
-                    format!("{}…", &c.command[..17])
+                // Truncate command name to 18 visible chars (char-count,
+                // not bytes — command labels can carry non-ASCII).
+                let cmd_display = if c.command.chars().count() > 18 {
+                    let cut: String = c.command.chars().take(17).collect();
+                    format!("{cut}…")
                 } else {
                     c.command.clone()
                 };
@@ -2217,7 +2219,7 @@ fn cmd_resume(session_id: Option<String>) {
             SnapshotEventType::Context
         };
         let content = if turn.content.len() > 200 {
-            format!("{}...", &turn.content[..200])
+            format!("{}...", sqz_engine::text_boundary::truncate_str(&turn.content, 200))
         } else {
             turn.content.clone()
         };

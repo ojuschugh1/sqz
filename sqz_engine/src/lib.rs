@@ -110,6 +110,7 @@ pub mod session_continuity;
 pub mod session_store;
 pub mod stages;
 pub mod structural_summary;
+pub mod text_boundary;
 pub mod tee_mode;
 pub mod terse_mode;
 pub mod token_counter;

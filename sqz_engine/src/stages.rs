@@ -444,7 +444,7 @@ fn value_to_compact_string(v: &serde_json::Value) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::String(s) => {
             if s.len() > 50 {
-                format!("{}...", &s[..47])
+                format!("{}...", crate::text_boundary::truncate_str(s, 47))
             } else {
                 s.clone()
             }

@@ -344,7 +344,8 @@ impl<'a> SessionContinuityManager<'a> {
                     let remaining = body_budget.saturating_sub(body.len());
                     if remaining > label.len() + 5 {
                         // At least "label: …\n"
-                        let trunc = &line[..remaining.min(line.len()).saturating_sub(2)];
+                        let cut = remaining.min(line.len()).saturating_sub(2);
+                        let trunc = crate::text_boundary::truncate_str(&line, cut);
                         body.push_str(trunc);
                         body.push_str("…\n");
                     }
@@ -376,7 +377,7 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        let mut result = s[..max_len].to_string();
+        let mut result = crate::text_boundary::truncate_str(s, max_len).to_string();
         result.push('…');
         result
     }

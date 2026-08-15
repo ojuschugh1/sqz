@@ -407,11 +407,7 @@ fn find_function_boundaries(
 
     for func in &code_summary.functions {
         // Find the line containing this function's signature
-        let sig_prefix = if func.signature.len() > 20 {
-            &func.signature[..20]
-        } else {
-            &func.signature
-        };
+        let sig_prefix = crate::text_boundary::truncate_str(&func.signature, 20);
 
         for (i, line) in lines.iter().enumerate() {
             if line.trim().starts_with(sig_prefix.trim()) || line.contains(&format!("fn {}", func.name)) || line.contains(&format!("def {}", func.name)) || line.contains(&format!("function {}", func.name)) {

@@ -54,10 +54,11 @@ impl PromptCacheDetector {
     ///
     /// If `boundary.offset >= content.len()`, `after` will be empty.
     pub fn split_at_boundary(&self, content: &str, boundary: &CacheBoundary) -> (String, String) {
-        let offset = boundary.offset.min(content.len());
-        let before = content[..offset].to_owned();
-        let after = content[offset..].to_owned();
-        (before, after)
+        // Boundary offsets are byte estimates; round down to a char
+        // boundary so multi-byte content can't panic (issue #34 class).
+        let (before, after) =
+            crate::text_boundary::split_at_boundary_safe(content, boundary.offset);
+        (before.to_owned(), after.to_owned())
     }
 
     // -----------------------------------------------------------------------
