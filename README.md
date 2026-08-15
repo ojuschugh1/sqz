@@ -457,6 +457,6 @@ Thanks to everyone who has contributed code, fixes, and ideas to sqz:
   <img src="https://contrib.rocks/image?repo=ojuschugh1/sqz" alt="sqz contributors" />
 </a>
 
-And to everyone who filed the detailed bug reports behind our fixes — precise repros make this project better with every release. Want to join them? PRs are reviewed fast: see the [open issues](https://github.com/ojuschugh1/sqz/issues) to get started.
+And to everyone who filed the detailed bug reports behind our fixes. Precise repros make this project better with every release. Want to join them? PRs are reviewed fast: see the [open issues](https://github.com/ojuschugh1/sqz/issues) to get started.
 
 <sub>Contributor grid made with [contrib.rocks](https://contrib.rocks).</sub>
