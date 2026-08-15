@@ -797,7 +797,7 @@ mod tests {
     /// collapsed to «A1». This is the fix for the corruption bug.
     #[test]
     fn abbreviator_opt_out_preserves_repeated_identifiers() {
-        let proxy = CliProxy::new().expect("engine init");
+        let (proxy, _dir) = isolated_proxy();
         let sha = unique_sha();
 
         let output = format!(
@@ -838,7 +838,7 @@ mod tests {
     /// abbreviation for everyone.
     #[test]
     fn abbreviator_default_on_still_abbreviates() {
-        let proxy = CliProxy::new().expect("engine init");
+        let (proxy, _dir) = isolated_proxy();
         // Unique tag keeps this a cache miss; the repeated long phrase is
         // what the abbreviator should fold.
         let tag = unique_sha();
