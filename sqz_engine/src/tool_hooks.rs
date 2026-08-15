@@ -62,6 +62,9 @@ pub enum HookPlatform {
     Windsurf,
     /// Kiro: STDOUT with rewritten tool_input JSON, exit 0 = allow
     Kiro,
+    /// Copilot CLI: { permissionDecision, modifiedArgs } (camelCase input:
+    /// toolName + toolArgs)
+    Copilot,
 }
 
 /// Process a PreToolUse hook invocation from an AI tool.
@@ -122,6 +125,16 @@ pub fn process_hook_kiro(input: &str) -> Result<String> {
     process_hook_for_platform(input, HookPlatform::Kiro)
 }
 
+/// Process a hook invocation for GitHub Copilot CLI.
+///
+/// Copilot's camelCase preToolUse payload carries `toolName` + `toolArgs`;
+/// the response uses `permissionDecision` + `modifiedArgs`, which
+/// substitutes the tool arguments wholesale, so unchanged fields are
+/// carried over. Shell tools are `bash` and `powershell`.
+pub fn process_hook_copilot(input: &str) -> Result<String> {
+    process_hook_for_platform(input, HookPlatform::Copilot)
+}
+
 /// Platform-aware hook processing. Extracts the command from the tool-specific
 /// input format, rewrites it, and returns the response in the correct format
 /// for the target platform.
@@ -161,7 +174,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         // Pass through non-bash tools unchanged.
         // Cursor requires valid JSON on all code paths (empty object = passthrough).
         return Ok(match platform {
-            HookPlatform::Cursor => "{}".to_string(),
+            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
             _ => input.to_string(),
         });
     }
@@ -187,11 +200,18 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
                 .and_then(|v| v.get("command"))
                 .and_then(|v| v.as_str())
         })
+        .or_else(|| {
+            // Copilot CLI camelCase payload: toolArgs.command
+            parsed
+                .get("toolArgs")
+                .and_then(|v| v.get("command"))
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or("");
 
     if command.is_empty() {
         return Ok(match platform {
-            HookPlatform::Cursor => "{}".to_string(),
+            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
             _ => input.to_string(),
         });
     }
@@ -214,7 +234,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         || command.contains("sqz.exe compress --cmd ")
     {
         return Ok(match platform {
-            HookPlatform::Cursor => "{}".to_string(),
+            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
             _ => input.to_string(),
         });
     }
@@ -222,7 +242,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // Don't intercept interactive or long-running commands
     if is_interactive_command(command) {
         return Ok(match platform {
-            HookPlatform::Cursor => "{}".to_string(),
+            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
             _ => input.to_string(),
         });
     }
@@ -233,7 +253,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // `2>&1 | sqz compress` — the pipe only captures the last command.
     if has_shell_operators(command) {
         return Ok(match platform {
-            HookPlatform::Cursor => "{}".to_string(),
+            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
             _ => input.to_string(),
         });
     }
@@ -269,6 +289,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // minimal {command} form.
     let mut updated_input = parsed
         .get("tool_input")
+        .or_else(|| parsed.get("toolArgs"))
         .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default();
@@ -339,6 +360,11 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
                 }
             })
         }
+        HookPlatform::Copilot => serde_json::json!({
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "sqz: command output will be compressed for token savings",
+            "modifiedArgs": updated_input
+        }),
         HookPlatform::Kiro => {
             // Kiro CLI/IDE: output the modified tool_input as JSON to STDOUT.
             // Exit code 0 means "allow with modifications".
@@ -682,6 +708,16 @@ not on PATH, run commands normally.
             config_content: crate::zed_integration::zed_guidance_block(sqz_path_raw),
             scope: HookScope::Project,
         },
+        // Copilot CLI — user-level hook file at ~/.copilot/hooks/sqz.json.
+        // preToolUse supports modifiedArgs (documented), so this is a full
+        // rewrite host like Claude Code. Install goes through
+        // install_copilot_hook and only runs when ~/.copilot exists.
+        ToolHookConfig {
+            tool_name: "Copilot CLI".to_string(),
+            config_path: PathBuf::from(".copilot/hooks/sqz.json"),
+            config_content: copilot_hook_content(sqz_path_raw),
+            scope: HookScope::User,
+        },
     ]
 }
 
@@ -800,7 +836,88 @@ pub const SUPPORTED_TOOL_NAMES: &[&str] = &[
     "OpenCode",
     "Codex",
     "Zed",
+    "Copilot CLI",
 ];
+
+/// Path of the user-level Copilot CLI hooks file sqz manages.
+/// Honors `COPILOT_HOME` the same way the CLI does.
+pub fn copilot_hooks_path() -> PathBuf {
+    copilot_home().join("hooks").join("sqz.json")
+}
+
+fn copilot_home() -> PathBuf {
+    if let Ok(home) = std::env::var("COPILOT_HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    home.join(".copilot")
+}
+
+/// The Copilot CLI hook config sqz installs (v1 camelCase format).
+pub fn copilot_hook_content(sqz_path: &str) -> String {
+    let escaped = json_escape_string_value(sqz_path);
+    format!(
+        r#"{{
+  "version": 1,
+  "hooks": {{
+    "preToolUse": [
+      {{
+        "type": "command",
+        "matcher": "bash|powershell",
+        "bash": "{escaped} hook copilot",
+        "powershell": "{escaped} hook copilot",
+        "timeoutSec": 10
+      }}
+    ]
+  }}
+}}
+"#
+    )
+}
+
+/// Install the Copilot CLI hook file. Returns `Ok(None)` when Copilot CLI
+/// is not installed (no `~/.copilot` directory), `Ok(Some(changed))`
+/// otherwise. Refreshes the file in place when the content is stale.
+pub fn install_copilot_hook(sqz_path: &str) -> Result<Option<bool>> {
+    let home = copilot_home();
+    if !home.exists() {
+        return Ok(None);
+    }
+    let path = copilot_hooks_path();
+    let content = copilot_hook_content(sqz_path);
+    if path.exists() {
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        if existing == content {
+            return Ok(Some(false));
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::error::SqzError::Other(format!("create {}: {e}", parent.display()))
+        })?;
+    }
+    std::fs::write(&path, content).map_err(|e| {
+        crate::error::SqzError::Other(format!("write {}: {e}", path.display()))
+    })?;
+    Ok(Some(true))
+}
+
+/// Remove the sqz-managed Copilot hook file if present.
+pub fn remove_copilot_hook() -> Result<bool> {
+    let path = copilot_hooks_path();
+    if !path.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path).map_err(|e| {
+        crate::error::SqzError::Other(format!("remove {}: {e}", path.display()))
+    })?;
+    Ok(true)
+}
 
 /// Normalise a tool name or alias to its canonical form.
 ///
@@ -840,6 +957,7 @@ pub fn canonicalize_tool_name(name: &str) -> String {
         "opencode" => "opencode".to_string(),
         "codex" => "codex".to_string(),
         "zed" | "zededitor" | "zedagent" => "zed".to_string(),
+        "copilot" | "copilotcli" | "githubcopilot" | "ghcopilot" => "copilot".to_string(),
         other => other.to_string(),
     }
 }
@@ -1026,6 +1144,16 @@ pub fn install_tool_hooks_scoped_filtered(
                     && !installed.iter().any(|n| n == "Cline")
                 {
                     installed.push("Cline".to_string());
+                }
+            }
+            continue;
+        }
+
+        // Copilot CLI: user-level hook file, only when Copilot is installed.
+        if config.tool_name == "Copilot CLI" {
+            if let Ok(Some(changed)) = install_copilot_hook(sqz_path) {
+                if changed && !installed.iter().any(|n| n == "Copilot CLI") {
+                    installed.push("Copilot CLI".to_string());
                 }
             }
             continue;
@@ -1682,6 +1810,31 @@ fn is_interactive_command(cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_copilot_hook_rewrites_bash_with_modified_args() {
+        let input = r#"{"sessionId":"s","timestamp":1,"cwd":"/x","toolName":"bash","toolArgs":{"command":"git log -20","timeoutSec":30}}"#;
+        let result = process_hook_copilot(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["permissionDecision"], "allow");
+        let args = &parsed["modifiedArgs"];
+        assert!(args["command"].as_str().unwrap().contains("sqz compress"));
+        assert_eq!(args["timeoutSec"], 30, "sibling toolArgs fields carried over");
+    }
+
+    #[test]
+    fn test_copilot_hook_passes_non_shell_through() {
+        let input = r#"{"sessionId":"s","timestamp":1,"cwd":"/x","toolName":"view","toolArgs":{"path":"a.rs"}}"#;
+        let result = process_hook_copilot(input).unwrap();
+        assert_eq!(result, "{}", "non-shell tools fall through with empty object");
+    }
+
+    #[test]
+    fn test_copilot_hook_skips_risky_shell_operators() {
+        let input = r#"{"toolName":"bash","toolArgs":{"command":"make && make install"}}"#;
+        let result = process_hook_copilot(input).unwrap();
+        assert_eq!(result, "{}", "compound commands must not be rewritten");
+    }
 
     #[test]
     fn test_claude_updated_input_preserves_sibling_fields() {

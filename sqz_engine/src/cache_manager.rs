@@ -118,6 +118,12 @@ pub struct CacheManager {
     /// Any cache entry whose `accessed_at` predates this instant is stale.
     /// Reset by [`notify_compaction`].
     compaction_marker: std::cell::Cell<Option<chrono::DateTime<chrono::Utc>>>,
+    /// Session-lifetime MinHash LSH index over stored entries, used to find
+    /// near-duplicate candidates for delta encoding beyond the recent-LRU
+    /// window. In-memory only; rebuilt organically as entries are stored.
+    lsh: std::cell::RefCell<crate::minhash_lsh::MinHashLsh>,
+    /// doc_id (index) → content hash for entries in `lsh`.
+    lsh_hashes: std::cell::RefCell<Vec<String>>,
 }
 
 impl CacheManager {
@@ -158,7 +164,23 @@ impl CacheManager {
             ref_tracker: std::cell::RefCell::new(HashMap::new()),
             max_ref_age,
             compaction_marker: std::cell::Cell::new(None),
+            lsh: std::cell::RefCell::new(crate::minhash_lsh::MinHashLsh::new()),
+            lsh_hashes: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Register a stored entry in the similarity index. Capped so a very
+    /// long session can't grow the index unboundedly; beyond the cap the
+    /// recent-LRU fallback in [`Self::try_delta_encode`] still applies.
+    fn index_for_similarity(&self, hash: &str, data: &str) {
+        const MAX_INDEXED: usize = 512;
+        let mut hashes = self.lsh_hashes.borrow_mut();
+        if hashes.len() >= MAX_INDEXED || hashes.iter().any(|h| h == hash) {
+            return;
+        }
+        let doc_id = hashes.len() as u64;
+        self.lsh.borrow_mut().insert(doc_id, data);
+        hashes.push(hash.to_string());
     }
 
     /// Compute the SHA-256 hex digest of `bytes`.
@@ -356,6 +378,7 @@ impl CacheManager {
             // Persist the raw bytes so `sqz expand <prefix>` can round-trip.
             self.store
                 .save_cache_entry_with_original(&hash, &compressed, Some(content))?;
+            self.index_for_similarity(&hash, &compressed.data);
             self.record_ref_sent(&hash);
 
             let token_cost = (delta_result.delta_text.len() / 4) as u32;
@@ -377,37 +400,77 @@ impl CacheManager {
         };
         self.store
             .save_cache_entry_with_original(&hash, &compressed, Some(content))?;
+        self.index_for_similarity(&hash, &compressed.data);
         // Record that this content was sent at the current turn
         self.record_ref_sent(&hash);
 
         Ok(CacheResult::Fresh { output: compressed })
     }
 
-    /// Try to delta-encode content against recent cache entries.
+    /// Try to delta-encode content against cached entries.
     /// Returns Some(DeltaResult) if a near-duplicate was found.
+    ///
+    /// Candidates come from two sources, in order:
+    /// 1. The MinHash LSH index — finds near-duplicates anywhere in the
+    ///    session, not just the recent window. Candidates are ranked by
+    ///    estimated Jaccard similarity and the best 5 are tried.
+    /// 2. Fallback: the 10 most recent LRU entries (covers content stored
+    ///    before this process built its in-memory index).
     fn try_delta_encode(
         &self,
         new_content: &str,
     ) -> Result<Option<crate::delta_encoder::DeltaResult>> {
-        let entries = self.store.list_cache_entries_lru()?;
-
-        // Check the most recent entries (up to 10) for near-duplicates
-        let check_count = entries.len().min(10);
-        for (hash, _) in entries.iter().rev().take(check_count) {
-            if let Some(cached) = self.store.get_cache_entry(hash)? {
-                let hash_prefix = &hash[..hash.len().min(16)];
-                if let Ok(Some(delta)) =
-                    self.delta_encoder
-                        .encode(&cached.data, new_content, hash_prefix)
-                {
-                    // Only use delta if it's actually smaller than the full content
-                    if delta.delta_text.len() < new_content.len() {
-                        return Ok(Some(delta));
-                    }
-                }
+        // LSH path.
+        let candidates: Vec<String> = {
+            let lsh = self.lsh.borrow();
+            let hashes = self.lsh_hashes.borrow();
+            let query_sig = crate::minhash_lsh::MinHashLsh::compute_signature(new_content);
+            let mut scored: Vec<(f64, &String)> = lsh
+                .query(new_content)
+                .into_iter()
+                .filter_map(|doc_id| {
+                    let hash = hashes.get(doc_id as usize)?;
+                    let sim = lsh.get_signature(doc_id)?.jaccard_similarity(&query_sig);
+                    (sim >= 0.5).then_some((sim, hash))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            scored.into_iter().take(5).map(|(_, h)| h.clone()).collect()
+        };
+        for hash in &candidates {
+            if let Some(delta) = self.try_delta_against(hash, new_content)? {
+                return Ok(Some(delta));
             }
         }
 
+        // Recent-LRU fallback.
+        let entries = self.store.list_cache_entries_lru()?;
+        let check_count = entries.len().min(10);
+        for (hash, _) in entries.iter().rev().take(check_count) {
+            if candidates.iter().any(|c| c == hash) {
+                continue;
+            }
+            if let Some(delta) = self.try_delta_against(hash, new_content)? {
+                return Ok(Some(delta));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn try_delta_against(
+        &self,
+        hash: &str,
+        new_content: &str,
+    ) -> Result<Option<crate::delta_encoder::DeltaResult>> {
+        if let Some(cached) = self.store.get_cache_entry(hash)? {
+            let hash_prefix = &hash[..hash.len().min(16)];
+            if let Ok(Some(delta)) = self.delta_encoder.encode(&cached.data, new_content, hash_prefix) {
+                if delta.delta_text.len() < new_content.len() {
+                    return Ok(Some(delta));
+                }
+            }
+        }
         Ok(None)
     }
 
@@ -449,6 +512,7 @@ impl CacheManager {
         let hash = Self::sha256_hex(original_content);
         self.store
             .save_cache_entry_with_original(&hash, compressed, Some(original_content))?;
+        self.index_for_similarity(&hash, &compressed.data);
         self.record_ref_sent(&hash);
         Ok(())
     }
@@ -685,6 +749,48 @@ mod tests {
             }
             _ => panic!("expected CacheResult::Fresh on a cold read"),
         }
+    }
+
+    /// MinHash LSH finds a near-duplicate even after 12 unrelated entries
+    /// have pushed the original out of the recent-10 LRU fallback window.
+    #[test]
+    fn lsh_finds_near_duplicate_beyond_lru_window() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+
+        let base: String = (0..40)
+            .map(|i| format!("stable log line number {i} with steady content here\n"))
+            .collect();
+        cm.get_or_compress(Path::new("base"), base.as_bytes(), &pipeline)
+            .unwrap();
+
+        // Bury it under 12 distinct entries.
+        for n in 0..12 {
+            let filler: String = (0..30)
+                .map(|i| format!("filler doc {n} row {i} totally different subject matter\n"))
+                .collect();
+            cm.get_or_compress(Path::new("filler"), filler.as_bytes(), &pipeline)
+                .unwrap();
+        }
+
+        // One line changed: a near-duplicate of the buried base.
+        let variant = base.replace(
+            "stable log line number 7 with steady content here",
+            "stable log line number 7 with slightly altered content",
+        );
+        let result = cm
+            .get_or_compress(Path::new("variant"), variant.as_bytes(), &pipeline)
+            .unwrap();
+        let kind = match &result {
+            CacheResult::Dedup { .. } => "Dedup",
+            CacheResult::Delta { .. } => "Delta",
+            CacheResult::Fresh { .. } => "Fresh",
+        };
+        assert!(
+            matches!(result, CacheResult::Delta { .. }),
+            "near-duplicate beyond the LRU window must resolve via LSH, got {kind}"
+        );
     }
 
     #[test]

@@ -4,6 +4,14 @@ Reproducible benchmark results from the sqz compression engine.
 All measurements use the `sqz compress` CLI on the inputs shown.
 Token counts use the `chars / 4` approximation (GPT-style).
 
+**Verified under a real tokenizer:** the formatter fixtures are also
+re-measured with the real `cl100k_base` BPE tokenizer on every test run
+(`cargo test -p sqz-engine bench_reductions_hold_under_real_bpe -- --nocapture`).
+Latest run: chars/4 reports 87.2% aggregate reduction, cl100k reports
+88.9% — a 1.7-point divergence, so the reported reductions are not an
+artifact of the token estimate. The test fails CI if divergence ever
+reaches 10 points.
+
 **Last updated:** May 2026 | **sqz version:** 1.2.0 | **Platform:** macOS aarch64
 
 ---

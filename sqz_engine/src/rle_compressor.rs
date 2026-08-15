@@ -79,6 +79,140 @@ pub fn rle_compress(text: &str, min_run_length: usize) -> Result<RleResult> {
     })
 }
 
+// ── Log-template compaction ──────────────────────────────────────────────────
+
+/// Result of log-template compaction.
+#[derive(Debug, Clone)]
+pub struct LogTemplateResult {
+    pub text: String,
+    pub runs_collapsed: usize,
+    pub tokens_saved: u32,
+}
+
+/// Collapse consecutive lines that are identical except for VOLATILE spans:
+/// timestamps, durations, percentages. What exact RLE (identical lines only)
+/// leaves on the table in real logs is mostly timestamp spam.
+///
+/// Deliberately narrow — the predecessor of this stage (pattern-run
+/// detection) was removed for eating `ls` filenames. Rules:
+/// - Only timestamps, durations, and percentages count as volatile.
+///   Hex ids, UUIDs, filenames, and plain integers make lines DIFFERENT.
+/// - Only consecutive lines collapse, and the first line stays verbatim.
+/// - The marker names what varied, so the loss is explicit.
+pub fn log_template_collapse(text: &str, min_run_length: usize) -> Result<LogTemplateResult> {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < min_run_length {
+        return Ok(LogTemplateResult {
+            text: text.to_string(),
+            runs_collapsed: 0,
+            tokens_saved: 0,
+        });
+    }
+
+    let templates: Vec<String> = lines.iter().map(|l| mask_volatiles(l)).collect();
+
+    let mut output = Vec::new();
+    let mut runs_collapsed = 0usize;
+    let mut tokens_saved = 0u32;
+    let mut i = 0;
+
+    while i < lines.len() {
+        let mut run_len = 1;
+        // A run requires the same template AND that masking actually did
+        // something (otherwise identical lines belong to exact RLE).
+        while i + run_len < lines.len()
+            && templates[i + run_len] == templates[i]
+            && templates[i] != lines[i]
+            && lines[i + run_len] != lines[i]
+        {
+            run_len += 1;
+        }
+
+        if run_len >= min_run_length {
+            output.push(lines[i].to_string());
+            output.push(format!(
+                "[×{} similar lines; only timestamps/durations vary]",
+                run_len - 1
+            ));
+            runs_collapsed += 1;
+            for line in &lines[i + 1..i + run_len] {
+                tokens_saved += (line.len() as u32).div_ceil(4);
+            }
+            i += run_len;
+        } else {
+            output.push(lines[i].to_string());
+            i += 1;
+        }
+    }
+
+    let trailing_newline = text.ends_with('\n');
+    let mut result = output.join("\n");
+    if trailing_newline && !result.ends_with('\n') {
+        result.push('\n');
+    }
+
+    Ok(LogTemplateResult {
+        text: result,
+        runs_collapsed,
+        tokens_saved,
+    })
+}
+
+/// Mask volatile spans (timestamps, durations, percentages) with a
+/// placeholder. Everything else — hex ids, UUIDs, paths, plain integers —
+/// is preserved so identifier-bearing lines never share a template.
+fn mask_volatiles(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for token in line.split_inclusive(|c: char| c.is_whitespace()) {
+        let (word, ws) = match token.find(|c: char| c.is_whitespace()) {
+            Some(idx) => token.split_at(idx),
+            None => (token, ""),
+        };
+        let stripped = word.trim_matches(|c: char| "[]()<>,".contains(c));
+        if is_volatile(stripped) {
+            out.push_str(&word.replace(stripped, "‹›"));
+        } else {
+            out.push_str(word);
+        }
+        out.push_str(ws);
+    }
+    out
+}
+
+fn is_volatile(token: &str) -> bool {
+    if token.len() < 2 {
+        return false;
+    }
+    // Durations: 123ms, 4.5s, 12µs, 3m20s
+    for suffix in ["ms", "µs", "us", "ns", "s", "m"] {
+        if let Some(num) = token.strip_suffix(suffix) {
+            if !num.is_empty()
+                && num.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && num.chars().any(|c| c.is_ascii_digit())
+            {
+                return true;
+            }
+        }
+    }
+    // Percentages: 45%, 99.9%
+    if let Some(num) = token.strip_suffix('%') {
+        if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return true;
+        }
+    }
+    // Clock times and dates: 12:34:56(.789), 2026-08-15, 2026-08-15T12:34:56Z
+    let digits = token.chars().filter(|c| c.is_ascii_digit()).count();
+    if digits >= 4
+        && token
+            .chars()
+            .all(|c| c.is_ascii_digit() || ":-.TZ+".contains(c))
+        && (token.contains(':') || token.matches('-').count() >= 2)
+    {
+        return true;
+    }
+    false
+}
+
 // ── Sliding Window Dedup ──────────────────────────────────────────────────────
 
 /// Token-level sliding window deduplication.
@@ -153,6 +287,69 @@ pub struct SlidingWindowResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── log-template compaction ───────────────────────────────────────
+
+    #[test]
+    fn template_collapses_timestamp_spam() {
+        let input = "\
+12:00:01 worker heartbeat ok in 12ms
+12:00:02 worker heartbeat ok in 14ms
+12:00:03 worker heartbeat ok in 11ms
+12:00:04 worker heartbeat ok in 13ms
+done\n";
+        let result = log_template_collapse(input, 3).unwrap();
+        assert_eq!(result.runs_collapsed, 1);
+        assert!(result.text.contains("12:00:01 worker heartbeat ok in 12ms"), "first line verbatim");
+        assert!(result.text.contains("[×3 similar lines; only timestamps/durations vary]"));
+        assert!(!result.text.contains("12:00:03"), "later volatiles collapsed");
+        assert!(result.text.ends_with("done\n"));
+    }
+
+    #[test]
+    fn template_never_collapses_identifier_bearing_lines() {
+        // Same shape but each line carries a distinct hex id: these are the
+        // `ls`-filenames class of lines that the removed pattern-run stage
+        // used to eat. They must all survive.
+        let input = "\
+12:00:01 pushed commit deadbeef01 to origin
+12:00:02 pushed commit cafebabe02 to origin
+12:00:03 pushed commit 0ddba11f03 to origin
+12:00:04 pushed commit feedface04 to origin\n";
+        let result = log_template_collapse(input, 3).unwrap();
+        assert_eq!(result.runs_collapsed, 0, "{}", result.text);
+        for id in ["deadbeef01", "cafebabe02", "0ddba11f03", "feedface04"] {
+            assert!(result.text.contains(id));
+        }
+    }
+
+    #[test]
+    fn template_never_collapses_distinct_filenames() {
+        let input = "\
+-rw-r--r-- 1 u staff 120 Aug 15 12:00 alpha.rs
+-rw-r--r-- 1 u staff 340 Aug 15 12:01 beta.rs
+-rw-r--r-- 1 u staff 560 Aug 15 12:02 gamma.rs
+-rw-r--r-- 1 u staff 780 Aug 15 12:03 delta.rs\n";
+        let result = log_template_collapse(input, 3).unwrap();
+        for name in ["alpha.rs", "beta.rs", "gamma.rs", "delta.rs"] {
+            assert!(result.text.contains(name), "filename lost: {}", result.text);
+        }
+    }
+
+    #[test]
+    fn template_leaves_identical_lines_to_exact_rle() {
+        let input = "same line\nsame line\nsame line\nsame line\n";
+        let result = log_template_collapse(input, 3).unwrap();
+        assert_eq!(result.runs_collapsed, 0);
+        assert_eq!(result.text, input);
+    }
+
+    #[test]
+    fn template_short_runs_untouched() {
+        let input = "12:00:01 tick\n12:00:02 tick\nother\n";
+        let result = log_template_collapse(input, 3).unwrap();
+        assert_eq!(result.text, input);
+    }
 
     // --- RLE tests ---
 

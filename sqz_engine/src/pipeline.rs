@@ -170,6 +170,23 @@ impl CompressionPipeline {
             }
         }
 
+        // Log-template compaction: collapse consecutive lines identical
+        // except for timestamps/durations/percentages — what exact RLE
+        // misses in real logs. Identifier-bearing lines never collapse.
+        // Skipped on the lossless path.
+        if !lossless && !is_json && content.raw.len() > 200 {
+            if let Ok(lt_result) = crate::rle_compressor::log_template_collapse(&content.raw, 3) {
+                if lt_result.runs_collapsed > 0 {
+                    let has_error = content.raw.contains("ERROR") || content.raw.contains("error:");
+                    let lt_has_error = lt_result.text.contains("ERROR") || lt_result.text.contains("error:");
+                    if !has_error || lt_has_error {
+                        content.raw = lt_result.text;
+                        stages_applied.push("log_template".to_owned());
+                    }
+                }
+            }
+        }
+
         // Sliding window dedup: catch repeated substrings across non-adjacent lines.
         // Skipped on the lossless path — its `[→Ln]` back-references have no
         // agent-facing expand path and make a file read non-faithful (#32).

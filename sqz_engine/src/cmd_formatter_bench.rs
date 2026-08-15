@@ -130,4 +130,46 @@ mod tests {
     fn bench_terraform_plan() {
         bench("terraform plan (2 resources)", "terraform plan", &terraform_plan(), 40.0);
     }
+
+    /// Re-measure every fixture with the real cl100k BPE tokenizer and
+    /// compare against the chars/4 unit the table above uses. Guards the
+    /// claim that reported reductions are not an artifact of the token
+    /// estimate: the two aggregates must agree within 10 points.
+    #[test]
+    fn bench_reductions_hold_under_real_bpe() {
+        let cases: Vec<(&str, &str, String)> = vec![
+            ("cargo test", "cargo test", cargo_test_15_pass()),
+            ("cargo build", "cargo build", cargo_build_success()),
+            ("cargo clippy", "cargo clippy", cargo_clippy_5_warn()),
+            ("npm install", "npm install", npm_install_200()),
+            ("git status", "git status", git_status_10()),
+            ("grep", "grep foo", grep_100()),
+            ("terraform plan", "terraform plan", terraform_plan()),
+        ];
+
+        let counter = crate::token_counter::TokenCounter::new();
+        let bpe = |s: &str| counter.count(s, &crate::types::ModelFamily::AnthropicClaude) as usize;
+
+        let (mut in4, mut out4, mut inb, mut outb) = (0usize, 0usize, 0usize, 0usize);
+        for (name, cmd, input) in &cases {
+            let out = format_command(cmd, input)
+                .unwrap_or_else(|| panic!("[{name}] no formatter matched"));
+            in4 += tok(input);
+            out4 += tok(&out);
+            inb += bpe(input);
+            outb += bpe(&out);
+        }
+
+        let red4 = 100.0 - (out4 as f64 / in4.max(1) as f64 * 100.0);
+        let redb = 100.0 - (outb as f64 / inb.max(1) as f64 * 100.0);
+        println!(
+            "[bpe-verify] chars/4: {in4}->{out4} = {red4:.1}% | cl100k: {inb}->{outb} = {redb:.1}% | divergence {:.1} pts",
+            (red4 - redb).abs()
+        );
+        assert!(
+            (red4 - redb).abs() < 10.0,
+            "reduction under real BPE ({redb:.1}%) diverges from chars/4 ({red4:.1}%) by ≥10 points"
+        );
+        assert!(redb > 50.0, "aggregate BPE reduction should stay substantial, got {redb:.1}%");
+    }
 }

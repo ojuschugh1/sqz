@@ -668,6 +668,24 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             continue;
         }
 
+        // Copilot CLI: user-level hook file, only when Copilot is installed.
+        if config.tool_name == "Copilot CLI" {
+            let path = sqz_engine::copilot_hooks_path();
+            let copilot_present = path
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|home| home.exists())
+                .unwrap_or(false);
+            if copilot_present && !path.exists() {
+                plan.push((
+                    path.display().to_string(),
+                    "Copilot CLI hook".to_string(),
+                    true,
+                ));
+            }
+            continue;
+        }
+
         // Kiro: steering file + project MCP config + legacy hook cleanup.
         if config.tool_name == "Kiro" {
             let steering = sqz_engine::kiro_steering_path(&project_dir);
@@ -1631,6 +1649,14 @@ fn cmd_uninstall(skip_confirm: bool) {
         if config.tool_name == "Kiro" {
             continue;
         }
+        // Copilot CLI: user-level file, handled in its dedicated block.
+        if config.tool_name == "Copilot CLI" {
+            let path = sqz_engine::copilot_hooks_path();
+            if path.exists() {
+                files_to_remove.push((path.display().to_string(), true));
+            }
+            continue;
+        }
         // Windsurf: new rules file plus a legacy sqz-authored .windsurfrules.
         if config.tool_name == "Windsurf" {
             let target = project_dir.join(&config.config_path);
@@ -1836,6 +1862,18 @@ fn cmd_uninstall(skip_confirm: bool) {
         // Zed and Kiro share files with user content; their dedicated
         // blocks below remove only sqz's parts.
         if config.tool_name == "Zed" || config.tool_name == "Kiro" {
+            continue;
+        }
+        // Copilot CLI: user-level sqz-owned hook file.
+        if config.tool_name == "Copilot CLI" {
+            match sqz_engine::remove_copilot_hook() {
+                Ok(true) => println!(
+                    "[sqz] ✓ removed {}",
+                    sqz_engine::copilot_hooks_path().display()
+                ),
+                Ok(false) => {}
+                Err(e) => eprintln!("[sqz] ✗ could not remove Copilot hook: {e}"),
+            }
             continue;
         }
         // Windsurf: remove the rules file plus a legacy sqz-authored
@@ -3060,6 +3098,7 @@ fn cmd_hook(tool: &str) {
         "gemini" => sqz_engine::process_hook_gemini(&input),
         "windsurf" => sqz_engine::process_hook_windsurf(&input),
         "kiro" => sqz_engine::process_hook_kiro(&input),
+        "copilot" => sqz_engine::process_hook_copilot(&input),
         // "claude" and any other tool use the default Claude Code format
         _ => sqz_engine::process_hook(&input),
     };
