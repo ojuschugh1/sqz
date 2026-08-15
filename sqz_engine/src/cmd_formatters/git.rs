@@ -14,52 +14,171 @@ pub fn format_git(subcmd: Option<&str>, output: &str) -> Option<String> {
     }
 }
 
-fn format_git_status(output: &str) -> String {
+/// Porcelain / short-status line: two status columns, space, path (locale-independent).
+fn is_status_porcelain_line(line: &str) -> bool {
+    let b = line.as_bytes();
+    if line.len() < 4 || b[2] != b' ' {
+        return false;
+    }
+    let valid = |c: u8| matches!(c, b' ' | b'?' | b'M' | b'A' | b'D' | b'R' | b'C' | b'U');
+    valid(b[0]) && valid(b[1]) && !line[3..].trim().is_empty()
+}
+
+fn starts_with_any(s: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|p| s.starts_with(p))
+}
+
+const STAGED_NEW_PREFIXES: &[&str] = &[
+    "new file:",
+    "nuovo file:",       // it
+    "neue Datei:",       // de
+    "nouveau fichier:",  // fr
+    "nuevo archivo:",    // es
+    "novo arquivo:",     // pt
+];
+
+const MODIFIED_PREFIXES: &[&str] = &[
+    "modified:",
+    "modificato:",   // it
+    "modifiziert:",  // de
+    "modifié:",      // fr
+    "modificado:",   // es/pt
+];
+
+const DELETED_PREFIXES: &[&str] = &[
+    "deleted:",
+    "eliminato:",  // it
+    "gelöscht:",   // de
+    "supprimé:",   // fr
+    "eliminado:",  // es/pt
+];
+
+const UNTRACKED_SECTION_HEADERS: &[&str] = &[
+    "Untracked files:",
+    "File non tracciati:",           // it
+    "Unversionierte Dateien:",       // de
+    "Fichiers non suivis:",          // fr
+    "Archivos sin seguimiento:",     // es
+    "Arquivos não rastreados:",      // pt
+];
+
+const CLEAN_MARKERS: &[&str] = &[
+    "nothing to commit",
+    "working tree clean",
+    "non c'è nulla di cui eseguire il commit", // it
+    "albero di lavoro pulito",                 // it
+    "nichts zu committen",                     // de
+    "rien à valider",                          // fr
+    "nada para hacer commit",                  // es
+];
+
+fn parse_porcelain_status(output: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut staged = Vec::new();
     let mut modified = Vec::new();
     let mut untracked = Vec::new();
 
     for line in output.lines() {
+        if !is_status_porcelain_line(line) {
+            continue;
+        }
+        let index = line.as_bytes()[0];
+        let worktree = line.as_bytes()[1];
+        let path = line[3..].trim().to_string();
+
+        if index == b'?' && worktree == b'?' {
+            untracked.push(path);
+        } else if index != b' ' {
+            staged.push(format!("{} {}", index as char, path));
+        } else if worktree != b' ' {
+            modified.push(format!("{} {}", worktree as char, path));
+        }
+    }
+
+    (staged, modified, untracked)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusSection {
+    None,
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
+fn classify_section_header(line: &str) -> Option<StatusSection> {
+    let trimmed = line.trim();
+    if starts_with_any(trimmed, UNTRACKED_SECTION_HEADERS) {
+        return Some(StatusSection::Untracked);
+    }
+    if !trimmed.ends_with(':') || line.starts_with('\t') {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("not staged")
+        || lower.contains("non verrà")
+        || lower.contains("nicht zum commit")
+        || lower.contains("pas indexées")
+        || lower.contains("sin añadir")
+    {
+        return Some(StatusSection::Unstaged);
+    }
+    if lower.contains("to be committed")
+        || lower.contains("verrà eseguito")
+        || lower.contains("zum commit vorgemerkte")
+        || lower.contains("seront validées")
+        || lower.contains("serán confirmados")
+    {
+        return Some(StatusSection::Staged);
+    }
+    None
+}
+
+fn parse_long_status(output: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut staged = Vec::new();
+    let mut modified = Vec::new();
+    let mut untracked = Vec::new();
+    let mut section = StatusSection::None;
+
+    for line in output.lines() {
+        if let Some(next) = classify_section_header(line) {
+            section = next;
+            continue;
+        }
+
+        if !line.starts_with('\t') || line.trim().starts_with("(use") {
+            continue;
+        }
+
         let trimmed = line.trim();
-        if trimmed.starts_with("new file:") || trimmed.starts_with("modified:") && line.starts_with('\t') {
+        if starts_with_any(trimmed, STAGED_NEW_PREFIXES) {
             staged.push(trimmed.to_string());
-        } else if trimmed.starts_with("modified:") || trimmed.starts_with("deleted:") {
-            modified.push(trimmed.to_string());
-        } else if line.starts_with("\t") && !trimmed.starts_with("(use") {
-            if output[..output.find(line).unwrap_or(0)].contains("Untracked files:") {
-                untracked.push(trimmed.to_string());
+        } else if section == StatusSection::Untracked {
+            untracked.push(trimmed.to_string());
+        } else if starts_with_any(trimmed, MODIFIED_PREFIXES) || starts_with_any(trimmed, DELETED_PREFIXES) {
+            if section == StatusSection::Staged {
+                staged.push(trimmed.to_string());
+            } else {
+                modified.push(trimmed.to_string());
             }
         }
     }
 
-    // Also handle short-format status (git status -s)
-    if staged.is_empty() && modified.is_empty() && untracked.is_empty() {
-        let mut short_staged = Vec::new();
-        let mut short_modified = Vec::new();
-        let mut short_untracked = Vec::new();
-        for line in output.lines() {
-            if line.len() < 3 { continue; }
-            let (idx, rest) = (line.get(..2), line.get(3..));
-            if let (Some(idx), Some(rest)) = (idx, rest) {
-                match idx.trim() {
-                    "M" | "A" | "D" | "R" => short_staged.push(format!("{} {}", idx.trim(), rest)),
-                    "??" => short_untracked.push(rest.to_string()),
-                    _ if idx.contains('M') => short_modified.push(format!("M {}", rest)),
-                    _ => {}
-                }
-            }
-        }
-        if !short_staged.is_empty() || !short_modified.is_empty() || !short_untracked.is_empty() {
-            staged = short_staged;
-            modified = short_modified;
-            untracked = short_untracked;
-        }
+    (staged, modified, untracked)
+}
+
+
+fn format_git_status(output: &str) -> String {
+    if CLEAN_MARKERS.iter().any(|m| output.contains(m)) {
+        return "clean".to_string();
     }
 
+    let (staged, modified, untracked) = if output.lines().any(is_status_porcelain_line) {
+        parse_porcelain_status(output)
+    } else {
+        parse_long_status(output)
+    };
+
     if staged.is_empty() && modified.is_empty() && untracked.is_empty() {
-        if output.contains("nothing to commit") {
-            return "clean".to_string();
-        }
         return output.to_string();
     }
 
@@ -72,8 +191,12 @@ fn format_git_status(output: &str) -> String {
     }
     if !untracked.is_empty() {
         if untracked.len() > 5 {
-            result.push(format!("untracked({}): {}, ...+{}", untracked.len(),
-                untracked[..3].join(", "), untracked.len() - 3));
+            result.push(format!(
+                "untracked({}): {}, ...+{}",
+                untracked.len(),
+                untracked[..3].join(", "),
+                untracked.len() - 3
+            ));
         } else {
             result.push(format!("untracked({}): {}", untracked.len(), untracked.join(", ")));
         }
@@ -303,6 +426,64 @@ mod tests {
     fn test_git_status_clean() {
         let output = "On branch main\nnothing to commit, working tree clean\n";
         assert_eq!(format_git_status(output), "clean");
+    }
+
+    #[test]
+    fn test_git_status_italian_staged() {
+        let output = "Sul branch master\n\nNon ci sono ancora commit\n\n\
+Modifiche di cui verrà eseguito il commit:\n\
+  (usa \"git rm --cached <file>...\" per rimuovere gli elementi dall'area di staging)\n\
+\tnuovo file:             file1.txt\n\
+\tnuovo file:             file2.txt\n";
+        let result = format_git_status(output);
+        assert!(result.contains("staged(2)"));
+        assert!(result.contains("file1.txt"));
+        assert!(result.contains("file2.txt"));
+        assert!(!result.contains("M ifiche"));
+    }
+
+    #[test]
+    fn test_git_status_italian_header_not_corrupted() {
+        let output = "Sul branch master\n\nModifiche di cui verrà eseguito il commit:\n";
+        let result = format_git_status(output);
+        assert_eq!(result, output);
+        assert!(!result.contains("modified("));
+    }
+
+    #[test]
+    fn test_git_status_porcelain() {
+        let output = "A  file1.txt\nA  file2.txt\n";
+        let result = format_git_status(output);
+        assert!(result.contains("staged(2)"));
+        assert!(result.contains("file1.txt"));
+    }
+
+    #[test]
+    fn test_git_status_short_format() {
+        let output = "M  src/main.rs\n?? new.txt\n";
+        let result = format_git_status(output);
+        assert!(result.contains("staged(1)"));
+        assert!(result.contains("untracked(1)"));
+    }
+
+    #[test]
+    fn test_git_status_english_staged() {
+        let output = "On branch main\n\nChanges to be committed:\n\
+  (use \"git restore --staged <file>...\" to unstage)\n\
+\tnew file:   README.md\n";
+        let result = format_git_status(output);
+        assert!(result.contains("staged(1)"));
+        assert!(result.contains("README.md"));
+    }
+
+    #[test]
+    fn test_git_status_english_unstaged_modified() {
+        let output = "On branch main\n\nChanges not staged for commit:\n\
+  (use \"git add <file>...\" to update what will be committed)\n\
+\tmodified:   README.md\n";
+        let result = format_git_status(output);
+        assert!(result.contains("modified(1)"));
+        assert!(result.contains("README.md"));
     }
 
     #[test]
