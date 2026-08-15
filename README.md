@@ -279,7 +279,7 @@ sqz discover                  # Find missed savings
 sqz resume                    # Re-inject session context after compaction
 sqz vizit                     # Live terminal dashboard (like htop for AI agents)
 sqz hook claude               # Process a PreToolUse hook (Claude Code)
-sqz hook kiro                 # Process a PreToolUse hook (Kiro)
+sqz hook kiro                 # Legacy; Kiro now uses steering + MCP (sqz init)
 sqz print-opencode-plugin     # Print OpenCode plugin TS for manual install
 sqz proxy --port 8080         # API proxy (compresses full request payloads)
 ```

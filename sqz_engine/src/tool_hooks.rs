@@ -590,26 +590,14 @@ not on PATH, run commands normally.
             ),
             scope: HookScope::Project,
         },
-        // Kiro (IDE and CLI) — uses .kiro/hooks/ directory with JSON hook files.
-        // The hook intercepts shell tool calls and pipes output through sqz.
+        // Kiro — steering file + workspace MCP registration. Kiro's
+        // PreToolUse hooks can't rewrite tool input, so the old hook-based
+        // integration never worked in Kiro chat; the real install goes
+        // through crate::kiro_integration.
         ToolHookConfig {
             tool_name: "Kiro".to_string(),
-            config_path: PathBuf::from(".kiro/hooks/sqz-compress.json"),
-            config_content: format!(
-                r#"{{
-  "name": "sqz compress",
-  "version": "1.0.0",
-  "description": "Compress shell command output through sqz for token savings",
-  "when": {{
-    "type": "preToolUse",
-    "toolTypes": ["shell"]
-  }},
-  "then": {{
-    "type": "runCommand",
-    "command": "{sqz_path} hook kiro"
-  }}
-}}"#
-            ),
+            config_path: PathBuf::from(".kiro/steering/sqz.md"),
+            config_content: crate::kiro_integration::kiro_steering_content(sqz_path_raw),
             scope: HookScope::Project,
         },
         // OpenCode — TypeScript plugin at ~/.config/opencode/plugins/sqz.ts
@@ -985,6 +973,24 @@ pub fn install_tool_hooks_scoped_filtered(
                 && !installed.iter().any(|n| n == "Codex")
             {
                 installed.push("Codex".to_string());
+            }
+            continue;
+        }
+
+        // Kiro: steering file + project MCP config, plus cleanup of the
+        // legacy hook file that Kiro never recognized.
+        if config.tool_name == "Kiro" {
+            let _ = crate::kiro_integration::remove_kiro_legacy_hook(project_dir);
+            let steering_changed =
+                crate::kiro_integration::install_kiro_steering(project_dir, sqz_path)
+                    .unwrap_or(false);
+            let mcp_changed = matches!(
+                crate::kiro_integration::install_kiro_mcp_config(project_dir),
+                Ok(crate::kiro_integration::KiroMcpInstall::Created)
+                    | Ok(crate::kiro_integration::KiroMcpInstall::Merged)
+            );
+            if (steering_changed || mcp_changed) && !installed.iter().any(|n| n == "Kiro") {
+                installed.push("Kiro".to_string());
             }
             continue;
         }

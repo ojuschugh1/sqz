@@ -629,6 +629,56 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             continue;
         }
 
+        // Kiro: steering file + project MCP config + legacy hook cleanup.
+        if config.tool_name == "Kiro" {
+            let steering = sqz_engine::kiro_steering_path(&project_dir);
+            let steering_current = steering.exists()
+                && std::fs::read_to_string(&steering)
+                    .map(|s| s == sqz_engine::kiro_integration::kiro_steering_content(&sqz_path))
+                    .unwrap_or(false);
+            if !steering_current {
+                let user_owned = steering.exists()
+                    && std::fs::read_to_string(&steering)
+                        .map(|s| !s.contains("sqz-kiro-steering"))
+                        .unwrap_or(false);
+                if !user_owned {
+                    plan.push((
+                        steering.display().to_string(),
+                        "Kiro steering file".to_string(),
+                        !steering.exists(),
+                    ));
+                }
+            }
+            let mcp = sqz_engine::kiro_mcp_path(&project_dir);
+            let mcp_has_sqz = mcp.exists()
+                && std::fs::read_to_string(&mcp)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                    .and_then(|v| v.get("mcpServers")?.get("sqz").map(|_| ()))
+                    .is_some();
+            if !mcp_has_sqz {
+                plan.push((
+                    mcp.display().to_string(),
+                    if mcp.exists() {
+                        "Kiro MCP registration (merge mcpServers.sqz)".to_string()
+                    } else {
+                        "Kiro MCP registration".to_string()
+                    },
+                    !mcp.exists(),
+                ));
+            }
+            let legacy = sqz_engine::kiro_legacy_hook_path(&project_dir);
+            if legacy.exists() {
+                plan.push((
+                    legacy.display().to_string(),
+                    "remove legacy Kiro hook (never worked; Kiro can't rewrite tool input)"
+                        .to_string(),
+                    false,
+                ));
+            }
+            continue;
+        }
+
         // Zed (issue #38): guidance file + user-level settings.json
         // MCP registration. Announce what will actually happen — in
         // particular, a JSONC settings file will NOT be edited; the
@@ -1537,6 +1587,11 @@ fn cmd_uninstall(skip_confirm: bool) {
         if config.tool_name == "Zed" {
             continue;
         }
+        // Kiro: steering file is only removed when sqz-managed, and the
+        // MCP entry is removed surgically. Handled further down.
+        if config.tool_name == "Kiro" {
+            continue;
+        }
         let full = project_dir.join(&config.config_path);
         if full.exists() {
             files_to_remove.push((full.display().to_string(), true));
@@ -1607,6 +1662,31 @@ fn cmd_uninstall(skip_confirm: bool) {
             format!("{} (context_servers.sqz only)", zed_settings.display()),
             true,
         ));
+    }
+
+    // Kiro steering file, project MCP entry, and the legacy hook file.
+    let kiro_steering = sqz_engine::kiro_steering_path(&project_dir);
+    let kiro_steering_managed = kiro_steering.exists()
+        && std::fs::read_to_string(&kiro_steering)
+            .map(|s| s.contains("sqz-kiro-steering"))
+            .unwrap_or(false);
+    if kiro_steering_managed {
+        files_to_remove.push((kiro_steering.display().to_string(), true));
+    }
+    let kiro_mcp = sqz_engine::kiro_mcp_path(&project_dir);
+    let kiro_mcp_has_sqz = kiro_mcp.exists()
+        && std::fs::read_to_string(&kiro_mcp)
+            .map(|s| s.contains("\"sqz\""))
+            .unwrap_or(false);
+    if kiro_mcp_has_sqz {
+        files_to_remove.push((
+            format!("{} (mcpServers.sqz only)", kiro_mcp.display()),
+            true,
+        ));
+    }
+    let kiro_legacy = sqz_engine::kiro_legacy_hook_path(&project_dir);
+    if kiro_legacy.exists() {
+        files_to_remove.push((kiro_legacy.display().to_string(), true));
     }
 
     // Claude Code user-level ~/.claude/settings.json: surgically remove
@@ -1833,6 +1913,36 @@ fn cmd_uninstall(skip_confirm: bool) {
                 "[sqz] ✗ could not clean up {}: {e}",
                 zed_settings.display()
             ),
+        }
+    }
+
+    if kiro_steering_managed {
+        match sqz_engine::remove_kiro_steering(&project_dir) {
+            Ok(true) => println!("[sqz] ✓ removed {}", kiro_steering.display()),
+            Ok(false) => {}
+            Err(e) => eprintln!("[sqz] ✗ could not clean up {}: {e}", kiro_steering.display()),
+        }
+    }
+    if kiro_mcp_has_sqz {
+        match sqz_engine::remove_kiro_mcp_config(&project_dir) {
+            Ok(sqz_engine::KiroMcpRemove::Removed) => {
+                println!("[sqz] ✓ removed mcpServers.sqz from {}", kiro_mcp.display());
+            }
+            Ok(sqz_engine::KiroMcpRemove::SkippedUnparseable) => {
+                println!(
+                    "[sqz] ! {} is not valid JSON; remove the \"sqz\" entry by hand.",
+                    kiro_mcp.display()
+                );
+            }
+            Ok(sqz_engine::KiroMcpRemove::NotPresent) => {}
+            Err(e) => eprintln!("[sqz] ✗ could not clean up {}: {e}", kiro_mcp.display()),
+        }
+    }
+    if kiro_legacy.exists() {
+        match sqz_engine::remove_kiro_legacy_hook(&project_dir) {
+            Ok(true) => println!("[sqz] ✓ removed {}", kiro_legacy.display()),
+            Ok(false) => {}
+            Err(e) => eprintln!("[sqz] ✗ could not clean up {}: {e}", kiro_legacy.display()),
         }
     }
 

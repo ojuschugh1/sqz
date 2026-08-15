@@ -108,6 +108,7 @@ pub mod regret_tracker;
 pub mod sandbox_executor;
 pub mod session_continuity;
 pub mod session_store;
+pub mod kiro_integration;
 pub mod stages;
 pub mod structural_summary;
 pub mod text_boundary;
@@ -169,6 +170,11 @@ pub use zed_integration::{
     install_zed_guidance, install_zed_mcp_config, remove_zed_guidance,
     remove_zed_mcp_config, zed_guidance_block, zed_guidance_target,
     zed_mcp_snippet, zed_settings_path, ZedMcpInstall, ZedMcpRemove,
+};
+pub use kiro_integration::{
+    install_kiro_mcp_config, install_kiro_steering, kiro_legacy_hook_path,
+    kiro_mcp_path, kiro_steering_path, remove_kiro_legacy_hook,
+    remove_kiro_mcp_config, remove_kiro_steering, KiroMcpInstall, KiroMcpRemove,
 };
 pub use token_pruner::{TokenPruner, PrunerConfig, PruneResult};
 pub use tool_selector::{ToolDefinition, ToolSelector};
