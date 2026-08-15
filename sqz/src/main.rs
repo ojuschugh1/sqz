@@ -124,6 +124,18 @@ enum Command {
         /// wins if both are present.
         #[arg(long, value_name = "NAME")]
         cmd: Option<String>,
+        /// Disable n-gram phrase abbreviation (the `«A1»` legend rewrite).
+        ///
+        /// Abbreviation is ON by default. Turn it off when the output
+        /// contains identifiers an agent will copy-paste verbatim — SHAs,
+        /// file paths, URLs — because the abbreviator keeps only the first
+        /// occurrence of a repeated phrase and rewrites the rest to `«A1»`,
+        /// silently corrupting any SHA/path that lives inside it. Also
+        /// honoured via `SQZ_NO_ABBREV=1` in the environment (parallel to
+        /// `--no-cache` / `SQZ_NO_DEDUP`), which is what the shell hook
+        /// uses so the agent can flip the switch without re-invoking sqz.
+        #[arg(long)]
+        no_abbrev: bool,
     },
 
     /// Expand a `§ref:PREFIX§` dedup token back to the content it points at.
@@ -402,8 +414,8 @@ fn main() {
         }
 
         Some(Command::Init { yes, global, only, skip }) => cmd_init(yes, global, only, skip),
-        Some(Command::Compress { text, mode, verify, no_cache, cmd }) => {
-            cmd_compress(text, &mode, verify, no_cache, cmd)
+        Some(Command::Compress { text, mode, verify, no_cache, cmd, no_abbrev }) => {
+            cmd_compress(text, &mode, verify, no_cache, cmd, no_abbrev)
         }
         Some(Command::Expand { prefix }) => cmd_expand(&prefix),
         Some(Command::Export { session_id }) => cmd_export(&session_id),
@@ -750,7 +762,7 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
 /// and cmd.exe). Legacy `SQZ_CMD=NAME` env var is still honoured for
 /// backward compatibility with the POSIX shell hook scripts. `--cmd`
 /// wins if both are set.
-fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: bool, cmd: Option<String>) {
+fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: bool, cmd: Option<String>, no_abbrev: bool) {
     let is_stdin = text.is_none();
     let input = match text {
         Some(t) => t,
@@ -765,12 +777,15 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
         }
     };
 
-    // Merge CLI flag with env var — either one turns off dedup. Env var
-    // wins if the CLI flag wasn't passed so shell-hook callers can set
-    // SQZ_NO_DEDUP=1 in their shell config without editing any commands.
+    // Merge CLI flags with env vars — for each switch, either source turns
+    // it on. This lets shell-hook callers set SQZ_NO_DEDUP=1 / SQZ_NO_ABBREV=1
+    // in their shell config without editing any commands, while an explicit
+    // CLI flag still works on its own. `abbreviate` defaults ON, so we only
+    // flip it off when --no-abbrev OR SQZ_NO_ABBREV was given.
     let env_opts = cli_proxy::InterceptOptions::from_env();
     let opts = cli_proxy::InterceptOptions {
         no_cache: no_cache || env_opts.no_cache,
+        abbreviate: !no_abbrev && env_opts.abbreviate,
     };
 
     // When reading from stdin in auto mode (the shell hook path), route

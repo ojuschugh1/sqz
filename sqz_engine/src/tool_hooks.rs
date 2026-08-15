@@ -370,7 +370,8 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
 
 If you see a `§ref:HASH§` token in tool output and can't parse it, or if
 compressed output is making it harder to work (loops, repeated tiny
-requests), you have three ways out:
+requests), or if a `«A1»` abbreviation symbol has replaced a value you
+need verbatim (a SHA, path, or URL), you have these ways out:
 
 - **`{sqz_path_raw} expand <prefix>`** — resolve a ref back to the
   original bytes. Accepts the bare hex prefix (`sqz expand a1b2c3d4`)
@@ -380,6 +381,11 @@ requests), you have three ways out:
   Strictly more tokens, strictly less ambiguous.
 - **`--no-cache`** — the same opt-out as a CLI flag:
   `git status 2>&1 | sqz compress --no-cache`.
+- **`SQZ_NO_ABBREV=1`** (or **`--no-abbrev`**) — disable n-gram phrase
+  abbreviation, which replaces repeated phrases with `«A1»` symbols.
+  Use this for output full of SHAs/paths/URLs you'll copy-paste, since
+  abbreviation keeps only the first occurrence of a repeated phrase:
+  `SQZ_NO_ABBREV=1 git log 2>&1 | sqz compress`.
 
 Use these when you genuinely need raw data. The default compressed
 path is still what you want for most output."#,

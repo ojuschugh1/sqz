@@ -85,32 +85,61 @@ struct CacheEntry {
 
 /// Per-call options for [`CliProxy::intercept_output_with_options`].
 ///
-/// Designed to grow: today it only carries `no_cache`, but future flags
-/// (think: `disable_abbreviator`, `plain_text_only`, `rate_limit_refs`)
-/// will live here too. Builder-lite pattern so callers that want the
-/// default path stay on the short-form `intercept_output`.
-#[derive(Debug, Clone, Copy, Default)]
+/// Builder-lite pattern so callers that want the default path stay on the
+/// short-form `intercept_output`. Note the [`Default`] impl is hand-written
+/// (not derived) because one field — `abbreviate` — defaults to `true`,
+/// which a derive could not express.
+#[derive(Debug, Clone, Copy)]
 pub struct InterceptOptions {
     /// Skip both L1 and L2 dedup lookups. The compression pipeline still
     /// runs; the 13-token `§ref:…§` shortcut never fires. Useful for
     /// models that can't parse inline refs (reported for GLM 5.1 on
     /// Synthetic).
     pub no_cache: bool,
+    /// Apply n-gram phrase abbreviation to the generic-compressed output
+    /// (replace recurring multi-word phrases with `«A1»` symbols + a
+    /// legend). **Defaults to `true`** to preserve historical behaviour.
+    ///
+    /// Turn this OFF (`--no-abbrev`, or `SQZ_NO_ABBREV=1`) when the output
+    /// carries identifiers an agent will copy-paste verbatim — SHAs, file
+    /// paths, URLs. The abbreviator keeps only the FIRST occurrence of a
+    /// repeated phrase and rewrites the rest to `«A1»`; if a SHA or path
+    /// lives inside that phrase, every later reference is silently
+    /// replaced, and the next `git checkout`/`cat` on it fails. See the
+    /// regression test `abbreviator_opt_out_preserves_repeated_identifiers`.
+    pub abbreviate: bool,
+}
+
+impl Default for InterceptOptions {
+    fn default() -> Self {
+        Self {
+            no_cache: false,
+            // Default ON — matches upstream behaviour. Opt out per-call or
+            // via SQZ_NO_ABBREV=1 when output contains paste-critical tokens.
+            abbreviate: true,
+        }
+    }
 }
 
 impl InterceptOptions {
     /// Build an `InterceptOptions` reflecting the current environment.
     ///
-    /// Today this only looks at `SQZ_NO_DEDUP`. Any value other than "0"
-    /// or an empty string flips `no_cache` on — matches the pattern
-    /// other sqz env vars use. Leaves the door open to more env vars
-    /// later (e.g. `SQZ_MODEL_PROFILE=conservative` in a follow-up).
+    /// Reads two env vars, both following the same "any non-empty, non-`0`
+    /// value is true" rule the rest of sqz uses:
+    ///   * `SQZ_NO_DEDUP=1`  → `no_cache = true`
+    ///   * `SQZ_NO_ABBREV=1` → `abbreviate = false`
+    ///
+    /// Everything else keeps its [`Default`] (dedup on, abbreviation on),
+    /// so a bare environment yields the historical behaviour unchanged.
     pub fn from_env() -> Self {
-        let no_cache = match std::env::var("SQZ_NO_DEDUP") {
+        let env_true = |name: &str| match std::env::var(name) {
             Ok(v) => !v.is_empty() && v != "0",
             Err(_) => false,
         };
-        Self { no_cache }
+        Self {
+            no_cache: env_true("SQZ_NO_DEDUP"),
+            abbreviate: !env_true("SQZ_NO_ABBREV"),
+        }
     }
 }
 
@@ -122,6 +151,7 @@ pub struct CliProxy {
     /// Dependency mapper for predictive pre-caching (in-memory, rebuilt per session).
     dep_mapper: std::cell::RefCell<DependencyMapper>,
     /// Session-level n-gram abbreviator for recurring phrase compression.
+    /// Only applied when `InterceptOptions::abbreviate` is set (the default).
     abbreviator: std::cell::RefCell<NgramAbbreviator>,
 }
 
@@ -249,8 +279,28 @@ impl CliProxy {
                 self.l1_cache.borrow_mut().insert(fast_hash);
                 self.log_compression(cmd, tokens_original, tokens_compressed);
 
-                // Technique 3: N-gram abbreviation — observe output for phrase
-                // frequency tracking, then apply abbreviations to the result
+                // N-gram abbreviation (opt-out, default ON).
+                //
+                // The abbreviator replaces every-occurrence-after-the-first of a
+                // repeated multi-word phrase with a «A1» symbol + a legend. This
+                // saves tokens on genuinely repetitive prose, but it is LOSSY for
+                // identifiers: when a SHA, path, or URL lives inside the repeated
+                // phrase (build logs, lint sweeps, `git show $SHA:path` fan-outs),
+                // every reference after the first becomes «A1». An agent that then
+                // copy-pastes from a later line gets the symbol, not the value —
+                // and the next `git checkout «A1»` / `cat «A1»` fails silently.
+                //
+                // We keep the historical default (abbreviate = true) so behaviour
+                // is unchanged out of the box, but callers can opt out per-call
+                // (`InterceptOptions { abbreviate: false, .. }`), via the
+                // `--no-abbrev` CLI flag, or via `SQZ_NO_ABBREV=1` in the shell
+                // hook environment. See the regression tests
+                // `abbreviator_opt_out_preserves_repeated_identifiers` and
+                // `abbreviator_default_on_still_abbreviates` below.
+                if !opts.abbreviate {
+                    return self.apply_context_refs(&compressed.data);
+                }
+
                 let mut abbr = self.abbreviator.borrow_mut();
                 abbr.observe(&compressed.data);
                 let abbreviated = match abbr.abbreviate(&compressed.data) {
@@ -697,6 +747,106 @@ mod tests {
         if !result.starts_with("§ref:") {
             assert!(result.contains("implementation"), "{}", result);
         }
+    }
+
+    // ── n-gram abbreviator: opt-out behaviour ─────────────────────────────
+    //
+    // The abbreviator replaces repeated multi-word phrases with «A1» symbols,
+    // keeping only the first occurrence intact. When a SHA or path lives
+    // inside the repeated phrase, every later line loses it — an agent
+    // copy-pasting from a later line gets «A1» instead of the real value,
+    // failing the next command (`git checkout «A1»`, `cat «A1»`).
+    //
+    // Abbreviation is ON by default (matches upstream). These two tests pin
+    // both halves of the contract: the opt-out path is lossless, and the
+    // default path still abbreviates. Mirrors the shell repro at
+    // /tmp/sqzrepro/repro.sh.
+
+    /// Build a unique 40-hex "SHA" from pid + nanos. Uniqueness matters:
+    /// a fixed SHA could hit a stale §ref:…§ in the shared sessions.db and
+    /// make the test pass vacuously — that's how the original regression
+    /// nearly slipped through.
+    fn unique_sha() -> String {
+        let seed = format!(
+            "{:016x}{:032x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        let sha: String = seed.chars().filter(|c| c.is_ascii_hexdigit()).take(40).collect();
+        assert_eq!(sha.len(), 40, "test seed must yield a 40-char hex SHA");
+        sha
+    }
+
+    /// With abbreviation opted out (`SQZ_NO_ABBREV` equivalent), a SHA that
+    /// repeats inside an identical phrase must survive on EVERY line — never
+    /// collapsed to «A1». This is the fix for the corruption bug.
+    #[test]
+    fn abbreviator_opt_out_preserves_repeated_identifiers() {
+        let proxy = CliProxy::new().expect("engine init");
+        let sha = unique_sha();
+
+        let output = format!(
+            "Resolving dependencies for revision {sha} in module-a\n\
+             Resolving dependencies for revision {sha} in module-b\n\
+             Resolving dependencies for revision {sha} in module-c\n\
+             Resolving dependencies for revision {sha} in module-d\n"
+        );
+
+        let opts = InterceptOptions { no_cache: false, abbreviate: false };
+        let result = proxy.intercept_output_with_options("build", &output, opts);
+
+        // Unique content ⇒ first intercept is a cache MISS, so no §ref.
+        assert!(
+            !result.starts_with("§ref:"),
+            "unexpected dedup ref for unique content — test guard broken:\n{result}"
+        );
+        // No abbreviation markers when opted out.
+        assert!(
+            !result.contains("«A"),
+            "abbreviation symbol leaked despite opt-out:\n{result}"
+        );
+        assert!(
+            !result.contains("[Abbreviations]"),
+            "abbreviation legend present despite opt-out:\n{result}"
+        );
+        // The SHA survives on every line, not just the first.
+        let sha_count = result.matches(sha.as_str()).count();
+        assert!(
+            sha_count >= 4,
+            "SHA must appear on all 4 lines, found {sha_count}:\n{result}"
+        );
+    }
+
+    /// The default (abbreviation ON) preserves upstream behaviour: a phrase
+    /// repeated enough times still gets collapsed to a «A1» legend. This
+    /// guards against the opt-out plumbing accidentally disabling
+    /// abbreviation for everyone.
+    #[test]
+    fn abbreviator_default_on_still_abbreviates() {
+        let proxy = CliProxy::new().expect("engine init");
+        // Unique tag keeps this a cache miss; the repeated long phrase is
+        // what the abbreviator should fold.
+        let tag = unique_sha();
+        let phrase = format!("recurring diagnostic phrase {tag} marker");
+        let output = format!("{phrase} one\n{phrase} two\n{phrase} three\n{phrase} four\n");
+
+        // Explicit default — abbreviation enabled.
+        let opts = InterceptOptions::default();
+        assert!(opts.abbreviate, "abbreviate must default to true");
+        let result = proxy.intercept_output_with_options("build", &output, opts);
+
+        // A dedup ref would be a (lossless) correct answer too — only assert
+        // the abbreviation contract when we actually got compressed text.
+        if result.starts_with("§ref:") {
+            return;
+        }
+        assert!(
+            result.contains("[Abbreviations]") && result.contains("«A"),
+            "default path should still abbreviate a 4×-repeated phrase:\n{result}"
+        );
     }
 
     #[test]

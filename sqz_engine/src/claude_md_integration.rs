@@ -144,6 +144,12 @@ content it points at, resolve it. Three equivalent ways:
 - To get uncompressed output for one command: prefix it with
   `SQZ_NO_DEDUP=1` (e.g. `SQZ_NO_DEDUP=1 git log | sqz compress`).
 
+If you see a `«A1»` abbreviation symbol where a SHA, path, or URL
+should be, n-gram phrase abbreviation collapsed a repeated phrase and
+kept only its first occurrence. Disable it for that command with
+`SQZ_NO_ABBREV=1` (or the `--no-abbrev` flag):
+`SQZ_NO_ABBREV=1 git log | sqz compress`.
+
 If the compressed output is actively making the task harder (looping
 on refs, small retries replacing one big read), call the `passthrough`
 MCP tool to get raw text.

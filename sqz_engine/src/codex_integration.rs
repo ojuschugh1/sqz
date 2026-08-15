@@ -139,6 +139,11 @@ big request, use one of these:
   the full compressed output with no `§ref:…§` tokens.
 - **`--no-cache`** — same opt-out as a CLI flag:
   `git status 2>&1 | sqz compress --no-cache`.
+- **`SQZ_NO_ABBREV=1`** (or **`--no-abbrev`**) — disable n-gram phrase
+  abbreviation, which rewrites repeated phrases to `«A1»` symbols and
+  keeps only the first occurrence. Use it when output is full of
+  SHAs/paths/URLs you'll copy-paste verbatim:
+  `SQZ_NO_ABBREV=1 git log 2>&1 | sqz compress`.
 
 If you're using the MCP server, the `passthrough` tool returns raw
 text and the `expand` tool resolves refs — call them when you need
