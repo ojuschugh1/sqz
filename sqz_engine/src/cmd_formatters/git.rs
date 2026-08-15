@@ -24,52 +24,52 @@ fn is_status_porcelain_line(line: &str) -> bool {
     valid(b[0]) && valid(b[1]) && !line[3..].trim().is_empty()
 }
 
-fn starts_with_any(s: &str, prefixes: &[&str]) -> bool {
-    prefixes.iter().any(|p| s.starts_with(p))
-}
+// Localized section-header markers, verified against git's own translation
+// files (po/it.po, po/de.po, po/fr.po, po/es.po, po/pt_PT.po on git master).
+// Matched case-insensitively via `contains` on the ASCII-lowercased header.
+// Unstaged markers are checked BEFORE staged ones: French "…qui ne seront pas
+// validées :" contains the staged marker "seront validées" as a substring.
+//
+// Only the section headers need translation. File entries inside a section
+// are classified by the section alone — the localized label ("nuovo file:",
+// "geändert:", "renommé :", …) is kept verbatim in the summary, so we never
+// need a per-label table and unknown labels can't be silently dropped.
 
-const STAGED_NEW_PREFIXES: &[&str] = &[
-    "new file:",
-    "nuovo file:",       // it
-    "neue Datei:",       // de
-    "nouveau fichier:",  // fr
-    "nuevo archivo:",    // es
-    "novo arquivo:",     // pt
+const UNSTAGED_HEADER_MARKERS: &[&str] = &[
+    "not staged",                    // en: Changes not staged for commit:
+    "non nell'area di staging",      // it: Modifiche non nell'area di staging per il commit:
+    "nicht zum commit vorgemerkt",   // de: Änderungen, die nicht zum Commit vorgemerkt sind:
+    "ne seront pas validées",        // fr: Modifications qui ne seront pas validées :
+    "no rastreados para el commit",  // es: Cambios no rastreados para el commit:
+    "por encenar para memória",      // pt_PT: Alterações por encenar para memória:
 ];
 
-const MODIFIED_PREFIXES: &[&str] = &[
-    "modified:",
-    "modificato:",   // it
-    "modifiziert:",  // de
-    "modifié:",      // fr
-    "modificado:",   // es/pt
+const STAGED_HEADER_MARKERS: &[&str] = &[
+    "to be committed",               // en: Changes to be committed:
+    "di cui verrà eseguito il commit", // it: Modifiche di cui verrà eseguito il commit:
+    "zum commit vorgemerkte",        // de: Zum Commit vorgemerkte Änderungen:
+    "seront validées",               // fr: Modifications qui seront validées :
+    "a ser confirmados",             // es: Cambios a ser confirmados:
+    "para serem memorizadas",        // pt_PT: Alterações para serem memorizadas:
 ];
 
-const DELETED_PREFIXES: &[&str] = &[
-    "deleted:",
-    "eliminato:",  // it
-    "gelöscht:",   // de
-    "supprimé:",   // fr
-    "eliminado:",  // es/pt
-];
-
-const UNTRACKED_SECTION_HEADERS: &[&str] = &[
-    "Untracked files:",
-    "File non tracciati:",           // it
-    "Unversionierte Dateien:",       // de
-    "Fichiers non suivis:",          // fr
-    "Archivos sin seguimiento:",     // es
-    "Arquivos não rastreados:",      // pt
+const UNTRACKED_HEADER_PREFIXES: &[&str] = &[
+    "Untracked files",               // en
+    "File non tracciati",            // it
+    "Unversionierte Dateien",        // de
+    "Fichiers non suivis",           // fr
+    "Archivos sin seguimiento",      // es
+    "Ficheiros desmonitorizados",    // pt_PT
 ];
 
 const CLEAN_MARKERS: &[&str] = &[
     "nothing to commit",
     "working tree clean",
-    "non c'è nulla di cui eseguire il commit", // it
-    "albero di lavoro pulito",                 // it
-    "nichts zu committen",                     // de
-    "rien à valider",                          // fr
-    "nada para hacer commit",                  // es
+    "non c'è nulla di cui eseguire il commit",  // it
+    "nichts zu committen",                       // de
+    "rien à valider",                            // fr
+    "nada para hacer commit",                    // es
+    "nada a memorizar",                          // pt_PT
 ];
 
 fn parse_porcelain_status(output: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -103,82 +103,106 @@ enum StatusSection {
     Staged,
     Unstaged,
     Untracked,
+    /// A section header we don't have translations for ("Unmerged paths:",
+    /// an unlisted locale, …). File entries under it force a raw passthrough
+    /// rather than a partial — and therefore wrong — summary.
+    Unknown,
 }
 
 fn classify_section_header(line: &str) -> Option<StatusSection> {
     let trimmed = line.trim();
-    if starts_with_any(trimmed, UNTRACKED_SECTION_HEADERS) {
+    if UNTRACKED_HEADER_PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
         return Some(StatusSection::Untracked);
     }
-    if !trimmed.ends_with(':') || line.starts_with('\t') {
+    if !trimmed.ends_with(':') {
         return None;
     }
     let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("not staged")
-        || lower.contains("non verrà")
-        || lower.contains("nicht zum commit")
-        || lower.contains("pas indexées")
-        || lower.contains("sin añadir")
-    {
+    // Unstaged first — the French staged marker is a substring of the
+    // unstaged header (see table comment above).
+    if UNSTAGED_HEADER_MARKERS.iter().any(|m| lower.contains(m)) {
         return Some(StatusSection::Unstaged);
     }
-    if lower.contains("to be committed")
-        || lower.contains("verrà eseguito")
-        || lower.contains("zum commit vorgemerkte")
-        || lower.contains("seront validées")
-        || lower.contains("serán confirmados")
-    {
+    if STAGED_HEADER_MARKERS.iter().any(|m| lower.contains(m)) {
         return Some(StatusSection::Staged);
     }
     None
 }
 
-fn parse_long_status(output: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+/// Parse localized long-format `git status`. Returns `None` when the output
+/// contains file entries we can't confidently place in a section — the
+/// caller then passes the raw output through instead of emitting a partial
+/// summary. That covers every locale git ships beyond the tables above
+/// (ru, zh_CN, ko, pl, sv, tr, uk, vi, …) as well as sections we don't
+/// summarize, like "Unmerged paths:" during a conflict.
+fn parse_long_status(output: &str) -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
     let mut staged = Vec::new();
     let mut modified = Vec::new();
     let mut untracked = Vec::new();
     let mut section = StatusSection::None;
 
     for line in output.lines() {
+        // File entries are tab-indented; hint lines ("  (use …") are
+        // space-indented; headers and prose are flush-left.
+        if let Some(rest) = line.strip_prefix('\t') {
+            let entry = rest.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            match section {
+                StatusSection::Staged => staged.push(entry.to_string()),
+                StatusSection::Unstaged => modified.push(entry.to_string()),
+                StatusSection::Untracked => untracked.push(entry.to_string()),
+                // A file entry outside any recognized section means we're
+                // looking at a locale or section we don't understand.
+                // Refuse to guess.
+                StatusSection::None | StatusSection::Unknown => return None,
+            }
+            continue;
+        }
+        // Localized hint lines: "  (usa \"git add <file>...\" …)". Git indents
+        // them with two spaces, but tolerate flush-left parenthesized lines
+        // too — skipping a hint must never end the open section.
+        if line.starts_with(' ') || line.trim_start().starts_with('(') {
+            continue;
+        }
         if let Some(next) = classify_section_header(line) {
             section = next;
-            continue;
-        }
-
-        if !line.starts_with('\t') || line.trim().starts_with("(use") {
-            continue;
-        }
-
-        let trimmed = line.trim();
-        if starts_with_any(trimmed, STAGED_NEW_PREFIXES) {
-            staged.push(trimmed.to_string());
-        } else if section == StatusSection::Untracked {
-            untracked.push(trimmed.to_string());
-        } else if starts_with_any(trimmed, MODIFIED_PREFIXES) || starts_with_any(trimmed, DELETED_PREFIXES) {
-            if section == StatusSection::Staged {
-                staged.push(trimmed.to_string());
-            } else {
-                modified.push(trimmed.to_string());
-            }
+        } else if line.trim_end().ends_with(':') {
+            // Header-shaped line we can't classify (unknown locale or an
+            // unsummarized section like "Unmerged paths:").
+            section = StatusSection::Unknown;
+        } else {
+            // Prose ("On branch main", branch-tracking info, …) ends any
+            // open section.
+            section = StatusSection::None;
         }
     }
 
-    (staged, modified, untracked)
+    Some((staged, modified, untracked))
 }
 
 
 fn format_git_status(output: &str) -> String {
-    if CLEAN_MARKERS.iter().any(|m| output.contains(m)) {
-        return "clean".to_string();
-    }
-
-    let (staged, modified, untracked) = if output.lines().any(is_status_porcelain_line) {
-        parse_porcelain_status(output)
+    let parsed = if output.lines().any(is_status_porcelain_line) {
+        Some(parse_porcelain_status(output))
     } else {
         parse_long_status(output)
     };
 
+    // Unparseable (unknown locale / unknown section with file entries):
+    // pass the raw output through rather than emit a wrong summary.
+    let Some((staged, modified, untracked)) = parsed else {
+        return output.to_string();
+    };
+
     if staged.is_empty() && modified.is_empty() && untracked.is_empty() {
+        // Only report "clean" when we also see a known clean marker; the
+        // check runs after parsing so untracked-only output ("nothing added
+        // to commit but untracked files present") can never hit it.
+        if CLEAN_MARKERS.iter().any(|m| output.contains(m)) {
+            return "clean".to_string();
+        }
         return output.to_string();
     }
 
@@ -484,6 +508,126 @@ Modifiche di cui verrà eseguito il commit:\n\
         let result = format_git_status(output);
         assert!(result.contains("modified(1)"));
         assert!(result.contains("README.md"));
+    }
+
+    // The localized fixtures below use the exact msgstr values from git's
+    // own translation files (po/*.po on git master) — not guessed
+    // translations. If one of these fails after a table edit, re-check the
+    // .po file before "fixing" the test.
+
+    /// German mixed status. Real strings: staged header "Zum Commit
+    /// vorgemerkte Änderungen:", unstaged header "Änderungen, die nicht zum
+    /// Commit vorgemerkt sind:", modified label "geändert:" (NOT
+    /// "modifiziert:"). Regression: modified entries must not be silently
+    /// dropped, and unstaged must not leak into staged.
+    #[test]
+    fn test_git_status_german_mixed() {
+        let output = "Auf Branch main\n\n\
+Zum Commit vorgemerkte Änderungen:\n\
+  (benutzen Sie \"git restore --staged <Datei>...\" zum Entfernen aus der Staging-Area)\n\
+\tneue Datei:     neu.txt\n\
+\n\
+Änderungen, die nicht zum Commit vorgemerkt sind:\n\
+  (benutzen Sie \"git add <Datei>...\", um die Änderungen zum Commit vorzumerken)\n\
+\tgeändert:       alt.txt\n";
+        let result = format_git_status(output);
+        assert!(result.contains("staged(1)"), "staged section lost: {result}");
+        assert!(result.contains("neu.txt"));
+        assert!(result.contains("modified(1)"), "unstaged geändert: entry dropped or misfiled: {result}");
+        assert!(result.contains("alt.txt"));
+    }
+
+    /// Italian mixed status. Real unstaged header is "Modifiche non
+    /// nell'area di staging per il commit:". Regression: unstaged entries
+    /// must land in modified(), not be counted as staged.
+    #[test]
+    fn test_git_status_italian_mixed() {
+        let output = "Sul branch master\n\n\
+Modifiche di cui verrà eseguito il commit:\n\
+  (usa \"git restore --staged <file>...\" per rimuovere gli elementi dall'area di staging)\n\
+\tnuovo file:     nuovo.txt\n\
+\n\
+Modifiche non nell'area di staging per il commit:\n\
+  (usa \"git add <file>...\" per aggiornare gli elementi di cui verrà eseguito il commit)\n\
+\tmodificato:     vecchio.txt\n";
+        let result = format_git_status(output);
+        assert!(result.contains("staged(1)"), "wrong staged count: {result}");
+        assert!(result.contains("nuovo.txt"));
+        assert!(result.contains("modified(1)"), "unstaged entry misfiled as staged: {result}");
+        assert!(result.contains("vecchio.txt"));
+    }
+
+    /// French uses a no-break space before the colon in file labels
+    /// ("modifié\u{a0}:") and the staged header marker is a substring of the
+    /// unstaged header ("…qui ne seront pas validées :"). Both sections must
+    /// classify correctly.
+    #[test]
+    fn test_git_status_french_mixed_nbsp() {
+        let output = "Sur la branche main\n\n\
+Modifications qui seront validées :\n\
+  (utilisez \"git restore --staged <fichier>...\" pour désindexer)\n\
+\tnouveau fichier\u{a0}: ajout.txt\n\
+\n\
+Modifications qui ne seront pas validées :\n\
+  (utilisez \"git add <fichier>...\" pour mettre à jour ce qui sera validé)\n\
+\tmodifié\u{a0}:         change.txt\n";
+        let result = format_git_status(output);
+        assert!(result.contains("staged(1)"), "french staged lost: {result}");
+        assert!(result.contains("ajout.txt"));
+        assert!(result.contains("modified(1)"), "french unstaged misfiled as staged: {result}");
+        assert!(result.contains("change.txt"));
+    }
+
+    /// Spanish (real strings: "Cambios a ser confirmados:", plural labels
+    /// "nuevos archivos:").
+    #[test]
+    fn test_git_status_spanish_staged() {
+        let output = "En la rama main\n\n\
+Cambios a ser confirmados:\n\
+  (usa \"git restore --staged <archivo>...\" para sacar del área de stage)\n\
+\tnuevos archivos: hola.txt\n";
+        let result = format_git_status(output);
+        assert!(result.contains("staged(1)"), "spanish staged lost: {result}");
+        assert!(result.contains("hola.txt"));
+    }
+
+    /// A locale with no marker-table entry (Russian) must pass the raw
+    /// output through — never a partial or misclassified summary.
+    #[test]
+    fn test_git_status_unknown_locale_passthrough() {
+        let output = "На ветке main\n\n\
+Изменения, которые будут включены в коммит:\n\
+\tновый файл:     файл.txt\n";
+        let result = format_git_status(output);
+        assert_eq!(result, output, "unknown locale must pass through raw");
+    }
+
+    /// Merge conflicts add an "Unmerged paths:" section we don't summarize.
+    /// Its file entries must force raw passthrough, not vanish.
+    #[test]
+    fn test_git_status_unmerged_passthrough() {
+        let output = "On branch main\n\n\
+Unmerged paths:\n\
+  (use \"git add <file>...\" to mark resolution)\n\
+\tboth modified:   conflicted.txt\n";
+        let result = format_git_status(output);
+        assert_eq!(result, output, "conflict output must pass through raw");
+    }
+
+    /// Untracked-only output must summarize as untracked — and must not hit
+    /// the "clean" branch even though git prints "nothing added to commit…".
+    #[test]
+    fn test_git_status_untracked_only() {
+        let output = "On branch main\n\n\
+Untracked files:\n\
+  (use \"git add <file>...\" to include in what will be committed)\n\
+\tstray.txt\n\
+\n\
+nothing added to commit but untracked files present (use \"git add\" to track)\n";
+        let result = format_git_status(output);
+        assert!(result.contains("untracked(1)"), "untracked lost: {result}");
+        assert!(result.contains("stray.txt"));
+        assert_ne!(result, "clean");
     }
 
     #[test]
