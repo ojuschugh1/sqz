@@ -63,7 +63,7 @@ Total:         6,000 tokens     Total:         ~826 tokens (86% saved)
 ```
 
 > [!NOTE]
-> **Name disambiguation:** this repo, [ojuschugh1/sqz](https://github.com/ojuschugh1/sqz), is an independent project and is not affiliated with any other similarly named tool — including `squeez` (a hook-based compressor for AI CLIs) or other compression projects that shorten "squeeze". If you installed `sqz` / `sqz-cli` / `sqz-mcp` from crates.io, npm, PyPI, or Homebrew, it comes from this repository.
+> **Name disambiguation:** this repo, [ojuschugh1/sqz](https://github.com/ojuschugh1/sqz), is an independent project and is not affiliated with any other similarly named or working tool or other compression projects that shorten "squeeze". If you installed `sqz` / `sqz-cli` / `sqz-mcp` from crates.io, npm, PyPI, or Homebrew, it comes from this repository.
 
 ## Token Savings
 
