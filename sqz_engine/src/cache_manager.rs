@@ -272,9 +272,33 @@ impl CacheManager {
     /// - On cache miss: compress via `pipeline`, persist, return `CacheResult::Fresh`.
     pub fn get_or_compress(
         &self,
+        path: &Path,
+        content: &[u8],
+        pipeline: &CompressionPipeline,
+    ) -> Result<CacheResult> {
+        self.get_or_compress_inner(path, content, pipeline, false)
+    }
+
+    /// Lossless variant used by the file-read MCP tools (`sqz_read_file` /
+    /// `sqz_grep` / `sqz_list_dir`): on a cache miss the content is returned
+    /// faithfully via [`CompressionPipeline::compress_lossless`] (no entropy
+    /// truncation / pruning / re-encoding). The general `compress` tool keeps
+    /// using [`get_or_compress`] for aggressive compression. See issue #32.
+    pub fn get_or_compress_lossless(
+        &self,
+        path: &Path,
+        content: &[u8],
+        pipeline: &CompressionPipeline,
+    ) -> Result<CacheResult> {
+        self.get_or_compress_inner(path, content, pipeline, true)
+    }
+
+    fn get_or_compress_inner(
+        &self,
         _path: &Path,
         content: &[u8],
         pipeline: &CompressionPipeline,
+        lossless: bool,
     ) -> Result<CacheResult> {
         let hash = Self::sha256_hex(content);
 
@@ -304,7 +328,11 @@ impl CacheManager {
                     session_id: "cache".to_string(),
                 };
                 let preset = Preset::default();
-                let compressed = pipeline.compress(&text, &ctx, &preset)?;
+                let compressed = if lossless {
+                    pipeline.compress_lossless(&text, &ctx, &preset)?
+                } else {
+                    pipeline.compress(&text, &ctx, &preset)?
+                };
                 // Record that we re-sent this content
                 self.record_ref_sent(&hash);
                 return Ok(CacheResult::Fresh { output: compressed });
@@ -320,7 +348,11 @@ impl CacheManager {
                 session_id: "cache".to_string(),
             };
             let preset = Preset::default();
-            let compressed = pipeline.compress(&text, &ctx, &preset)?;
+            let compressed = if lossless {
+                pipeline.compress_lossless(&text, &ctx, &preset)?
+            } else {
+                pipeline.compress(&text, &ctx, &preset)?
+            };
             // Persist the raw bytes so `sqz expand <prefix>` can round-trip.
             self.store
                 .save_cache_entry_with_original(&hash, &compressed, Some(content))?;
@@ -338,7 +370,11 @@ impl CacheManager {
             session_id: "cache".to_string(),
         };
         let preset = Preset::default();
-        let compressed = pipeline.compress(&text, &ctx, &preset)?;
+        let compressed = if lossless {
+            pipeline.compress_lossless(&text, &ctx, &preset)?
+        } else {
+            pipeline.compress(&text, &ctx, &preset)?
+        };
         self.store
             .save_cache_entry_with_original(&hash, &compressed, Some(content))?;
         // Record that this content was sent at the current turn
@@ -590,6 +626,66 @@ mod tests {
         assert!(matches!(result, CacheResult::Fresh { .. }));
     }
 
+    /// Regression for https://github.com/ojuschugh1/sqz/issues/32 — the MCP
+    /// file-read path (`get_or_compress_lossless`, used by sqz_read_file /
+    /// sqz_grep / sqz_list_dir) returns content faithfully, while the general
+    /// `compress` tool keeps using the lossy `get_or_compress`.
+    #[test]
+    fn get_or_compress_lossless_does_not_truncate_source() {
+        let pipeline = make_pipeline();
+
+        // >500 bytes of multi-segment non-JSON "source" that the lossy path
+        // entropy-truncates by roughly half.
+        let mut segs = Vec::new();
+        for i in 0..10 {
+            if i % 2 == 0 {
+                segs.push(format!("SEG{i} llllllllllllllllllllllllllllllllllllllll"));
+            } else {
+                segs.push(format!(
+                    "SEG{i} the quick brown fox jumps over {i} lazy dogs by rivers"
+                ));
+            }
+        }
+        let content = segs.join("\n\n");
+        assert!(content.len() > 500);
+
+        // Lossy path (the general `compress` tool) still truncates.
+        let (s1, _d1) = in_memory_store();
+        let lossy = CacheManager::new(s1, u64::MAX);
+        match lossy
+            .get_or_compress(Path::new("x"), content.as_bytes(), &pipeline)
+            .unwrap()
+        {
+            CacheResult::Fresh { output } => {
+                assert!(output.data.contains("omitted"), "lossy path should truncate");
+            }
+            _ => panic!("expected Fresh on a cold read"),
+        }
+
+        // Lossless path (file tools) keeps every segment.
+        let (s2, _d2) = in_memory_store();
+        let cm = CacheManager::new(s2, u64::MAX);
+        match cm
+            .get_or_compress_lossless(Path::new("src/lib.rs"), content.as_bytes(), &pipeline)
+            .unwrap()
+        {
+            CacheResult::Fresh { output } => {
+                assert!(
+                    !output.data.contains("omitted"),
+                    "file-read path truncated content: {}",
+                    output.data
+                );
+                for i in 0..10 {
+                    assert!(
+                        output.data.contains(&format!("SEG{i}")),
+                        "file-read path dropped SEG{i}"
+                    );
+                }
+            }
+            _ => panic!("expected CacheResult::Fresh on a cold read"),
+        }
+    }
+
     #[test]
     fn second_read_is_hit() {
         let (store, _dir) = in_memory_store();
@@ -790,27 +886,25 @@ mod tests {
     #[test]
     fn ref_refreshed_after_resend() {
         let (store, _dir) = in_memory_store();
-        // TTL of 10ms: a fresh send bumps accessed_at, so immediately after
-        // the re-send the ref is fresh again.
-        let cm = CacheManager::with_ref_age_duration(
-            store,
-            u64::MAX,
-            Duration::from_millis(10),
-        );
+        // Generous TTL so the "fresh after re-send" check is never a timing
+        // race on a slow CI runner; staleness is forced via compaction below.
+        let cm = CacheManager::with_ref_age_duration(store, u64::MAX, Duration::from_secs(86_400));
         let pipeline = make_pipeline();
         let content = b"hello world";
         let path = Path::new("file.txt");
 
         cm.get_or_compress(path, content, &pipeline).unwrap();
-        // Wait past the TTL so the entry is stale.
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        // Force staleness deterministically: set the compaction marker strictly
+        // after the seed's accessed_at, so the ref predates it (no TTL race).
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        cm.notify_compaction();
 
-        // Stale — must re-send Fresh. The re-send bumps accessed_at.
+        // Stale (predates the marker) — must re-send Fresh. The re-send bumps
+        // accessed_at past the marker.
         let result = cm.get_or_compress(path, content, &pipeline).unwrap();
         assert!(matches!(result, CacheResult::Fresh { .. }));
 
-        // Immediately read again — the freshly-updated accessed_at is
-        // within the 10ms TTL, so the ref is fresh.
+        // Now fresh (accessed_at after the marker, within the generous TTL).
         let result = cm.get_or_compress(path, content, &pipeline).unwrap();
         assert!(
             matches!(result, CacheResult::Dedup { .. }),
@@ -820,25 +914,23 @@ mod tests {
 
     #[test]
     fn check_dedup_returns_none_for_stale_ref() {
-        let (store, _dir) = in_memory_store();
-        let cm = CacheManager::with_ref_age_duration(
-            store,
-            u64::MAX,
-            Duration::from_millis(10),
-        );
         let pipeline = make_pipeline();
         let content = b"test content";
         let path = Path::new("file.txt");
 
-        cm.get_or_compress(path, content, &pipeline).unwrap();
+        // Fresh ref (generous TTL): check_dedup returns Some.
+        let (store, _dir) = in_memory_store();
+        let fresh =
+            CacheManager::with_ref_age_duration(store, u64::MAX, Duration::from_secs(86_400));
+        fresh.get_or_compress(path, content, &pipeline).unwrap();
+        assert!(fresh.check_dedup(content).unwrap().is_some());
 
-        // Immediately fresh.
-        assert!(cm.check_dedup(content).unwrap().is_some());
-
-        // Wait past TTL.
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        // Stale ref (TTL=0): check_dedup returns None — deterministic, no sleep.
+        let (store2, _dir2) = in_memory_store();
+        let stale = CacheManager::with_ref_age_duration(store2, u64::MAX, Duration::ZERO);
+        stale.get_or_compress(path, content, &pipeline).unwrap();
         assert!(
-            cm.check_dedup(content).unwrap().is_none(),
+            stale.check_dedup(content).unwrap().is_none(),
             "stale ref should not be returned by check_dedup"
         );
     }

@@ -284,7 +284,7 @@ impl McpServer {
             .map_err(|e| SqzError::Other(format!("input serialization error: {e}")))?;
 
         let tokens_original = estimate_tokens(&raw_input);
-        let (output, tokens_compressed) = self.compress_cached(&raw_input)?;
+        let (output, tokens_compressed) = self.compress_cached(&raw_input, false)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
         Ok(ToolCallResponse {
@@ -398,9 +398,15 @@ impl McpServer {
     /// Repeat reads got pipeline compression (~30%), not dedup refs
     /// (~92%). Routing through `engine.compress_with_cache()` restores
     /// the advertised behaviour.
-    fn compress_cached(&self, text: &str) -> Result<(String, u32)> {
+    fn compress_cached(&self, text: &str, lossless: bool) -> Result<(String, u32)> {
         use sqz_engine::CacheResult;
-        let result = self.engine.compress_with_cache(text)?;
+        // The file-read tools (sqz_read_file / sqz_grep / sqz_list_dir) read
+        // faithfully (lossless); the general `compress` tool stays aggressive.
+        let result = if lossless {
+            self.engine.compress_with_cache_lossless(text)?
+        } else {
+            self.engine.compress_with_cache(text)?
+        };
         Ok(match result {
             CacheResult::Dedup { inline_ref, token_cost } => (inline_ref, token_cost),
             CacheResult::Delta { delta_text, token_cost, .. } => (delta_text, token_cost),
@@ -485,7 +491,7 @@ impl McpServer {
         let raw_text = String::from_utf8_lossy(truncated_slice).into_owned();
 
         let tokens_original = estimate_tokens(&raw_text);
-        let (compressed_data, tokens_compressed) = self.compress_cached(&raw_text)?;
+        let (compressed_data, tokens_compressed) = self.compress_cached(&raw_text, true)?;
 
         // Attach a small header so the agent knows where the content
         // came from and whether it was truncated. The header lives
@@ -548,7 +554,7 @@ impl McpServer {
 
         let raw = lines.join("\n");
         let tokens_original = estimate_tokens(&raw);
-        let (compressed_data, tokens_compressed) = self.compress_cached(&raw)?;
+        let (compressed_data, tokens_compressed) = self.compress_cached(&raw, true)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
         let output = format!(
@@ -634,7 +640,7 @@ impl McpServer {
 
         let raw = matches.join("\n");
         let tokens_original = estimate_tokens(&raw);
-        let (compressed_data, tokens_compressed) = self.compress_cached(&raw)?;
+        let (compressed_data, tokens_compressed) = self.compress_cached(&raw, true)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
         let output = format!(

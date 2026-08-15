@@ -78,11 +78,23 @@ mod smoke_tests {
 mod cli_proxy_tests {
     use crate::cli_proxy::CliProxy;
 
+    /// A `CliProxy` on an isolated temp-dir session DB. `CliProxy::new()` opens
+    /// the shared `~/.sqz/sessions.db`, which races and corrupts under parallel
+    /// `cargo test` (CI flake on #33). The `TempDir` must outlive the proxy.
+    fn isolated_proxy() -> (CliProxy, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = dir.path().join("sessions.db");
+        let engine =
+            sqz_engine::SqzEngine::with_preset_and_store(sqz_engine::Preset::default(), &store)
+                .expect("engine init");
+        (CliProxy::with_engine(engine), dir)
+    }
+
     /// End-to-end: intercept_output returns a non-empty string for typical
     /// CLI output (Requirement 1.1, 1.4).
     #[test]
     fn test_intercept_output_end_to_end() {
-        let proxy = CliProxy::new().expect("engine init");
+        let (proxy, _dir) = isolated_proxy();
         let raw = "On branch main\nnothing to commit, working tree clean\n";
         let result = proxy.intercept_output("git status", raw);
         assert!(!result.is_empty(), "compressed output must not be empty");
@@ -92,7 +104,7 @@ mod cli_proxy_tests {
     /// returned unchanged (Requirement 1.5 fallback).
     #[test]
     fn test_intercept_output_transparent_on_empty_input() {
-        let proxy = CliProxy::new().expect("engine init");
+        let (proxy, _dir) = isolated_proxy();
         // Empty input — should not panic and should return something.
         let result = proxy.intercept_output("cargo build", "");
         // Either empty or the original empty string — no panic is the key assertion.

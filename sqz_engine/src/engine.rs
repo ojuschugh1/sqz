@@ -192,6 +192,21 @@ impl SqzEngine {
         )
     }
 
+    /// Lossless variant of [`compress_with_cache`] for the file-read MCP tools
+    /// (`sqz_read_file` / `sqz_grep` / `sqz_list_dir`): on a cache miss the
+    /// content is returned faithfully — no entropy truncation, pruning, or
+    /// re-encoding. The general `compress` tool keeps using
+    /// [`compress_with_cache`] for aggressive compression. See issue #32.
+    pub fn compress_with_cache_lossless(&self, input: &str) -> Result<crate::cache_manager::CacheResult> {
+        let pipeline = self.pipeline.lock()
+            .map_err(|_| SqzError::Other("pipeline lock poisoned".into()))?;
+        self.cache_manager.get_or_compress_lossless(
+            std::path::Path::new(""),
+            input.as_bytes(),
+            &pipeline,
+        )
+    }
+
     /// Defensive compression: any input in, `CompressedContent` out, guaranteed.
     ///
     /// Unlike `compress()` which returns `Result`, this method never returns
