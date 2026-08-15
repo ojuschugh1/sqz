@@ -629,6 +629,45 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             continue;
         }
 
+        // Windsurf: announce the new rules path and legacy migration.
+        if config.tool_name == "Windsurf" {
+            let target = project_dir.join(&config.config_path);
+            let legacy = project_dir.join(".windsurfrules");
+            let legacy_is_sqz = legacy.exists()
+                && std::fs::read_to_string(&legacy)
+                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
+                    .unwrap_or(false);
+            if !target.exists() {
+                plan.push((
+                    target.display().to_string(),
+                    "Windsurf rules file".to_string(),
+                    true,
+                ));
+            }
+            if legacy_is_sqz {
+                plan.push((
+                    legacy.display().to_string(),
+                    "remove legacy .windsurfrules (moved to .windsurf/rules/)".to_string(),
+                    false,
+                ));
+            }
+            continue;
+        }
+
+        // Cline: .clinerules may be a directory.
+        if config.tool_name == "Cline" {
+            let base = project_dir.join(".clinerules");
+            let target = if base.is_dir() { base.join("sqz.md") } else { base };
+            if !target.exists() {
+                plan.push((
+                    target.display().to_string(),
+                    "Cline rules file".to_string(),
+                    true,
+                ));
+            }
+            continue;
+        }
+
         // Kiro: steering file + project MCP config + legacy hook cleanup.
         if config.tool_name == "Kiro" {
             let steering = sqz_engine::kiro_steering_path(&project_dir);
@@ -1592,6 +1631,35 @@ fn cmd_uninstall(skip_confirm: bool) {
         if config.tool_name == "Kiro" {
             continue;
         }
+        // Windsurf: new rules file plus a legacy sqz-authored .windsurfrules.
+        if config.tool_name == "Windsurf" {
+            let target = project_dir.join(&config.config_path);
+            if target.exists() {
+                files_to_remove.push((target.display().to_string(), true));
+            }
+            let legacy = project_dir.join(".windsurfrules");
+            let legacy_is_sqz = legacy.exists()
+                && std::fs::read_to_string(&legacy)
+                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
+                    .unwrap_or(false);
+            if legacy_is_sqz {
+                files_to_remove.push((legacy.display().to_string(), true));
+            }
+            continue;
+        }
+        // Cline: only list what will actually be removed (sqz-authored).
+        if config.tool_name == "Cline" {
+            let base = project_dir.join(".clinerules");
+            let target = if base.is_dir() { base.join("sqz.md") } else { base };
+            let is_sqz = target.is_file()
+                && std::fs::read_to_string(&target)
+                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
+                    .unwrap_or(false);
+            if is_sqz {
+                files_to_remove.push((target.display().to_string(), true));
+            }
+            continue;
+        }
         let full = project_dir.join(&config.config_path);
         if full.exists() {
             files_to_remove.push((full.display().to_string(), true));
@@ -1763,6 +1831,51 @@ fn cmd_uninstall(skip_confirm: bool) {
         }
         // Codex is also surgical — AGENTS.md and ~/.codex/config.toml.
         if config.tool_name == "Codex" {
+            continue;
+        }
+        // Zed and Kiro share files with user content; their dedicated
+        // blocks below remove only sqz's parts.
+        if config.tool_name == "Zed" || config.tool_name == "Kiro" {
+            continue;
+        }
+        // Windsurf: remove the rules file plus a legacy sqz-authored
+        // .windsurfrules from older installs.
+        if config.tool_name == "Windsurf" {
+            let target = project_dir.join(&config.config_path);
+            if target.exists() {
+                match std::fs::remove_file(&target) {
+                    Ok(()) => println!("[sqz] ✓ removed {}", target.display()),
+                    Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", target.display()),
+                }
+            }
+            let legacy = project_dir.join(".windsurfrules");
+            let legacy_is_sqz = legacy.exists()
+                && std::fs::read_to_string(&legacy)
+                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
+                    .unwrap_or(false);
+            if legacy_is_sqz {
+                match std::fs::remove_file(&legacy) {
+                    Ok(()) => println!("[sqz] ✓ removed {}", legacy.display()),
+                    Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", legacy.display()),
+                }
+            }
+            continue;
+        }
+        // Cline: .clinerules may be a directory (remove only our sqz.md)
+        // or a file (remove only when sqz-authored).
+        if config.tool_name == "Cline" {
+            let base = project_dir.join(".clinerules");
+            let target = if base.is_dir() { base.join("sqz.md") } else { base };
+            let is_sqz = target.is_file()
+                && std::fs::read_to_string(&target)
+                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
+                    .unwrap_or(false);
+            if is_sqz {
+                match std::fs::remove_file(&target) {
+                    Ok(()) => println!("[sqz] ✓ removed {}", target.display()),
+                    Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", target.display()),
+                }
+            }
             continue;
         }
         let full = project_dir.join(&config.config_path);

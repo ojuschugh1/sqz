@@ -503,12 +503,11 @@ If `sqz` is not on PATH, run commands normally.
             ),
             scope: HookScope::Project,
         },
-        // Windsurf — no confirmed hook API for command rewriting.
-        // RTK uses .windsurfrules (prompt-level guidance) instead of hooks.
-        // We generate a rules file that instructs Windsurf to use sqz.
+        // Windsurf — no hook API; prompt-level rules. Current docs only
+        // document the .windsurf/rules/ directory; .windsurfrules is legacy.
         ToolHookConfig {
             tool_name: "Windsurf".to_string(),
-            config_path: PathBuf::from(".windsurfrules"),
+            config_path: PathBuf::from(".windsurf/rules/sqz.md"),
             config_content: format!(
                 r#"# sqz — Token-Optimized CLI Output
 
@@ -535,9 +534,8 @@ not on PATH, run commands normally.
             ),
             scope: HookScope::Project,
         },
-        // Cline / Roo Code — PreToolUse cannot rewrite commands (only cancel/allow).
-        // RTK uses .clinerules (prompt-level guidance) instead of hooks.
-        // We generate a rules file that instructs Cline to use sqz.
+        // Cline / Roo Code — prompt-level guidance. .clinerules can be a
+        // single file or a directory; the install path handles both.
         ToolHookConfig {
             tool_name: "Cline".to_string(),
             config_path: PathBuf::from(".clinerules"),
@@ -973,6 +971,49 @@ pub fn install_tool_hooks_scoped_filtered(
                 && !installed.iter().any(|n| n == "Codex")
             {
                 installed.push("Codex".to_string());
+            }
+            continue;
+        }
+
+        // Windsurf: current docs only document .windsurf/rules/; migrate a
+        // legacy sqz-authored .windsurfrules to the new location.
+        if config.tool_name == "Windsurf" {
+            let legacy = project_dir.join(".windsurfrules");
+            let target = project_dir.join(&config.config_path);
+            let legacy_is_sqz = legacy.exists()
+                && std::fs::read_to_string(&legacy)
+                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
+                    .unwrap_or(false);
+            let mut changed = false;
+            if !target.exists() {
+                if let Some(parent) = target.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(&target, &config.config_content).is_ok() {
+                    changed = true;
+                }
+            }
+            if legacy_is_sqz && target.exists() {
+                let _ = std::fs::remove_file(&legacy);
+                changed = true;
+            }
+            if changed && !installed.iter().any(|n| n == "Windsurf") {
+                installed.push("Windsurf".to_string());
+            }
+            continue;
+        }
+
+        // Cline: .clinerules can be a single file or a directory of md
+        // files; when it's a directory, install .clinerules/sqz.md.
+        if config.tool_name == "Cline" {
+            let base = project_dir.join(".clinerules");
+            let target = if base.is_dir() { base.join("sqz.md") } else { base };
+            if !target.exists() {
+                if std::fs::write(&target, &config.config_content).is_ok()
+                    && !installed.iter().any(|n| n == "Cline")
+                {
+                    installed.push("Cline".to_string());
+                }
             }
             continue;
         }
@@ -1905,8 +1946,8 @@ mod tests {
         // Windsurf, Cline, and Cursor should generate rules files, not hook configs
         // (none of the three support transparent command rewriting via hooks).
         let windsurf = configs.iter().find(|c| c.tool_name == "Windsurf").unwrap();
-        assert_eq!(windsurf.config_path, PathBuf::from(".windsurfrules"),
-            "Windsurf should use .windsurfrules, not .windsurf/hooks.json");
+        assert_eq!(windsurf.config_path, PathBuf::from(".windsurf/rules/sqz.md"),
+            "Windsurf should use the .windsurf/rules/ directory (legacy .windsurfrules is deprecated)");
         let cline = configs.iter().find(|c| c.tool_name == "Cline").unwrap();
         assert_eq!(cline.config_path, PathBuf::from(".clinerules"),
             "Cline should use .clinerules, not .clinerules/hooks/PreToolUse");
@@ -2172,6 +2213,60 @@ mod tests {
         // The other two sqz hooks got added too (full heal, not partial).
         assert!(parsed["hooks"]["PreCompact"].is_array());
         assert!(parsed["hooks"]["SessionStart"].is_array());
+    }
+
+    #[test]
+    fn test_windsurf_installs_to_rules_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        install_tool_hooks(dir.path(), "sqz");
+        assert!(dir.path().join(".windsurf/rules/sqz.md").exists());
+        assert!(!dir.path().join(".windsurfrules").exists());
+    }
+
+    #[test]
+    fn test_windsurf_migrates_legacy_sqz_rules_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".windsurfrules"),
+            "# sqz — Token-Optimized CLI Output\n\nold content\n",
+        )
+        .unwrap();
+        install_tool_hooks(dir.path(), "sqz");
+        assert!(dir.path().join(".windsurf/rules/sqz.md").exists());
+        assert!(!dir.path().join(".windsurfrules").exists(), "legacy file migrated");
+    }
+
+    #[test]
+    fn test_windsurf_leaves_user_legacy_rules_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".windsurfrules"), "my own rules\n").unwrap();
+        install_tool_hooks(dir.path(), "sqz");
+        assert!(dir.path().join(".windsurf/rules/sqz.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".windsurfrules")).unwrap(),
+            "my own rules\n"
+        );
+    }
+
+    #[test]
+    fn test_cline_installs_into_rules_directory_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".clinerules")).unwrap();
+        std::fs::write(dir.path().join(".clinerules/mine.md"), "user rule\n").unwrap();
+        install_tool_hooks(dir.path(), "sqz");
+        assert!(dir.path().join(".clinerules/sqz.md").exists());
+        assert!(dir.path().join(".clinerules/mine.md").exists());
+    }
+
+    #[test]
+    fn test_cline_single_file_untouched_when_user_authored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".clinerules"), "user rules\n").unwrap();
+        install_tool_hooks(dir.path(), "sqz");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".clinerules")).unwrap(),
+            "user rules\n"
+        );
     }
 
     /// Re-running init on an already-current project file is a no-op.
@@ -2744,7 +2839,7 @@ mod issue_11_tool_filter_tests {
         );
         // Windsurf and Cline rules SHOULD still exist.
         assert!(
-            dir.path().join(".windsurfrules").exists(),
+            dir.path().join(".windsurf/rules/sqz.md").exists(),
             "skip cursor should not skip windsurf"
         );
         assert!(
