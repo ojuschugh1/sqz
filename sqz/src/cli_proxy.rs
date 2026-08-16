@@ -228,21 +228,23 @@ impl CliProxy {
         let fast_hash = content_hash(output);
         if !opts.no_cache && self.l1_cache.borrow().contains(&fast_hash) {
             // L1 hit — check L2 persistent cache for the actual ref
-            if let Ok(Some(inline_ref)) = self.engine.cache_manager().check_dedup(output.as_bytes()) {
-                eprintln!("[sqz] dedup hit: {} (L1+L2)", inline_ref);
+            if let Ok(Some(hit)) = self.engine.cache_manager().check_dedup_with_meta(output.as_bytes()) {
+                eprintln!("[sqz] dedup hit: {} (L1+L2)", hit.inline_ref);
+                self.maybe_log_rerun_regret(cmd, &hit);
                 self.log_dedup_hit(cmd, output);
-                return inline_ref;
+                return hit.inline_ref;
             }
         }
 
         // Step 2: L2 persistent SHA-256 dedup check (survives restarts)
         if !opts.no_cache {
-            if let Ok(Some(inline_ref)) = self.engine.cache_manager().check_dedup(output.as_bytes()) {
+            if let Ok(Some(hit)) = self.engine.cache_manager().check_dedup_with_meta(output.as_bytes()) {
                 // Promote to L1 for faster future lookups
                 self.l1_cache.borrow_mut().insert(fast_hash);
-                eprintln!("[sqz] dedup hit: {} (L2)", inline_ref);
+                eprintln!("[sqz] dedup hit: {} (L2)", hit.inline_ref);
+                self.maybe_log_rerun_regret(cmd, &hit);
                 self.log_dedup_hit(cmd, output);
-                return inline_ref;
+                return hit.inline_ref;
             }
         }
 
@@ -333,6 +335,31 @@ impl CliProxy {
                 eprintln!("[sqz] fallback: compression error for command '{cmd}': {e}");
                 output.to_owned()
             }
+        }
+    }
+
+    /// Record a rerun-regret signal when a dedup hit lands within the
+    /// regret window of the content's previous sighting. The agent just
+    /// re-produced byte-identical output it already had — the repeat
+    /// bought nothing, which usually means the compressed first serving
+    /// was missing something. Window defaults to 120s; override with
+    /// `SQZ_REGRET_WINDOW_SECS` (0 disables).
+    fn maybe_log_rerun_regret(&self, cmd: &str, hit: &sqz_engine::DedupHit) {
+        const DEFAULT_WINDOW_SECS: f64 = 120.0;
+        let window = std::env::var("SQZ_REGRET_WINDOW_SECS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(DEFAULT_WINDOW_SECS);
+        if window <= 0.0 {
+            return;
+        }
+        let Some(prev) = hit.prev_accessed_at else { return };
+        let gap = (chrono::Utc::now() - prev).num_milliseconds() as f64 / 1000.0;
+        if gap >= 0.0 && gap <= window {
+            let _ = self
+                .engine
+                .session_store()
+                .log_regret("rerun", cmd, &hit.hash, gap);
         }
     }
 
@@ -661,6 +688,38 @@ mod tests {
         // File should be persisted in the session store
         let known = proxy.engine.session_store().known_files().unwrap();
         assert!(known.contains(&"src/main.rs".to_string()), "cat should track the file path");
+    }
+
+    #[test]
+    fn quick_rerun_logs_a_regret_signal() {
+        let (proxy, _dir) = isolated_proxy();
+        let unique_tag = format!(
+            "regret-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now(),
+        );
+        let output = format!(
+            "regret test content with {}\n{}",
+            unique_tag,
+            "line of output long enough to be stored in the dedup cache\n".repeat(5),
+        );
+
+        let store = proxy.engine.session_store();
+        assert_eq!(store.regret_stats().unwrap().reruns, 0);
+
+        // First sighting: compressed and cached. No regret.
+        proxy.intercept_output("git log", &output);
+        assert_eq!(store.regret_stats().unwrap().reruns, 0);
+
+        // Identical output seconds later: dedup hit inside the 120s
+        // regret window — one rerun signal, attributed to the command.
+        let second = proxy.intercept_output("git log", &output);
+        assert!(second.starts_with("§ref:"), "expected dedup ref, got: {second}");
+        let stats = store.regret_stats().unwrap();
+        assert_eq!(stats.reruns, 1, "quick rerun must log exactly one regret");
+        assert!(stats.avg_rerun_gap_secs < 120.0);
+        let top = store.regret_by_command(5).unwrap();
+        assert_eq!(top[0].0, "git log");
     }
 
     #[test]

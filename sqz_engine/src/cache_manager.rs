@@ -67,6 +67,19 @@ pub enum ExpandResult {
     },
 }
 
+/// A dedup hit with the metadata regret tracking needs, returned by
+/// [`CacheManager::check_dedup_with_meta`].
+#[derive(Debug, Clone)]
+pub struct DedupHit {
+    /// The `§ref:…§` token to serve instead of the full content.
+    pub inline_ref: String,
+    /// Full 64-hex SHA-256 of the content.
+    pub hash: String,
+    /// The entry's `accessed_at` before this lookup bumped it. `None`
+    /// when the column could not be read.
+    pub prev_accessed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Tracks when a dedup ref was last sent, so we can detect staleness.
 ///
 /// Historically used for an in-memory per-process turn counter; now kept
@@ -483,13 +496,27 @@ impl CacheManager {
     /// until after the freshness check — otherwise every read would make
     /// itself "fresh."
     pub fn check_dedup(&self, content: &[u8]) -> Result<Option<String>> {
+        Ok(self.check_dedup_with_meta(content)?.map(|hit| hit.inline_ref))
+    }
+
+    /// [`check_dedup`] plus the metadata callers need for regret tracking:
+    /// the full content hash and the entry's `accessed_at` from *before*
+    /// this lookup bumped it. A hit whose previous access was seconds ago
+    /// means the agent re-produced content it already had.
+    pub fn check_dedup_with_meta(&self, content: &[u8]) -> Result<Option<DedupHit>> {
         let hash = Self::sha256_hex(content);
-        // Probe existence without touching accessed_at.
+        // Read the pre-hit timestamp before the freshness probe's
+        // record_ref_sent overwrites it.
+        let prev_accessed_at = self.store.get_cache_entry_accessed_at(&hash).unwrap_or(None);
         let fresh = self.is_ref_fresh(&hash);
         if fresh {
             let hash_prefix = &hash[..16];
             self.record_ref_sent(&hash);
-            Ok(Some(format!("§ref:{hash_prefix}§")))
+            Ok(Some(DedupHit {
+                inline_ref: format!("§ref:{hash_prefix}§"),
+                hash,
+                prev_accessed_at,
+            }))
         } else {
             // If the entry exists but is stale, don't return a dangling ref.
             // If it doesn't exist at all, same result: no dedup.
@@ -546,6 +573,12 @@ impl CacheManager {
         let Some((hash, compressed_entry)) = self.store.get_cache_entry_by_prefix(prefix)? else {
             return Ok(None);
         };
+
+        // Every expand is a recovery round trip the agent paid for —
+        // count it so `sqz stats` can show how often refs get unwound.
+        // Gap is unknown here (the prefix lookup already bumped
+        // accessed_at), so record 0.0.
+        let _ = self.store.log_regret("expand", "", &hash, 0.0);
 
         // Prefer the original bytes when we have them — that's the
         // whole point of this feature.
@@ -618,6 +651,49 @@ mod tests {
         let path = dir.path().join("test.db");
         let store = SessionStore::open_or_create(&path).unwrap();
         (store, dir)
+    }
+
+    #[test]
+    fn check_dedup_with_meta_reports_previous_access() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        let content = b"meta test content that is unique to this test";
+
+        // Not cached yet: no hit, no metadata.
+        assert!(cm.check_dedup_with_meta(content).unwrap().is_none());
+
+        cm.get_or_compress(Path::new("meta.txt"), content, &pipeline)
+            .unwrap();
+        let before = chrono::Utc::now();
+        let hit = cm
+            .check_dedup_with_meta(content)
+            .unwrap()
+            .expect("expected dedup hit");
+        assert!(hit.inline_ref.starts_with("§ref:"));
+        assert_eq!(hit.hash, CacheManager::sha256_hex(content));
+        // prev_accessed_at is the store-time touch, which happened before
+        // this lookup — so it must exist and not be in the future.
+        let prev = hit.prev_accessed_at.expect("expected prior access time");
+        assert!(prev <= before + chrono::Duration::seconds(1));
+    }
+
+    #[test]
+    fn expand_prefix_logs_an_expand_regret() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        let content = b"expand regret test content";
+        cm.get_or_compress(Path::new("regret.txt"), content, &pipeline)
+            .unwrap();
+
+        let hash = CacheManager::sha256_hex(content);
+        let result = cm.expand_prefix(&hash[..16]).unwrap();
+        assert!(result.is_some());
+
+        let regret = cm.store.regret_stats().unwrap();
+        assert_eq!(regret.expands, 1);
+        assert_eq!(regret.reruns, 0);
     }
 
     fn test_preset() -> Preset {

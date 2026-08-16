@@ -306,7 +306,8 @@ sqz reset                     # Clear dedup cache or compression stats
 sqz gain                      # Show daily token savings (bar chart)
 sqz gain --project .          # Per-project daily gains
 sqz gain --days 30            # Last 30 days
-sqz stats                     # Cumulative compression report
+sqz stats                     # Cumulative compression report (includes regret signals)
+sqz stats --cost              # Estimated $ saved under a prompt-cached billing model
 sqz stats --breakdown         # Per-command token usage breakdown
 sqz stats --project .         # Stats for current project only
 sqz stats --project list      # List all tracked projects
@@ -384,6 +385,32 @@ $ sqz stats --breakdown
   git status                4         56          8      86%
   ──────────────────────────────────────────────────────────────────────
 ```
+
+### Honest accounting: cost and regret
+
+Token reduction is not automatically billed-cost reduction — with provider
+prompt caching, most context re-transmits at a ~90% discount, and compression
+that drops something the agent needed costs extra turns instead
+([arXiv:2607.12161](https://arxiv.org/abs/2607.12161)). sqz measures both
+sides instead of hand-waving:
+
+- `sqz stats --cost` estimates dollars saved under a prompt-cached billing
+  model (cache write ×1.25 once, cache read ×0.10 per subsequent turn), with
+  every assumption printed and overridable (`--price-in`, `--reread-turns`,
+  `--cache-write-mult`, `--cache-read-mult`). This is the conservative
+  estimate: without caching the same savings would bill at full input price
+  on every turn.
+- `sqz stats` reports regret signals: quick re-runs (the agent re-produced
+  byte-identical output within 2 minutes — the repeat bought nothing) and
+  ref expands (`§ref§` tokens recovered to original bytes). Both are proxies
+  for "compression dropped something the model needed." If one command
+  keeps showing up, its formatter needs work — file an issue.
+
+sqz's design already avoids the failure modes that study measured:
+compression is deterministic and query-agnostic (never invalidates provider
+prompt caches), only new tool output is touched (history is never rewritten),
+piped or redirected commands are never intercepted, and the 16-token net-win
+gate skips compressions that wouldn't pay for their own markers.
 <img width="3456" height="1918" alt="image" src="https://github.com/user-attachments/assets/d308bc60-81f3-4935-9728-b30534e5b5e5" />
 
 

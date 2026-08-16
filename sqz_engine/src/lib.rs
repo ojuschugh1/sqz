@@ -181,12 +181,12 @@ pub use tool_selector::{ToolDefinition, ToolSelector};
 pub use budget_tracker::{
     AgentBudget, BudgetTracker, BudgetWarning, UsagePrediction, UsageReport,
 };
-pub use cache_manager::{CacheManager, CacheResult, ExpandResult};
+pub use cache_manager::{CacheManager, CacheResult, DedupHit, ExpandResult};
 pub use correction_log::ContextWindow;
 pub use crp_engine::{CrpEngine, CrpLevel};
 pub use cost_calculator::{
-    CostBreakdown, CostCalculator, ModelPricing, PricingConfig, SessionCostSummary, TokenUsage,
-    ToolCost,
+    CostBreakdown, CostCalculator, ModelPricing, PricingConfig, SavedCostEstimate,
+    SavingsAssumptions, SessionCostSummary, TokenUsage, ToolCost, estimate_saved_cost,
 };
 pub use ctx_format::{CtxEnvelope, CtxFormat, CtxMetadata};
 pub use error::{Result, SqzError, SourceLocation};
@@ -195,7 +195,7 @@ pub use pipeline::{CompressionPipeline, SessionContext};
 pub use pin_manager::PinManager;
 pub use plugin_api::{PluginLoader, PluginManifest, PluginSource, SqzPlugin};
 pub use prompt_cache::{CacheBoundary, Message, PromptCacheDetector};
-pub use session_store::{CommandStats, CompressionStats, DailyGain, SessionStore, SessionSummary};
+pub use session_store::{CommandStats, CompressionStats, DailyGain, RegretStats, SessionStore, SessionSummary};
 pub use session_continuity::{
     SessionContinuityManager, SessionGuide, Snapshot, SnapshotEvent, SnapshotEventType,
 };

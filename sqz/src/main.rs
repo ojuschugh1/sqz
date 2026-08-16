@@ -250,6 +250,32 @@ enum Command {
         /// Output as JSON (for programmatic consumption by VS Code extension, etc.)
         #[arg(long)]
         json: bool,
+
+        /// Show an estimated billed-cost saving under a prompt-cached
+        /// serving model. Token reduction is not the same as cost
+        /// reduction (arXiv:2607.12161): with provider caching, a saved
+        /// tool-output token avoids one cache write (default ×1.25 the
+        /// input price) plus N cache reads (default ×0.10 per re-read
+        /// turn) — not one list-price token. Assumptions are printed
+        /// with the estimate; adjust them with the flags below.
+        #[arg(long)]
+        cost: bool,
+
+        /// Input price in USD per 1M tokens (default: 3.00).
+        #[arg(long, value_name = "USD", requires = "cost")]
+        price_in: Option<f64>,
+
+        /// Cache-write premium multiplier (default: 1.25).
+        #[arg(long, value_name = "MULT", requires = "cost")]
+        cache_write_mult: Option<f64>,
+
+        /// Cache-read discount multiplier (default: 0.10).
+        #[arg(long, value_name = "MULT", requires = "cost")]
+        cache_read_mult: Option<f64>,
+
+        /// Expected turns that re-read saved tokens (default: 10).
+        #[arg(long, value_name = "N", requires = "cost")]
+        reread_turns: Option<f64>,
     },
 
     /// Show accumulated token savings over time.
@@ -437,7 +463,19 @@ fn main() {
         Some(Command::Dashboard { port }) => cmd_dashboard(port),
         Some(Command::Proxy { port }) => cmd_proxy(port),
         Some(Command::Uninstall { yes }) => cmd_uninstall(yes),
-        Some(Command::Stats { session_id, project, breakdown, json }) => cmd_stats(session_id, project, breakdown, json),
+        Some(Command::Stats { session_id, project, breakdown, json, cost, price_in, cache_write_mult, cache_read_mult, reread_turns }) => {
+            let cost_opts = if cost {
+                let mut a = sqz_engine::SavingsAssumptions::default();
+                if let Some(v) = price_in { a.price_in_per_mtok = v; }
+                if let Some(v) = cache_write_mult { a.cache_write_mult = v; }
+                if let Some(v) = cache_read_mult { a.cache_read_mult = v; }
+                if let Some(v) = reread_turns { a.reread_turns = v; }
+                Some(a)
+            } else {
+                None
+            };
+            cmd_stats(session_id, project, breakdown, json, cost_opts)
+        }
         Some(Command::Gain { days, project }) => cmd_gain(days, project),
         Some(Command::Discover { days }) => cmd_discover(days),
         Some(Command::Resume { session_id }) => cmd_resume(session_id),
@@ -2271,7 +2309,7 @@ mod colors {
 }
 
 /// `sqz stats [session-id]` — full compression stats report.
-fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: bool, json: bool) {
+fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: bool, json: bool, cost_opts: Option<sqz_engine::SavingsAssumptions>) {
     let engine = require_engine();
 
     // JSON output: emit machine-readable stats and exit.
@@ -2287,7 +2325,8 @@ fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: boo
             .unwrap_or_default();
         let cache_size: u64 = cache_entries.iter().map(|(_, sz)| sz).sum();
 
-        let obj = serde_json::json!({
+        let regret = engine.session_store().regret_stats().unwrap_or_default();
+        let mut obj = serde_json::json!({
             "totalCompressions": cs.total_compressions,
             "tokensIn": cs.total_tokens_in,
             "tokensOut": cs.total_tokens_out,
@@ -2295,7 +2334,19 @@ fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: boo
             "avgReduction": cs.reduction_pct(),
             "cacheEntries": cache_entries.len(),
             "cacheSize": cache_size,
+            "regretReruns": regret.reruns,
+            "regretExpands": regret.expands,
         });
+        if let Some(ref a) = cost_opts {
+            let est = sqz_engine::estimate_saved_cost(cs.tokens_saved(), a);
+            obj["estimatedCostSavedUsd"] = serde_json::json!(est.total_usd);
+            obj["costAssumptions"] = serde_json::json!({
+                "priceInPerMtok": a.price_in_per_mtok,
+                "cacheWriteMult": a.cache_write_mult,
+                "cacheReadMult": a.cache_read_mult,
+                "rereadTurns": a.reread_turns,
+            });
+        }
         println!("{}", serde_json::to_string(&obj).unwrap());
         return;
     }
@@ -2371,6 +2422,72 @@ fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: boo
 
     if let Some(ref dir) = project_dir {
         println!("  {:<22} {}", colors::dim("Project"), colors::magenta(dir));
+    }
+
+    // Estimated billed-cost saving (opt-in via --cost)
+    if let Some(ref a) = cost_opts {
+        let est = sqz_engine::estimate_saved_cost(cs.tokens_saved(), a);
+        // Two decimals reads best for real totals; small values get four
+        // so "write + read = total" doesn't look like $0.00 + $0.00 = $0.01.
+        let fmt_usd = |v: f64| if est.total_usd < 0.10 { format!("${v:.4}") } else { format!("${v:.2}") };
+        println!();
+        println!("  {}", colors::bold(&colors::cyan("💵 Estimated Cost Saved")));
+        println!("  {}", colors::dim(&"─".repeat(50)));
+        println!("  {:<22} {}", colors::dim("Cache-write savings"), colors::green(&fmt_usd(est.write_usd)));
+        println!("  {:<22} {}", colors::dim("Cache-read savings"), colors::green(&fmt_usd(est.reread_usd)));
+        println!("  {:<22} {}", colors::dim("Estimated total"), colors::bright_green(&fmt_usd(est.total_usd)));
+        println!();
+        println!("  {}", colors::dim(&format!(
+            "Assumes ${:.2}/MTok input, cache write ×{:.2}, cache read ×{:.2}, ~{:.0} re-read turns.",
+            a.price_in_per_mtok, a.cache_write_mult, a.cache_read_mult, a.reread_turns
+        )));
+        println!("  {}", colors::dim(
+            "Models direct token cost under provider prompt caching (the conservative"
+        ));
+        println!("  {}", colors::dim(
+            "case); token reduction alone is not billed-cost reduction (arXiv:2607.12161)."
+        ));
+    }
+
+    // Compression-regret signals (shown when any exist)
+    if let Ok(regret) = engine.session_store().regret_stats() {
+        if regret.reruns > 0 || regret.expands > 0 {
+            let rate = if cs.total_compressions > 0 {
+                regret.reruns as f64 / cs.total_compressions as f64 * 100.0
+            } else {
+                0.0
+            };
+            println!();
+            println!("  {}", colors::bold(&colors::cyan("🔁 Regret Signals")));
+            println!("  {}", colors::dim(&"─".repeat(50)));
+            println!(
+                "  {:<22} {} {}",
+                colors::dim("Quick re-runs"),
+                colors::bold(&format!("{}", regret.reruns)),
+                colors::dim(&format!("({:.1}% of compressions, avg gap {:.0}s)", rate, regret.avg_rerun_gap_secs)),
+            );
+            println!(
+                "  {:<22} {} {}",
+                colors::dim("Ref expands"),
+                colors::bold(&format!("{}", regret.expands)),
+                colors::dim("(§ref§ tokens recovered to original bytes)"),
+            );
+            let top = engine.session_store().regret_by_command(3).unwrap_or_default();
+            if !top.is_empty() {
+                let list = top
+                    .iter()
+                    .map(|(c, n)| format!("{c} ×{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("  {:<22} {}", colors::dim("Most re-run"), colors::magenta(&list));
+            }
+            println!("  {}", colors::dim(
+                "Re-running a command whose output hadn't changed suggests the compressed"
+            ));
+            println!("  {}", colors::dim(
+                "serving missed something. High counts for one command? File an issue."
+            ));
+        }
     }
 
     // Session cost section (if session_id provided)

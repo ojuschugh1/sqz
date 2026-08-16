@@ -4,6 +4,12 @@
 //! When the LLM re-reads a file that was served from dedup cache, or when
 //! the verifier triggers a safe-mode fallback, that's a "regret event."
 //! The tracker records these and adjusts compression aggressiveness per file.
+//!
+//! NOTE: this in-memory tracker is not wired into the hook path (each hook
+//! invocation is a fresh process, so nothing here persists). The shipped
+//! regret signals live in the session store's `regret_log` table — written
+//! by `CliProxy` (quick reruns) and `CacheManager::expand_prefix` (ref
+//! expands), surfaced by `sqz stats`.
 
 use std::collections::HashMap;
 

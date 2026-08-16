@@ -223,6 +223,69 @@ impl CostCalculator {
 }
 
 // ---------------------------------------------------------------------------
+// Cache-aware savings estimate
+// ---------------------------------------------------------------------------
+
+/// Assumptions behind [`estimate_saved_cost`]. Token reduction is not the
+/// same thing as billed-cost reduction (arXiv:2607.12161): with provider
+/// prompt caching, a tool-output token is written to the cache once at a
+/// write premium and then re-read at a steep discount on every subsequent
+/// turn. A *saved* token therefore avoids one cache write plus N cache
+/// reads — not one list-price input token.
+#[derive(Debug, Clone)]
+pub struct SavingsAssumptions {
+    /// USD per 1M input tokens at the list price.
+    pub price_in_per_mtok: f64,
+    /// Cache-write premium over the input price (Anthropic: 1.25).
+    pub cache_write_mult: f64,
+    /// Cache-read discount multiplier (Anthropic: 0.10).
+    pub cache_read_mult: f64,
+    /// Expected number of subsequent turns that re-read the saved tokens
+    /// before the session ends or compacts.
+    pub reread_turns: f64,
+}
+
+impl Default for SavingsAssumptions {
+    fn default() -> Self {
+        SavingsAssumptions {
+            price_in_per_mtok: 3.0,
+            cache_write_mult: 1.25,
+            cache_read_mult: 0.10,
+            reread_turns: 10.0,
+        }
+    }
+}
+
+/// Output of [`estimate_saved_cost`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedCostEstimate {
+    /// Avoided cache-write cost (tokens enter the context once).
+    pub write_usd: f64,
+    /// Avoided cache-read cost over the assumed re-read turns.
+    pub reread_usd: f64,
+    /// write + reread.
+    pub total_usd: f64,
+}
+
+/// Estimate the billed cost avoided by `tokens_saved` under a
+/// prompt-cached serving model. This deliberately models the
+/// caching-enabled case, which is the conservative one: without caching
+/// every re-read bills at full input price and the figure would be much
+/// larger. Direct token cost only — trajectory effects (extra agent
+/// turns caused by missing detail) are not modeled here; the regret
+/// metrics in `sqz stats` exist to watch for those.
+pub fn estimate_saved_cost(tokens_saved: u64, a: &SavingsAssumptions) -> SavedCostEstimate {
+    let mtok = tokens_saved as f64 / 1_000_000.0;
+    let write_usd = mtok * a.price_in_per_mtok * a.cache_write_mult;
+    let reread_usd = mtok * a.price_in_per_mtok * a.cache_read_mult * a.reread_turns;
+    SavedCostEstimate {
+        write_usd,
+        reread_usd,
+        total_usd: write_usd + reread_usd,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -481,5 +544,43 @@ mod tests {
         };
         let breakdown = calc.compute_cost(&ModelFamily::Local("custom".to_string()), &usage);
         assert_eq!(breakdown.total_usd, 0.0);
+    }
+
+    #[test]
+    fn saved_cost_zero_tokens_is_zero() {
+        let est = estimate_saved_cost(0, &SavingsAssumptions::default());
+        assert_eq!(est.total_usd, 0.0);
+        assert_eq!(est.write_usd, 0.0);
+        assert_eq!(est.reread_usd, 0.0);
+    }
+
+    #[test]
+    fn saved_cost_no_rereads_is_write_only() {
+        let a = SavingsAssumptions { reread_turns: 0.0, ..Default::default() };
+        let est = estimate_saved_cost(1_000_000, &a);
+        // 1M tokens × $3/MTok × 1.25 write premium = $3.75
+        assert!((est.write_usd - 3.75).abs() < 1e-9);
+        assert_eq!(est.reread_usd, 0.0);
+        assert!((est.total_usd - 3.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn saved_cost_defaults_math() {
+        let est = estimate_saved_cost(1_000_000, &SavingsAssumptions::default());
+        // write: $3.75; rereads: 1M × $3 × 0.10 × 10 turns = $3.00
+        assert!((est.write_usd - 3.75).abs() < 1e-9);
+        assert!((est.reread_usd - 3.0).abs() < 1e-9);
+        assert!((est.total_usd - 6.75).abs() < 1e-9);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_saved_cost_monotonic_in_tokens(t1 in 0u64..10_000_000, t2 in 0u64..10_000_000) {
+            let a = SavingsAssumptions::default();
+            let (lo, hi) = if t1 <= t2 { (t1, t2) } else { (t2, t1) };
+            let e_lo = estimate_saved_cost(lo, &a);
+            let e_hi = estimate_saved_cost(hi, &a);
+            prop_assert!(e_lo.total_usd <= e_hi.total_usd + 1e-12);
+        }
     }
 }

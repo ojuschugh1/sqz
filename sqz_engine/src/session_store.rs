@@ -105,6 +105,21 @@ CREATE TABLE IF NOT EXISTS compression_log (
     created_at       TEXT NOT NULL
 );
 
+-- Compression-regret signals. A 'rerun' row means the agent re-produced
+-- byte-identical output within a short window of last seeing it (the
+-- repeat bought no new information); an 'expand' row means a §ref:…§
+-- token was expanded back to its original bytes (a recovery round trip).
+-- Both are proxies for "compression dropped something the agent needed",
+-- surfaced by `sqz stats` so aggressiveness can be judged per command.
+CREATE TABLE IF NOT EXISTS regret_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    cmd         TEXT NOT NULL,
+    hash        TEXT NOT NULL,
+    gap_secs    REAL NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS known_files (
     path        TEXT PRIMARY KEY,
     added_at    TEXT NOT NULL
@@ -817,6 +832,55 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Log a compression-regret signal. `kind` is `"rerun"` (byte-identical
+    /// output re-produced within the regret window) or `"expand"` (a
+    /// `§ref:…§` token expanded back to original bytes). `gap_secs` is the
+    /// time since the content was last seen; 0.0 when unknown.
+    pub fn log_regret(&self, kind: &str, cmd: &str, hash: &str, gap_secs: f64) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.execute(
+            "INSERT INTO regret_log (kind, cmd, hash, gap_secs, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![kind, cmd, hash, gap_secs, now],
+        ).map_err(SqzError::SessionStore)?;
+        Ok(())
+    }
+
+    /// Aggregate regret counts for `sqz stats`.
+    pub fn regret_stats(&self) -> Result<RegretStats> {
+        let mut stmt = self.db.prepare(
+            "SELECT \
+               COALESCE(SUM(CASE WHEN kind = 'rerun' THEN 1 ELSE 0 END), 0), \
+               COALESCE(SUM(CASE WHEN kind = 'expand' THEN 1 ELSE 0 END), 0), \
+               COALESCE(AVG(CASE WHEN kind = 'rerun' THEN gap_secs END), 0.0) \
+             FROM regret_log",
+        ).map_err(SqzError::SessionStore)?;
+        let stats = stmt.query_row([], |row| {
+            Ok(RegretStats {
+                reruns: row.get::<_, u32>(0)?,
+                expands: row.get::<_, u32>(1)?,
+                avg_rerun_gap_secs: row.get::<_, f64>(2)?,
+            })
+        }).map_err(SqzError::SessionStore)?;
+        Ok(stats)
+    }
+
+    /// Rerun-regret counts grouped by command, most regretted first.
+    pub fn regret_by_command(&self, limit: u32) -> Result<Vec<(String, u32)>> {
+        let mut stmt = self.db.prepare(
+            "SELECT cmd, COUNT(*) FROM regret_log \
+             WHERE kind = 'rerun' AND cmd != '' \
+             GROUP BY cmd ORDER BY COUNT(*) DESC LIMIT ?1",
+        ).map_err(SqzError::SessionStore)?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        }).map_err(SqzError::SessionStore)?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.map_err(SqzError::SessionStore)?);
+        }
+        Ok(results)
+    }
+
     /// Get cumulative compression stats from the log.
     pub fn compression_stats(&self) -> Result<CompressionStats> {
         let mut stmt = self.db.prepare(
@@ -1307,6 +1371,17 @@ pub struct CommandStats {
     pub tokens_saved: u64,
 }
 
+/// Aggregated compression-regret signals (see `regret_log`).
+#[derive(Debug, Clone, Default)]
+pub struct RegretStats {
+    /// Byte-identical output re-produced within the regret window.
+    pub reruns: u32,
+    /// `§ref:…§` tokens expanded back to original bytes.
+    pub expands: u32,
+    /// Mean seconds between last sighting and the rerun.
+    pub avg_rerun_gap_secs: f64,
+}
+
 impl CommandStats {
     pub fn reduction_pct(&self) -> f64 {
         if self.tokens_in == 0 {
@@ -1353,6 +1428,32 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).unwrap();
         SessionStore { db: conn }
+    }
+
+    #[test]
+    fn regret_log_roundtrip() {
+        let store = in_memory_store();
+        // Empty DB: zero everything.
+        let empty = store.regret_stats().unwrap();
+        assert_eq!(empty.reruns, 0);
+        assert_eq!(empty.expands, 0);
+        assert_eq!(empty.avg_rerun_gap_secs, 0.0);
+
+        store.log_regret("rerun", "git log", "aaaa", 10.0).unwrap();
+        store.log_regret("rerun", "git log", "bbbb", 30.0).unwrap();
+        store.log_regret("rerun", "cargo test", "cccc", 20.0).unwrap();
+        store.log_regret("expand", "", "dddd", 0.0).unwrap();
+
+        let stats = store.regret_stats().unwrap();
+        assert_eq!(stats.reruns, 3);
+        assert_eq!(stats.expands, 1);
+        assert!((stats.avg_rerun_gap_secs - 20.0).abs() < 1e-9);
+
+        let top = store.regret_by_command(10).unwrap();
+        assert_eq!(top[0], ("git log".to_string(), 2));
+        assert_eq!(top[1], ("cargo test".to_string(), 1));
+        // Expand rows carry an empty cmd and must not appear.
+        assert_eq!(top.len(), 2);
     }
 
     #[test]

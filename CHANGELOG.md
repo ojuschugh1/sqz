@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.github/hooks/sqz.json`, which bootstraps sqz via install.sh inside the
   cloud agent sandbox on session start and compresses bash output there,
   same as local runs. `sqz uninstall` removes it when sqz-authored.
+- **Regret signals** — `sqz stats` now reports quick re-runs (byte-identical
+  output re-produced within 2 minutes of a compressed serving; window
+  configurable via `SQZ_REGRET_WINDOW_SECS`) and ref expands (`§ref§`
+  tokens recovered via `sqz expand` or the MCP `sqz_expand` tool), with
+  per-command attribution. Both are proxies for "compression dropped
+  something the agent needed" — a self-check on compression quality.
+- **Cache-aware cost estimate** — `sqz stats --cost` estimates dollars
+  saved under a prompt-cached billing model (cache write ×1.25 once, cache
+  read ×0.10 per re-read turn) instead of the misleading tokens-×-list-price
+  math. Assumptions are printed and overridable (`--price-in`,
+  `--reread-turns`, `--cache-write-mult`, `--cache-read-mult`). Motivated
+  by arXiv:2607.12161 ("Token Reduction Is Not Cost Reduction").
+  `sqz stats --json` gains `regretReruns`, `regretExpands`, and (with
+  `--cost`) `estimatedCostSavedUsd` fields.
 
 ## [1.5.0] — 2026-08-16
 
