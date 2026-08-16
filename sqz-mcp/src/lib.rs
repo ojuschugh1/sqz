@@ -39,6 +39,8 @@
 //! `ToolSelector` ranks tools by semantic similarity and returns the top
 //! matches. This keeps the tool list small and relevant.
 
+
+pub mod proxy;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

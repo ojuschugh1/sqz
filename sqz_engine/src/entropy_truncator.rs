@@ -291,7 +291,7 @@ fn extract_identifiers(dropped: &str, kept: &str) -> Vec<String> {
 
     let mut out: Vec<String> = Vec::new();
     let mut budget = 0usize;
-    let mut push = |candidate: &str, out: &mut Vec<String>, budget: &mut usize| {
+    let push = |candidate: &str, out: &mut Vec<String>, budget: &mut usize| {
         if out.len() >= MAX_IDS || *budget + candidate.len() > MAX_CHARS {
             return;
         }

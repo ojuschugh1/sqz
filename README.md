@@ -251,12 +251,43 @@ What doesn't get compressed:
 | Windsurf | PreToolUse hook (transparent) | `sqz init` |
 | Cline | PreToolUse hook (transparent) | `sqz init` |
 | Gemini CLI | BeforeTool hook (transparent) | `sqz init` |
-| Kiro | PreToolUse hook (transparent) | `sqz init` |
+| Kiro | Steering + MCP server | `sqz init` |
 | OpenCode | TypeScript plugin (transparent) | `sqz init` |
+| Codex CLI | AGENTS.md guidance + MCP server | `sqz init` |
+| Zed | AGENTS.md guidance + MCP server | `sqz init` |
+| Copilot CLI | preToolUse hook (transparent) | `sqz init` |
+| Copilot coding agent (CI) | Repo-level hook, self-bootstraps in the cloud sandbox | `sqz init --ci` + commit |
+| Any MCP server | `sqz-mcp proxy` wraps it, compresses its tool results | see below |
 | VS Code | [Extension](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz) | Install from Marketplace |
 | JetBrains | [Plugin](https://plugins.jetbrains.com/plugin/31240-sqz--context-intelligence/) | Install from Marketplace |
 | Chrome | Browser extension | ChatGPT, Claude.ai, Gemini, Grok, Perplexity |
 | [Firefox](https://addons.mozilla.org/en-US/firefox/addon/sqz-context-compression/) | Browser extension | Same sites |
+
+## Compress Any MCP Server
+
+`sqz-mcp proxy` sits between your agent and any stdio MCP server and compresses
+what flows back: tool results go through the full sqz pipeline (dedup refs on
+repeats, safe-mode for stack traces and secrets, error results untouched), and
+verbose tool descriptions get compacted so `tools/list` stops eating your
+context window. Everything stays reversible — the proxy injects an `sqz_expand`
+tool so the agent can recover any original byte-exact.
+
+Wrap a server by prefixing its command in your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "sqz-mcp",
+      "args": ["proxy", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
+    }
+  }
+}
+```
+
+`--no-desc` keeps tool descriptions verbatim; `--no-cache` disables dedup refs.
+Works with every MCP client (Claude Code, Cursor, Windsurf, Zed, Codex, Kiro, ...)
+because the client just sees a normal MCP server.
 
 ## CLI
 
@@ -266,6 +297,7 @@ sqz init                      # Install hooks for just this project
 sqz init --only kiro          # Only configure Kiro (skip the rest)
 sqz init --only opencode      # Only configure OpenCode (skip the rest)
 sqz init --skip cursor        # Configure every agent except Cursor
+sqz init --ci                 # Also write .github/hooks/sqz.json for Copilot agent CI runs
 sqz compress <text>           # Compress (or pipe from stdin)
 sqz compress --no-cache       # Compress without dedup (always full output)
 sqz expand <ref>              # Recover original content from a §ref:HASH§ token

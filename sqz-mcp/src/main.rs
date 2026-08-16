@@ -7,6 +7,36 @@ use sqz_mcp::{McpServer, McpTransport};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    // `sqz-mcp proxy [--no-desc] [--no-cache] -- <upstream command...>`
+    // wraps another MCP server and compresses its responses.
+    if args.get(1).map(|a| a.as_str()) == Some("proxy") {
+        let mut compress_descriptions = true;
+        let mut no_cache = false;
+        let mut upstream: Vec<String> = Vec::new();
+        let mut past_separator = false;
+        for arg in &args[2..] {
+            if past_separator {
+                upstream.push(arg.clone());
+                continue;
+            }
+            match arg.as_str() {
+                "--" => past_separator = true,
+                "--no-desc" => compress_descriptions = false,
+                "--no-cache" => no_cache = true,
+                "--help" | "-h" => {
+                    eprintln!("Usage: sqz-mcp proxy [--no-desc] [--no-cache] -- <upstream command...>");
+                    std::process::exit(0);
+                }
+                other => upstream.push(other.to_string()),
+            }
+        }
+        if let Err(e) = sqz_mcp::proxy::run_proxy(&upstream, compress_descriptions, no_cache) {
+            eprintln!("[sqz-mcp] proxy error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Parse --transport and --port flags.
     let mut transport = McpTransport::Stdio;
     let mut preset_dir = PathBuf::from(".");

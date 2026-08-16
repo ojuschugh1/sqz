@@ -5,6 +5,21 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **MCP compression proxy** — `sqz-mcp proxy -- <upstream command>` wraps any
+  stdio MCP server and compresses its tool results through the full sqz
+  pipeline (dedup refs, safe-mode routing, error results verbatim, 16-token
+  net-win gate). Verbose tool descriptions are compacted on `tools/list`
+  (`--no-desc` to keep them), and an injected `sqz_expand` tool recovers any
+  original byte-exact. Works with every MCP client.
+- **CI hook for Copilot coding agent** — `sqz init --ci` writes
+  `.github/hooks/sqz.json`, which bootstraps sqz via install.sh inside the
+  cloud agent sandbox on session start and compresses bash output there,
+  same as local runs. `sqz uninstall` removes it when sqz-authored.
+
 ## [1.5.0] — 2026-08-16
 
 ### Added

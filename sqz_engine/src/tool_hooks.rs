@@ -858,6 +858,84 @@ fn copilot_home() -> PathBuf {
     home.join(".copilot")
 }
 
+/// Path of the repo-level CI hook file, read by both local Copilot CLI
+/// sessions in this repo and Copilot cloud agent jobs (the sandbox loads
+/// only `.github/hooks/*.json` from the clone).
+pub fn ci_hooks_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(".github").join("hooks").join("sqz.json")
+}
+
+/// CI hook config for Copilot cloud agent + repo-scoped Copilot CLI.
+///
+/// The cloud agent sandbox has no sqz preinstalled and restricts outbound
+/// network to GitHub hosts — which is exactly where sqz's install script
+/// and release binaries live, so a sessionStart hook can bootstrap it.
+/// The preToolUse hook is fail-closed on non-zero exit in Copilot, so
+/// every path ends in `exit 0` with either a decision or `{}` (fall
+/// through) — a missing binary must never block the tool call.
+pub fn ci_hook_content() -> String {
+    r#"{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "command -v sqz >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/ojuschugh1/sqz/main/install.sh | sh >/dev/null 2>&1 || true",
+        "timeoutSec": 120
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "matcher": "bash|powershell",
+        "bash": "SQZ_BIN=$(command -v sqz || echo $HOME/.local/bin/sqz); [ -x \"$SQZ_BIN\" ] && \"$SQZ_BIN\" hook copilot 2>/dev/null || echo '{}'",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
+"#
+    .to_string()
+}
+
+/// Install the repo-level CI hook file. Skip-if-exists unless the existing
+/// file is sqz-authored and stale.
+pub fn install_ci_hook(project_dir: &Path) -> Result<bool> {
+    let path = ci_hooks_path(project_dir);
+    let content = ci_hook_content();
+    if path.exists() {
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        if existing == content || !existing.contains("hook copilot") {
+            return Ok(false);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::error::SqzError::Other(format!("create {}: {e}", parent.display()))
+        })?;
+    }
+    std::fs::write(&path, content).map_err(|e| {
+        crate::error::SqzError::Other(format!("write {}: {e}", path.display()))
+    })?;
+    Ok(true)
+}
+
+/// Remove the CI hook file when sqz-authored.
+pub fn remove_ci_hook(project_dir: &Path) -> Result<bool> {
+    let path = ci_hooks_path(project_dir);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    if !content.contains("hook copilot") {
+        return Ok(false);
+    }
+    std::fs::remove_file(&path).map_err(|e| {
+        crate::error::SqzError::Other(format!("remove {}: {e}", path.display()))
+    })?;
+    Ok(true)
+}
+
 /// The Copilot CLI hook config sqz installs (v1 camelCase format).
 pub fn copilot_hook_content(sqz_path: &str) -> String {
     let escaped = json_escape_string_value(sqz_path);
@@ -3026,6 +3104,81 @@ mod issue_11_tool_filter_tests {
             dir.path().join(".clinerules").exists(),
             "skip cursor should not skip cline"
         );
+    }
+}
+
+#[cfg(test)]
+mod ci_hook_tests {
+    use super::*;
+
+    #[test]
+    fn ci_hook_content_is_valid_v1_config() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&ci_hook_content()).expect("CI hook must be valid JSON");
+        assert_eq!(parsed["version"], 1);
+        let session_start = parsed["hooks"]["sessionStart"].as_array().unwrap();
+        assert!(session_start[0]["bash"]
+            .as_str()
+            .unwrap()
+            .contains("install.sh"));
+        let pre = parsed["hooks"]["preToolUse"].as_array().unwrap();
+        let bash = pre[0]["bash"].as_str().unwrap();
+        assert!(bash.contains("hook copilot"));
+        // Fail-closed platform: every branch must end in output, never
+        // a bare non-zero exit.
+        assert!(bash.ends_with("echo '{}'"));
+        assert_eq!(pre[0]["matcher"], "bash|powershell");
+    }
+
+    #[test]
+    fn install_ci_hook_creates_then_noops() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(install_ci_hook(dir.path()).unwrap());
+        let path = ci_hooks_path(dir.path());
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ci_hook_content());
+        // Second run: unchanged content, no rewrite reported.
+        assert!(!install_ci_hook(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn install_ci_hook_refreshes_stale_sqz_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ci_hooks_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"version":1,"hooks":{"preToolUse":[{"bash":"sqz hook copilot"}]}}"#).unwrap();
+        assert!(install_ci_hook(dir.path()).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ci_hook_content());
+    }
+
+    #[test]
+    fn install_ci_hook_leaves_user_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ci_hooks_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"version":1,"hooks":{}}"#).unwrap();
+        assert!(!install_ci_hook(dir.path()).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"version":1,"hooks":{}}"#
+        );
+    }
+
+    #[test]
+    fn remove_ci_hook_only_removes_sqz_authored() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file: no-op.
+        assert!(!remove_ci_hook(dir.path()).unwrap());
+        // sqz-authored: removed.
+        install_ci_hook(dir.path()).unwrap();
+        assert!(remove_ci_hook(dir.path()).unwrap());
+        assert!(!ci_hooks_path(dir.path()).exists());
+        // User-owned: left alone.
+        let path = ci_hooks_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}").unwrap();
+        assert!(!remove_ci_hook(dir.path()).unwrap());
+        assert!(path.exists());
     }
 }
 

@@ -86,6 +86,16 @@ enum Command {
         /// Example: `sqz init --skip cursor,windsurf`
         #[arg(long, value_name = "TOOLS")]
         skip: Option<String>,
+
+        /// Also write a repo-level CI hook at `.github/hooks/sqz.json`.
+        ///
+        /// GitHub Copilot coding agent (cloud) and repo-scoped Copilot
+        /// CLI sessions load hooks from that path. The file bootstraps
+        /// sqz via install.sh on session start and pipes bash output
+        /// through it, so CI agent runs get the same token savings as
+        /// local ones. Commit the file for it to take effect.
+        #[arg(long)]
+        ci: bool,
     },
 
     /// Compress text from stdin or a positional argument.
@@ -413,7 +423,7 @@ fn main() {
             }
         }
 
-        Some(Command::Init { yes, global, only, skip }) => cmd_init(yes, global, only, skip),
+        Some(Command::Init { yes, global, only, skip, ci }) => cmd_init(yes, global, only, skip, ci),
         Some(Command::Compress { text, mode, verify, no_cache, cmd, no_abbrev }) => {
             cmd_compress(text, &mode, verify, no_cache, cmd, no_abbrev)
         }
@@ -445,7 +455,7 @@ fn main() {
 // ── Command implementations ───────────────────────────────────────────────
 
 /// `sqz init` — detect shell, install hook, create default preset.
-fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option<String>) {
+fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option<String>, ci: bool) {
     use std::io::Write;
 
     // Parse the agent filter first so typos fail fast, before we
@@ -849,6 +859,28 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
         }
     }
 
+    // Repo-level CI hook (opt-in via --ci)
+    if ci {
+        let ci_path = sqz_engine::ci_hooks_path(&project_dir);
+        match std::fs::read_to_string(&ci_path) {
+            Err(_) => plan.push((
+                ci_path.display().to_string(),
+                "CI hook for Copilot coding agent (commit this file)".to_string(),
+                true,
+            )),
+            Ok(s) if s == sqz_engine::ci_hook_content() => {}
+            Ok(s) if s.contains("hook copilot") => plan.push((
+                ci_path.display().to_string(),
+                "CI hook (refresh stale sqz content)".to_string(),
+                false,
+            )),
+            Ok(_) => eprintln!(
+                "[sqz] note: {} exists but wasn't written by sqz; leaving it alone.",
+                ci_path.display()
+            ),
+        }
+    }
+
     // ── Phase 2: Show the plan ───────────────────────────────────────
 
     if plan.is_empty() {
@@ -923,6 +955,19 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
         sqz_engine::install_tool_hooks_scoped_filtered(&project_dir, &sqz_path, scope, &filter);
     for tool in &installed_tools {
         println!("[sqz] ✓ {} hook installed", tool);
+    }
+
+    // Repo-level CI hook (opt-in via --ci)
+    if ci {
+        match sqz_engine::install_ci_hook(&project_dir) {
+            Ok(true) => {
+                let p = sqz_engine::ci_hooks_path(&project_dir);
+                println!("[sqz] ✓ CI hook written to {}", p.display());
+                println!("      Commit it so Copilot coding agent runs pick up sqz.");
+            }
+            Ok(false) => {}
+            Err(e) => eprintln!("[sqz] ✗ warning: CI hook install failed: {e}"),
+        }
     }
 
     // Zed's settings.json is JSONC more often than not (Zed's template
@@ -1692,6 +1737,16 @@ fn cmd_uninstall(skip_confirm: bool) {
         }
     }
 
+    // Repo-level CI hook, only when sqz-authored.
+    let ci_hook_path = sqz_engine::ci_hooks_path(&project_dir);
+    let ci_hook_is_sqz = ci_hook_path.exists()
+        && std::fs::read_to_string(&ci_hook_path)
+            .map(|s| s.contains("hook copilot"))
+            .unwrap_or(false);
+    if ci_hook_is_sqz {
+        files_to_remove.push((ci_hook_path.display().to_string(), true));
+    }
+
     // OpenCode project config (opencode.json OR opencode.jsonc): sqz
     // will surgically remove its own `mcp.sqz` entry and the `"sqz"`
     // entry from `plugin[]`, leaving any other config intact. If the
@@ -1923,6 +1978,16 @@ fn cmd_uninstall(skip_confirm: bool) {
                 Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", full.display()),
             }
         }
+    }
+
+    // Repo-level CI hook (only when sqz-authored).
+    match sqz_engine::remove_ci_hook(&project_dir) {
+        Ok(true) => println!(
+            "[sqz] ✓ removed {}",
+            sqz_engine::ci_hooks_path(&project_dir).display()
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("[sqz] ✗ could not remove CI hook: {e}"),
     }
 
     // Surgically remove sqz entries from the OpenCode project config.
