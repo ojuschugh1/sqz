@@ -470,6 +470,7 @@ cargo build --release
 - [Benchmark: sqz vs rtk](docs/benchmark-vs-rtk.md)
 - [Discord](https://discord.gg/j8EEyH5dSB)
 - [Changelog](CHANGELOG.md)
+- MCP Registry name: `mcp-name: io.github.ojuschugh1/sqz`
 
 ## Star History
 

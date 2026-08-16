@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ojuschugh1/sqz",
+  "title": "sqz",
+  "description": "Pre-injection context compression for coding agents. Zero LLM calls, zero telemetry, offline-safe.",
+  "websiteUrl": "https://github.com/ojuschugh1/sqz",
+  "repository": {
+    "url": "https://github.com/ojuschugh1/sqz",
+    "source": "github"
+  },
+  "version": "1.5.0",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "sqz-mcp",
+      "version": "1.5.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

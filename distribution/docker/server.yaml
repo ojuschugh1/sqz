@@ -1,0 +1,25 @@
+# Draft entry for the Docker MCP catalog (github.com/docker/mcp-registry).
+# Submission: fork docker/mcp-registry, copy this file to
+# servers/sqz/server.yaml, set source.commit to the release commit SHA,
+# and open a PR. See distribution/README.md for the full checklist.
+name: sqz
+image: mcp/sqz
+type: server
+meta:
+  category: devops
+  tags:
+    - compression
+    - context
+    - tokens
+    - devops
+about:
+  title: sqz
+  description: >-
+    Pre-injection context compression for coding agents. Compresses CLI
+    output, files, and MCP tool results before they reach the model: 90+
+    structural formatters, content-addressed dedup refs, entropy-based
+    safe-mode routing. Zero LLM calls, zero telemetry, works offline.
+  icon: https://avatars.githubusercontent.com/u/79078267?v=4
+source:
+  project: https://github.com/ojuschugh1/sqz
+  dockerfile: distribution/docker/Dockerfile

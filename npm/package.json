@@ -16,6 +16,7 @@
     "url": "https://github.com/ojuschugh1/sqz.git"
   },
   "license": "ELv2",
+  "mcpName": "io.github.ojuschugh1/sqz",
   "bin": {
     "sqz": "bin/sqz",
     "sqz-mcp": "bin/sqz-mcp"
