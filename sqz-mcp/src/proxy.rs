@@ -10,7 +10,9 @@
 //!   verbatim). Originals are persisted, so every compression is
 //!   recoverable via the injected `sqz_expand` tool.
 //! - compacts `tools/list` tool descriptions (whitespace + length cap,
-//!   schemas untouched) unless `--no-desc`.
+//!   schemas untouched) unless `--no-desc`. With `--lazy-tools` the cap
+//!   drops to one sentence and an injected `sqz_tool_help` tool serves
+//!   the full original documentation on demand.
 //! - appends a `sqz_expand` tool to the upstream's tool list and answers
 //!   calls to it locally.
 //! - appends a short protocol note to the `initialize` instructions so
@@ -27,14 +29,21 @@ use std::sync::{Arc, Mutex};
 use sqz_engine::{CacheResult, Result, SqzEngine, SqzError};
 
 const EXPAND_TOOL_NAME: &str = "sqz_expand";
+const HELP_TOOL_NAME: &str = "sqz_tool_help";
 const NET_WIN_MIN_TOKENS: u32 = 16;
 const MAX_DESCRIPTION_CHARS: usize = 400;
+/// `--lazy-tools` cap: roughly one sentence per tool.
+const LAZY_DESCRIPTION_CHARS: usize = 160;
 
 const INSTRUCTIONS_NOTE: &str = "\n\nNote: tool results pass through the sqz \
 compression proxy. A result of the form §ref:HASH§ means you have already \
 seen this exact content earlier in the session. If you need any compressed \
 or referenced result verbatim, call the sqz_expand tool with the ref token \
 or hash prefix.";
+
+const LAZY_TOOLS_NOTE: &str = " Tool descriptions are shortened to one \
+sentence to save context; call the sqz_tool_help tool with a tool name to \
+read the full original documentation.";
 
 /// What kind of response we expect for an outstanding request id.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +59,12 @@ struct ProxyState {
     pending: HashMap<String, Pending>,
     compress_descriptions: bool,
     no_cache: bool,
+    /// `--lazy-tools`: shorten descriptions to one sentence and serve the
+    /// originals on demand via the injected sqz_tool_help tool.
+    lazy_tools: bool,
+    /// Original tool descriptions captured from tools/list responses,
+    /// keyed by tool name. Only populated in lazy mode.
+    tool_docs: HashMap<String, String>,
 }
 
 impl ProxyState {
@@ -79,6 +94,9 @@ impl ProxyState {
                         .to_string();
                     if name == EXPAND_TOOL_NAME {
                         return Ok(Some(self.answer_expand(&id, &msg)));
+                    }
+                    if name == HELP_TOOL_NAME {
+                        return Ok(Some(self.answer_tool_help(&id, &msg)));
                     }
                     Pending::ToolCall { name }
                 }
@@ -119,18 +137,38 @@ impl ProxyState {
             .get("instructions")
             .and_then(|i| i.as_str())
             .unwrap_or("");
-        let combined = format!("{existing}{INSTRUCTIONS_NOTE}");
+        let mut combined = format!("{existing}{INSTRUCTIONS_NOTE}");
+        if self.lazy_tools {
+            combined.push_str(LAZY_TOOLS_NOTE);
+        }
         result["instructions"] = serde_json::Value::String(combined.trim_start().to_string());
     }
 
-    fn rewrite_tools_list(&self, msg: &mut serde_json::Value) {
+    fn rewrite_tools_list(&mut self, msg: &mut serde_json::Value) {
         let Some(tools) = msg
             .pointer_mut("/result/tools")
             .and_then(|t| t.as_array_mut())
         else {
             return;
         };
-        if self.compress_descriptions {
+        if self.lazy_tools {
+            // One sentence per tool; originals stashed for sqz_tool_help.
+            // Schemas are untouched — the protocol needs them to call.
+            for tool in tools.iter_mut() {
+                let name = tool
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(desc) = tool.get("description").and_then(|d| d.as_str()) {
+                    let brief = compact_description(desc, LAZY_DESCRIPTION_CHARS);
+                    if brief.len() < desc.len() && !name.is_empty() {
+                        self.tool_docs.insert(name, desc.to_string());
+                        tool["description"] = serde_json::Value::String(brief);
+                    }
+                }
+            }
+        } else if self.compress_descriptions {
             for tool in tools.iter_mut() {
                 if let Some(desc) = tool.get("description").and_then(|d| d.as_str()) {
                     let compact = compact_description(desc, MAX_DESCRIPTION_CHARS);
@@ -152,6 +190,23 @@ impl ProxyState {
                         "ref": { "type": "string", "description": "The §ref:HASH§ token or hex prefix to expand" }
                     },
                     "required": ["ref"]
+                }
+            }));
+        }
+        if self.lazy_tools
+            && !tools.iter().any(|t| {
+                t.get("name").and_then(|n| n.as_str()) == Some(HELP_TOOL_NAME)
+            })
+        {
+            tools.push(serde_json::json!({
+                "name": HELP_TOOL_NAME,
+                "description": "Return the full original documentation for a tool whose description was shortened by the sqz proxy.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Tool name to look up" }
+                    },
+                    "required": ["name"]
                 }
             }));
         }
@@ -206,8 +261,24 @@ impl ProxyState {
             CacheResult::Dedup { inline_ref, token_cost } => (inline_ref, token_cost),
             CacheResult::Delta { delta_text, token_cost, .. } => (delta_text, token_cost),
             CacheResult::Fresh { output } => {
-                let t = estimate_tokens(&output.data);
-                (output.data, t)
+                // Spill ref: when entropy truncation dropped segments, the
+                // untruncated original is in the cache (we're on the cached
+                // path here) — point the agent at sqz_expand so truncation
+                // is recoverable rather than lost.
+                let truncated = output
+                    .stages_applied
+                    .iter()
+                    .any(|s| s == "entropy_truncate");
+                let mut data = output.data;
+                if truncated && !self.no_cache {
+                    let hash = sqz_engine::CacheManager::sha256_hex(text.as_bytes());
+                    data.push_str(&format!(
+                        "\n[full output: call sqz_expand with ref \"{}\"]",
+                        &hash[..16]
+                    ));
+                }
+                let t = estimate_tokens(&data);
+                (data, t)
             }
         };
         if tokens_original.saturating_sub(tokens_out) < NET_WIN_MIN_TOKENS {
@@ -221,6 +292,28 @@ impl ProxyState {
             None,
         );
         Some(out)
+    }
+
+    fn answer_tool_help(&self, id: &serde_json::Value, msg: &serde_json::Value) -> String {
+        let name = msg
+            .pointer("/params/arguments/name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        let body = match self.tool_docs.get(name) {
+            Some(doc) => serde_json::json!({
+                "content": [{ "type": "text", "text": doc }],
+                "isError": false
+            }),
+            None => serde_json::json!({
+                "content": [{ "type": "text", "text": format!(
+                    "no stored documentation for '{name}' — either its \
+                     description was never shortened (already short), the \
+                     name is unknown, or tools/list has not been called yet"
+                ) }],
+                "isError": true
+            }),
+        };
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": body }).to_string()
     }
 
     fn answer_expand(&self, id: &serde_json::Value, msg: &serde_json::Value) -> String {
@@ -281,6 +374,7 @@ pub fn run_proxy(
     upstream_cmd: &[String],
     compress_descriptions: bool,
     no_cache: bool,
+    lazy_tools: bool,
 ) -> Result<()> {
     if upstream_cmd.is_empty() {
         return Err(SqzError::Other(
@@ -304,6 +398,8 @@ pub fn run_proxy(
         pending: HashMap::new(),
         compress_descriptions,
         no_cache,
+        lazy_tools,
+        tool_docs: HashMap::new(),
     }));
     let child_stdin = Arc::new(Mutex::new(child_stdin));
 
@@ -372,9 +468,25 @@ mod tests {
                 pending: HashMap::new(),
                 compress_descriptions: true,
                 no_cache: false,
+                lazy_tools: false,
+                tool_docs: HashMap::new(),
             },
             dir,
         )
+    }
+
+    /// Round-trip a tools/list through the proxy and return the rewritten
+    /// tools array.
+    fn list_tools(state: &mut ProxyState, tools: serde_json::Value) -> serde_json::Value {
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 77, "method": "tools/list" });
+        assert!(state.on_client_message(&req.to_string()).unwrap().is_none());
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0", "id": 77,
+            "result": { "tools": tools }
+        });
+        let out: serde_json::Value =
+            serde_json::from_str(&state.on_upstream_message(&resp.to_string())).unwrap();
+        out.pointer("/result/tools").unwrap().clone()
     }
 
     fn call_and_respond(state: &mut ProxyState, id: u64, tool: &str, text: &str) -> serde_json::Value {
@@ -388,6 +500,112 @@ mod tests {
             "result": { "content": [{ "type": "text", "text": text }], "isError": false }
         });
         serde_json::from_str(&state.on_upstream_message(&resp.to_string())).unwrap()
+    }
+
+    #[test]
+    fn lazy_tools_shortens_descriptions_and_serves_full_docs() {
+        let (mut state, _dir) = test_state();
+        state.lazy_tools = true;
+        let long_desc = "Search issues across every project in the tracker. \
+            Supports a rich query language with field filters, boolean \
+            operators, ranges, and sorting. Results are paginated and can \
+            be exported. Rate limits apply to unauthenticated callers, and \
+            some fields require elevated permissions to read or write."
+            .to_string();
+        let tools = list_tools(
+            &mut state,
+            serde_json::json!([
+                { "name": "issue_search", "description": long_desc,
+                  "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } } }
+            ]),
+        );
+
+        // Description shortened to roughly one sentence, schema untouched.
+        let rewritten = tools[0]["description"].as_str().unwrap();
+        assert!(rewritten.len() < long_desc.len());
+        assert!(rewritten.len() <= LAZY_DESCRIPTION_CHARS + 4);
+        assert!(tools[0].pointer("/inputSchema/properties/q").is_some());
+
+        // Both helper tools injected.
+        let names: Vec<&str> = tools
+            .as_array().unwrap().iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&EXPAND_TOOL_NAME));
+        assert!(names.contains(&HELP_TOOL_NAME));
+
+        // sqz_tool_help returns the verbatim original.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": { "name": HELP_TOOL_NAME, "arguments": { "name": "issue_search" } }
+        });
+        let out = state.on_client_message(&req.to_string()).unwrap().expect("answered locally");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.pointer("/result/isError"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            parsed.pointer("/result/content/0/text").unwrap().as_str().unwrap(),
+            long_desc
+        );
+
+        // Unknown tool name: isError result, not a crash.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": { "name": HELP_TOOL_NAME, "arguments": { "name": "nope" } }
+        });
+        let out = state.on_client_message(&req.to_string()).unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.pointer("/result/isError"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn lazy_tools_off_keeps_legacy_behavior() {
+        let (mut state, _dir) = test_state();
+        let short = "Compact enough already.".to_string();
+        let tools = list_tools(
+            &mut state,
+            serde_json::json!([{ "name": "t1", "description": short, "inputSchema": {} }]),
+        );
+        // No help tool without lazy mode; short description untouched.
+        let names: Vec<&str> = tools
+            .as_array().unwrap().iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(!names.contains(&HELP_TOOL_NAME));
+        assert_eq!(tools[0]["description"].as_str().unwrap(), short);
+    }
+
+    #[test]
+    fn truncated_result_carries_expand_hint() {
+        let (mut state, _dir) = test_state();
+        // Entropy-truncation fixture: distinct low-entropy segments that
+        // the truncator drops, plus high-entropy prose it keeps.
+        let mut big = String::from("run marker for the proxy spill test\n\n");
+        for i in 0..12u8 {
+            let word: String = std::iter::repeat((b'a' + i) as char).take(10).collect();
+            big.push_str(&format!("{} filler-{i}\n\n", format!("{word} ").repeat(30)));
+        }
+        big.push_str("The quick brown fox jumps over the lazy dog by silver rivers today.\n");
+
+        let resp = call_and_respond(&mut state, 1, "logs", &big);
+        let text = resp.pointer("/result/content/0/text").unwrap().as_str().unwrap();
+        assert!(
+            text.contains("[full output: call sqz_expand with ref \""),
+            "expected sqz_expand hint on truncated result, got: {text}"
+        );
+
+        // The hinted prefix must resolve through the expand tool.
+        let start = text.find("sqz_expand with ref \"").unwrap() + "sqz_expand with ref \"".len();
+        let prefix: String = text[start..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        assert_eq!(prefix.len(), 16);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "sqz_expand", "arguments": { "ref": prefix } }
+        });
+        let out = state.on_client_message(&req.to_string()).unwrap()
+            .expect("sqz_expand is answered locally");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let recovered = parsed.pointer("/result/content/0/text").unwrap().as_str().unwrap();
+        assert_eq!(recovered, big, "expand must recover the exact original");
     }
 
     #[test]

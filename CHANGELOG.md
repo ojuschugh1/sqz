@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tokens recovered via `sqz expand` or the MCP `sqz_expand` tool), with
   per-command attribution. Both are proxies for "compression dropped
   something the agent needed" — a self-check on compression quality.
+- **Spill refs on truncation** — when entropy truncation drops segments
+  from a compressed serving, the output now ends with a recovery hint
+  (`[full output: sqz expand <prefix>]` in the shell hook,
+  `[full output: call sqz_expand with ref "<prefix>"]` in the MCP proxy).
+  The untruncated original is already in the cache, so truncation becomes
+  a preview instead of a loss. Hints are only added when the original was
+  actually stored.
+- **Lazy tool descriptions** — `sqz-mcp proxy --lazy-tools` shortens every
+  upstream tool description to one sentence (~160 chars) and injects an
+  `sqz_tool_help` tool that returns the full original documentation on
+  demand. Schemas are untouched. Aimed at servers whose `tools/list` alone
+  costs 10-40k tokens.
 - **Cache-aware cost estimate** — `sqz stats --cost` estimates dollars
   saved under a prompt-cached billing model (cache write ×1.25 once, cache
   read ×0.10 per re-read turn) instead of the misleading tokens-×-list-price

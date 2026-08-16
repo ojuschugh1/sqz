@@ -285,8 +285,11 @@ Wrap a server by prefixing its command in your MCP config:
 }
 ```
 
-`--no-desc` keeps tool descriptions verbatim; `--no-cache` disables dedup refs.
-Works with every MCP client (Claude Code, Cursor, Windsurf, Zed, Codex, Kiro, ...)
+Flags: `--lazy-tools` shortens every tool description to one sentence and
+injects an `sqz_tool_help` tool that serves the full original docs on demand
+(some MCP servers spend 10-40k tokens on `tools/list` alone); `--no-desc`
+keeps descriptions verbatim; `--no-cache` disables dedup refs. Works with
+every MCP client (Claude Code, Cursor, Windsurf, Zed, Codex, Kiro, ...)
 because the client just sees a normal MCP server.
 
 ## CLI

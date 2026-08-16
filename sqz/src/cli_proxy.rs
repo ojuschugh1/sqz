@@ -272,12 +272,21 @@ impl CliProxy {
             Ok(compressed) => {
                 let tokens_original = compressed.tokens_original;
                 let tokens_compressed = compressed.tokens_compressed;
+                let truncated = compressed
+                    .stages_applied
+                    .iter()
+                    .any(|s| s == "entropy_truncate");
                 // Persist to L2 cache — skip if content was routed to Safe mode
                 // (may contain secrets, API keys, passwords)
                 let mode = self.engine.route_compression_mode(output);
-                if mode != sqz_engine::CompressionMode::Safe {
-                    let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
-                }
+                let stored = if mode != sqz_engine::CompressionMode::Safe {
+                    self.engine
+                        .cache_manager()
+                        .store_compressed(output.as_bytes(), &compressed)
+                        .is_ok()
+                } else {
+                    false
+                };
                 self.l1_cache.borrow_mut().insert(fast_hash);
 
                 // N-gram abbreviation (opt-out, default ON).
@@ -313,6 +322,19 @@ impl CliProxy {
                     }
                 } else {
                     compressed.data
+                };
+
+                // Spill ref: entropy truncation drops whole segments, but
+                // the untruncated original is sitting in the cache we just
+                // wrote. Tell the agent how to get it back, so truncation
+                // is a preview rather than a loss. Costs ~10 tokens; only
+                // added when the original was actually stored (a ref that
+                // can't resolve would be worse than nothing).
+                let abbreviated = if stored && truncated {
+                    let hash = sqz_engine::CacheManager::sha256_hex(output.as_bytes());
+                    format!("{abbreviated}\n[full output: sqz expand {}]", &hash[..16])
+                } else {
+                    abbreviated
                 };
 
                 // Net-win gate: the stats header itself costs context tokens
@@ -688,6 +710,45 @@ mod tests {
         // File should be persisted in the session store
         let known = proxy.engine.session_store().known_files().unwrap();
         assert!(known.contains(&"src/main.rs".to_string()), "cat should track the file path");
+    }
+
+    #[test]
+    fn truncated_output_carries_spill_ref() {
+        let (proxy, _dir) = isolated_proxy();
+        // Entropy-truncation fixture (same shape as the entropy_truncator
+        // unit tests): low-entropy repeat-heavy segments get dropped,
+        // high-entropy prose survives. Unique tag defeats cross-test dedup.
+        let unique_tag = format!("spill-{}-{:?}", std::process::id(), std::time::SystemTime::now());
+        let mut input = format!("run marker {unique_tag}\n\n");
+        for i in 0..12u8 {
+            // Distinct letter per segment so template/dedup stages don't
+            // collapse them before the entropy truncator sees the text.
+            let word: String = std::iter::repeat((b'a' + i) as char).take(10).collect();
+            input.push_str(&format!("{} filler-{i}\n\n", format!("{word} ").repeat(30)));
+        }
+        input.push_str("The quick brown fox jumps over the lazy dog by silver rivers today.\n\n");
+        input.push_str("Zephyrs quickly vex jumbled gnomes while quartz dwarfs mix pyjamas.\n");
+
+        let result = proxy.intercept_output("mytool", &input);
+        assert!(
+            result.contains("[full output: sqz expand "),
+            "expected spill ref hint in truncated output, got: {result}"
+        );
+
+        // The hinted prefix must expand back to the exact original bytes.
+        let prefix_start = result.find("[full output: sqz expand ").unwrap()
+            + "[full output: sqz expand ".len();
+        let prefix: String = result[prefix_start..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        assert_eq!(prefix.len(), 16, "hint must carry a 16-char hash prefix");
+        match proxy.engine.cache_manager().expand_prefix(&prefix).unwrap() {
+            Some(sqz_engine::ExpandResult::Original { bytes, .. }) => {
+                assert_eq!(bytes, input.as_bytes(), "expand must recover the exact original");
+            }
+            other => panic!("expected Original expansion, got {other:?}"),
+        }
     }
 
     #[test]

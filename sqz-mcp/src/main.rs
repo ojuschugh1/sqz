@@ -12,6 +12,7 @@ fn main() {
     if args.get(1).map(|a| a.as_str()) == Some("proxy") {
         let mut compress_descriptions = true;
         let mut no_cache = false;
+        let mut lazy_tools = false;
         let mut upstream: Vec<String> = Vec::new();
         let mut past_separator = false;
         for arg in &args[2..] {
@@ -23,14 +24,15 @@ fn main() {
                 "--" => past_separator = true,
                 "--no-desc" => compress_descriptions = false,
                 "--no-cache" => no_cache = true,
+                "--lazy-tools" => lazy_tools = true,
                 "--help" | "-h" => {
-                    eprintln!("Usage: sqz-mcp proxy [--no-desc] [--no-cache] -- <upstream command...>");
+                    eprintln!("Usage: sqz-mcp proxy [--no-desc] [--no-cache] [--lazy-tools] -- <upstream command...>");
                     std::process::exit(0);
                 }
                 other => upstream.push(other.to_string()),
             }
         }
-        if let Err(e) = sqz_mcp::proxy::run_proxy(&upstream, compress_descriptions, no_cache) {
+        if let Err(e) = sqz_mcp::proxy::run_proxy(&upstream, compress_descriptions, no_cache, lazy_tools) {
             eprintln!("[sqz-mcp] proxy error: {e}");
             std::process::exit(1);
         }
