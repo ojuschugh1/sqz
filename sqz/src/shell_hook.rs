@@ -19,11 +19,11 @@ __sqz_postexec() {
 }
 PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__sqz_postexec"
 sqz_run() {
-    "$@" 2>&1 | SQZ_CMD="$*" sqz compress
+    { "$@" 2>&1; printf '\n__SQZ_EXIT_%d__\n' "$?"; } | SQZ_CMD="$*" sqz compress
 }
 # sudo passthrough: preserve compression for privileged commands
 sqz_sudo() {
-    sudo "$@" 2>&1 | SQZ_CMD="sudo $*" sqz compress
+    { sudo "$@" 2>&1; printf '\n__SQZ_EXIT_%d__\n' "$?"; } | SQZ_CMD="sudo $*" sqz compress
 }
 # sqz — end of auto-installed block
 "#;
@@ -31,10 +31,10 @@ sqz_sudo() {
 const ZSH_HOOK: &str = r#"
 # sqz — context intelligence layer (auto-installed)
 sqz_run() {
-    "$@" 2>&1 | SQZ_CMD="$*" sqz compress
+    { "$@" 2>&1; printf '\n__SQZ_EXIT_%d__\n' "$?"; } | SQZ_CMD="$*" sqz compress
 }
 sqz_sudo() {
-    sudo "$@" 2>&1 | SQZ_CMD="sudo $*" sqz compress
+    { sudo "$@" 2>&1; printf '\n__SQZ_EXIT_%d__\n' "$?"; } | SQZ_CMD="sudo $*" sqz compress
 }
 preexec() {
     export __SQZ_CMD="$1"
@@ -46,11 +46,11 @@ const FISH_HOOK: &str = r#"
 # sqz — context intelligence layer (auto-installed)
 function sqz_run
     set -lx SQZ_CMD (string join " " $argv)
-    $argv 2>&1 | sqz compress
+    begin; $argv 2>&1; printf '\n__SQZ_EXIT_%d__\n' $status; end | sqz compress
 end
 function sqz_sudo
     set -lx SQZ_CMD "sudo "(string join " " $argv)
-    sudo $argv 2>&1 | sqz compress
+    begin; sudo $argv 2>&1; printf '\n__SQZ_EXIT_%d__\n' $status; end | sqz compress
 end
 # sqz — end of auto-installed block
 "#;
@@ -69,7 +69,7 @@ const POWERSHELL_HOOK: &str = r#"
 function Invoke-SqzRun {
     param([string[]]$Command)
     $env:SQZ_CMD = ($Command -join " ")
-    & @Command 2>&1 | sqz compress
+    & { & @Command 2>&1; "__SQZ_EXIT_$(if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 })__" } | sqz compress
 }
 Set-Alias sqz_run Invoke-SqzRun
 function Invoke-SqzSudo {

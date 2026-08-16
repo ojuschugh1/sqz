@@ -275,11 +275,12 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // hook (they only fired in unit tests / the MCP path). The command is a
     // simple command here (compound commands bailed out above via
     // `has_shell_operators`), so quoting it as one arg is safe.
-    let rewritten = format!(
-        "{} 2>&1 | sqz compress --cmd {}",
-        command,
-        shell_escape(command),
-    );
+    let is_powershell = matches!(tool_name, "PowerShell" | "powershell" | "pwsh");
+    let rewritten = if is_powershell {
+        crate::exit_marker::powershell_rewrite(command, &shell_escape(command))
+    } else {
+        crate::exit_marker::posix_rewrite(command, &shell_escape(command))
+    };
 
     // Claude Code's updatedInput REPLACES the whole input object (per
     // code.claude.com/docs/en/hooks), so unchanged fields like
@@ -1995,6 +1996,58 @@ mod tests {
         assert!(
             parsed["hookSpecificOutput"]["updatedInput"]["command"].is_string(),
             "pwsh tool calls should be rewritten"
+        );
+    }
+
+    #[test]
+    fn bash_rewrite_carries_exit_status_trailer() {
+        let input = r#"{"tool_name":"Bash","tool_input":{"command":"cargo test"}}"#;
+        let result = process_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            cmd,
+            "{ cargo test 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } | sqz compress --cmd 'cargo test'",
+            "POSIX rewrite must send the command's exit status through the pipe"
+        );
+    }
+
+    #[test]
+    fn powershell_rewrite_uses_lastexitcode_not_printf() {
+        let input = r#"{"tool_name":"PowerShell","tool_input":{"command":"cargo test"}}"#;
+        let result = process_hook(input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        assert!(cmd.contains("$LASTEXITCODE"), "PowerShell form uses $LASTEXITCODE: {cmd}");
+        assert!(cmd.contains("__SQZ_EXIT_"), "PowerShell form emits the trailer: {cmd}");
+        assert!(!cmd.contains("printf"), "printf is not valid PowerShell: {cmd}");
+    }
+
+    #[test]
+    fn exit_trailer_rewrite_is_not_rewrapped() {
+        // Feed the hook its own output — the anti-rewrap guard must catch
+        // the new brace-group form (it contains `sqz compress --cmd`).
+        let first = process_hook(
+            r#"{"tool_name":"Bash","tool_input":{"command":"git log"}}"#,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
+        let rewritten = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap();
+        let second_input = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": rewritten }
+        })
+        .to_string();
+        let second = process_hook(&second_input).unwrap();
+        assert_eq!(
+            second, second_input,
+            "already-rewritten commands must pass through unchanged"
         );
     }
 

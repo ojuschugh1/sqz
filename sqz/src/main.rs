@@ -1072,6 +1072,21 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
         }
     };
 
+    // Hook rewrites append the command's exit status as a trailer;
+    // strip it and re-raise it as our own exit code on every path out.
+    let (input, marker_exit) = if is_stdin {
+        sqz_engine::strip_exit_marker(&input)
+    } else {
+        (input, None)
+    };
+    let finish = |code: Option<i32>| {
+        if let Some(c) = code {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            std::process::exit(c);
+        }
+    };
+
     // Merge CLI flags with env vars — for each switch, either source turns
     // it on. This lets shell-hook callers set SQZ_NO_DEDUP=1 / SQZ_NO_ABBREV=1
     // in their shell config without editing any commands, while an explicit
@@ -1100,11 +1115,13 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
             Err(e) => {
                 eprintln!("[sqz] proxy init error: {e}");
                 print!("{input}");
+                finish(marker_exit);
                 return;
             }
         };
         let compressed = proxy.intercept_output_with_options(&label, &input, opts);
         print!("{}", compressed);
+        finish(marker_exit);
         return;
     }
 
@@ -1167,6 +1184,7 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
             print!("{input}");
         }
     }
+    finish(marker_exit);
 }
 
 /// `sqz export <session-id>` — export session to CTX.

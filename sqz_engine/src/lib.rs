@@ -73,6 +73,7 @@ pub mod dependency_mapper;
 pub mod dict_compressor;
 pub mod entropy_analyzer;
 pub mod entropy_truncator;
+pub mod exit_marker;
 pub mod file_reader;
 pub mod image_compressor;
 pub mod json_projection;
@@ -190,6 +191,7 @@ pub use cost_calculator::{
 };
 pub use ctx_format::{CtxEnvelope, CtxFormat, CtxMetadata};
 pub use error::{Result, SqzError, SourceLocation};
+pub use exit_marker::{posix_rewrite, powershell_rewrite, strip_exit_marker};
 pub use model_router::{ModelRouter, RoutingDecision, TaskContext};
 pub use pipeline::{CompressionPipeline, SessionContext};
 pub use pin_manager::PinManager;

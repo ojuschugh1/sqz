@@ -5,6 +5,21 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Hook rewrites no longer mask command exit status** (#39, reported by
+  @Piotr1215) — `cmd 2>&1 | sqz compress` exits with sqz's status, so
+  every hooked command reported success to the agent even when it failed.
+  The rewrite now sends the command's real status through the pipe as a
+  `__SQZ_EXIT_<n>__` trailer that sqz strips and re-raises as its own
+  exit code. Plain POSIX (works in bash/zsh/dash/ash/ksh, unlike
+  `pipefail` or `PIPESTATUS`), with a `$LASTEXITCODE`-based form for
+  PowerShell tool calls. The `sqz_run`/`sqz_sudo` shell functions and the
+  fish/PowerShell variants get the same treatment. Old-style pipes
+  without a trailer behave as before.
+
 ## [1.6.0] — 2026-08-16
 
 ### Added
