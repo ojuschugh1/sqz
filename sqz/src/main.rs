@@ -1464,10 +1464,7 @@ fn cmd_dashboard(port: u16) {
 
     // Background thread: poll session store every 5s, update dashboard metrics.
     std::thread::spawn(move || {
-        let store_path = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".sqz")
-            .join("sessions.db");
+        let store_path = default_vizit_db_path();
         let store = SessionStore::open_or_create(&store_path).ok();
 
         loop {
@@ -3244,8 +3241,14 @@ fn cmd_vizit(refresh_secs: u64, db_path: Option<std::path::PathBuf>, no_color: b
     }
 }
 
-/// Resolve the default path to the sessions database: `~/.sqz/sessions.db`.
+/// Resolve the default path to the sessions database: `SQZ_DB_PATH` if
+/// set, otherwise `~/.sqz/sessions.db`.
 fn default_vizit_db_path() -> std::path::PathBuf {
+    if let Ok(custom) = std::env::var("SQZ_DB_PATH") {
+        if !custom.trim().is_empty() {
+            return std::path::PathBuf::from(custom.trim());
+        }
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(std::path::PathBuf::from)

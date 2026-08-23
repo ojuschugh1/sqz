@@ -475,6 +475,22 @@ warning_threshold = 0.70
 default_window_size = 200000
 ```
 
+### Per-project database
+
+Everything sqz persists (stats, dedup cache, sessions) lives in one SQLite
+file, `~/.sqz/sessions.db` by default. Set `SQZ_DB_PATH` to keep it
+per-project instead:
+
+```sh
+# e.g. in the project's .envrc (direnv)
+export SQZ_DB_PATH="$PWD/.sqz/sessions.db"
+```
+
+Every surface honors it — the shell hook, `sqz stats`/`gain`/`expand`, and
+the MCP server (set it under `env` in your MCP config). Prefer absolute
+paths: relative values resolve against whatever directory the process runs
+from. The parent directory is created if missing (mode 0700, like `~/.sqz`).
+
 ## Privacy
 
 - Zero telemetry — no data transmitted, no crash reports

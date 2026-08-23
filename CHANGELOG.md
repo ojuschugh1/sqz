@@ -5,6 +5,17 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Per-project database** (#41, requested by @bmad4ever) — set
+  `SQZ_DB_PATH` to point sqz at any SQLite file (e.g.
+  `$PWD/.sqz/sessions.db`) instead of the global `~/.sqz/sessions.db`.
+  Honored by every surface: shell hook, CLI commands, vizit, and the MCP
+  server. The parent directory is created if missing (0700); pre-existing
+  directories are never chmodded.
+
 ## [1.6.1] — 2026-08-16
 
 ### Fixed

@@ -57,9 +57,18 @@ impl SqzEngine {
         Self::with_preset_and_store(preset, &store_path)
     }
 
-    /// Resolve the default session store path: `~/.sqz/sessions.db`.
-    /// Falls back to a temp-file path if home dir is unavailable.
+    /// Resolve the default session store path.
+    ///
+    /// `SQZ_DB_PATH` overrides everything — set it to keep the database
+    /// (stats, dedup cache, sessions) per-project instead of global.
+    /// Relative values resolve against the process working directory, so
+    /// prefer absolute paths when hooks may run from subdirectories.
+    /// Otherwise `~/.sqz/sessions.db`, falling back to a temp-file path
+    /// if the home dir is unavailable.
     fn default_store_path() -> std::path::PathBuf {
+        if let Some(custom) = Self::store_path_from_env(std::env::var("SQZ_DB_PATH").ok()) {
+            return custom;
+        }
         if let Some(home) = dirs_next::home_dir() {
             let sqz_dir = home.join(".sqz");
             if std::fs::create_dir_all(&sqz_dir).is_ok() {
@@ -86,6 +95,35 @@ impl SqzEngine {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ))
+    }
+
+    /// Turn an `SQZ_DB_PATH` value into a usable store path, creating the
+    /// parent directory (0700 on Unix, matching `~/.sqz`). Empty or
+    /// whitespace-only values are treated as unset.
+    fn store_path_from_env(value: Option<String>) -> Option<std::path::PathBuf> {
+        let raw = value?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let path = std::path::PathBuf::from(trimmed);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                // Harden only directories we create ourselves — never
+                // chmod a pre-existing directory the user pointed into.
+                if std::fs::create_dir_all(parent).is_ok() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            parent,
+                            std::fs::Permissions::from_mode(0o700),
+                        );
+                    }
+                }
+            }
+        }
+        Some(path)
     }
 
     /// Create with a custom preset and a file-backed session store.
@@ -655,5 +693,60 @@ complexity_threshold = 0.4
         let engine = SqzEngine::new().unwrap();
         let result = engine.import_ctx("not valid json {{{");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn store_path_env_override_used_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested").join("project.db");
+        let resolved =
+            SqzEngine::store_path_from_env(Some(target.to_string_lossy().to_string()));
+        assert_eq!(resolved, Some(target.clone()));
+        // Parent directory is created so SQLite can open the file.
+        assert!(target.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn store_path_env_ignores_empty_values() {
+        assert_eq!(SqzEngine::store_path_from_env(None), None);
+        assert_eq!(SqzEngine::store_path_from_env(Some(String::new())), None);
+        assert_eq!(SqzEngine::store_path_from_env(Some("   ".to_string())), None);
+    }
+
+    #[test]
+    fn store_path_env_leaves_existing_parent_permissions_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let target = dir.path().join("sessions.db");
+        let resolved =
+            SqzEngine::store_path_from_env(Some(target.to_string_lossy().to_string()));
+        assert_eq!(resolved, Some(target));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755, "pre-existing parent must not be chmodded");
+        }
+    }
+
+    #[test]
+    fn engine_with_custom_store_path_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("proj").join("sessions.db");
+        let resolved = SqzEngine::store_path_from_env(Some(db.to_string_lossy().to_string()))
+            .unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &resolved).unwrap();
+        engine
+            .session_store()
+            .log_compression(100, 40, &[], "test")
+            .unwrap();
+        assert!(db.exists(), "database file must land at the custom path");
+        let stats = engine.session_store().compression_stats().unwrap();
+        assert_eq!(stats.total_compressions, 1);
     }
 }
