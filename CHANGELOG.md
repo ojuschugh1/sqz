@@ -501,8 +501,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`sqz init --global` / `-g`** — installs Claude Code hooks to user-scope
   `~/.claude/settings.json` so compression works across all projects without
   per-repo setup. Merges with existing user settings (preserves permissions,
-  env, statusLine, unrelated hooks). Following RTK's model and Anthropic's
-  official scope table (Managed > Local > Project > User).
+  env, statusLine, unrelated hooks). Following Anthropic's official scope
+  table (Managed > Local > Project > User).
 - **Native OpenAI Codex integration** — `sqz init` now configures Codex via
   `~/.codex/config.toml` MCP server entry.
 - **Release workflow ships sqz-mcp** — both `sqz` and `sqz-mcp` binaries are

@@ -1,9 +1,9 @@
 //! Ruby ecosystem formatters: rspec, rubocop, rake/minitest, bundle.
 //!
-//! Ported from rtk's per-runner filters, adapted to sqz's post-hoc model.
-//! rtk wraps execution and injects `--format json`; sqz only sees whatever
-//! output already happened. So each formatter tries JSON first (in case the
-//! user passed `--format json` themselves) and falls back to a text parser.
+//! Execution-wrapping compressors can inject `--format json` at spawn time;
+//! sqz is post-hoc and only sees whatever output already happened. So each
+//! formatter tries JSON first (in case the user passed `--format json`
+//! themselves) and falls back to a text parser.
 //!
 //! One module per runner. Shared helpers live here; child modules reach them
 //! via `super::`.

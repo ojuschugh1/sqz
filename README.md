@@ -497,7 +497,7 @@ cargo build --release
 ## Links
 
 - [White Paper: Pre-Injection Context Compression](docs/whitepaper.md)
-- [Benchmark: sqz vs rtk](docs/benchmark-vs-rtk.md)
+- [Token Savings Benchmark](docs/benchmark.md)
 - [Discord](https://discord.gg/j8EEyH5dSB)
 - [Changelog](CHANGELOG.md)
 - MCP Registry name: `mcp-name: io.github.ojuschugh1/sqz`

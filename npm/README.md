@@ -408,7 +408,7 @@ cargo build --release
 
 ## Links
 
-- [Benchmark: sqz vs rtk](docs/benchmark-vs-rtk.md)
+- [Token Savings Benchmark](docs/benchmark.md)
 - [Discord](https://discord.gg/j8EEyH5dSB)
 - [Changelog](CHANGELOG.md)
 

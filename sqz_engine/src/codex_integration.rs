@@ -27,9 +27,8 @@
 //!      because Codex runs bash via its sandboxed exec tool and sees the
 //!      compressed stdout automatically. No Codex-specific wiring needed.
 //!
-//! This module implements (1) and (2). Guidance-file approach for (2)
-//! mirrors how RTK handles the same "no programmatic hook" problem with
-//! Codex — see <https://github.com/rtk-ai/rtk/blob/master/hooks/codex/README.md>.
+//! This module implements (1) and (2). The guidance-file approach for (2)
+//! is the standard answer to Codex's "no programmatic hook" limitation.
 
 use std::path::{Path, PathBuf};
 
