@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Global Kiro integration** — `sqz init --global` now installs Kiro at
+  the user level: steering at `~/.kiro/steering/sqz.md` and the MCP
+  server in `~/.kiro/settings/mcp.json`, both of which Kiro applies to
+  every workspace. Previously the Kiro integration was workspace-only,
+  so compression silently never ran in projects where `sqz init` hadn't
+  been executed. Honors `KIRO_HOME`. `sqz uninstall` removes both when
+  sqz-authored; existing servers in the user MCP config are preserved
+  on merge.
 - **Per-project database** (#41, requested by @bmad4ever) — set
   `SQZ_DB_PATH` to point sqz at any SQLite file (e.g.
   `$PWD/.sqz/sessions.db`) instead of the global `~/.sqz/sessions.db`.

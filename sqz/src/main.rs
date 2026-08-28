@@ -734,12 +734,27 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             continue;
         }
 
-        // Kiro: steering file + project MCP config + legacy hook cleanup.
+        // Kiro: steering file + MCP config + legacy hook cleanup. Global
+        // scope targets the user level (~/.kiro), which Kiro applies to
+        // every workspace.
         if config.tool_name == "Kiro" {
-            let steering = sqz_engine::kiro_steering_path(&project_dir);
+            let (steering, expected_content, mcp) =
+                if scope == sqz_engine::InstallScope::Global {
+                    (
+                        sqz_engine::kiro_integration::kiro_user_steering_path(),
+                        sqz_engine::kiro_integration::kiro_user_steering_content(&sqz_path),
+                        sqz_engine::kiro_integration::kiro_user_mcp_path(),
+                    )
+                } else {
+                    (
+                        sqz_engine::kiro_steering_path(&project_dir),
+                        sqz_engine::kiro_integration::kiro_steering_content(&sqz_path),
+                        sqz_engine::kiro_mcp_path(&project_dir),
+                    )
+                };
             let steering_current = steering.exists()
                 && std::fs::read_to_string(&steering)
-                    .map(|s| s == sqz_engine::kiro_integration::kiro_steering_content(&sqz_path))
+                    .map(|s| s == expected_content)
                     .unwrap_or(false);
             if !steering_current {
                 let user_owned = steering.exists()
@@ -754,7 +769,6 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
                     ));
                 }
             }
-            let mcp = sqz_engine::kiro_mcp_path(&project_dir);
             let mcp_has_sqz = mcp.exists()
                 && std::fs::read_to_string(&mcp)
                     .ok()
@@ -2213,6 +2227,24 @@ fn cmd_uninstall(skip_confirm: bool) {
             Ok(false) => {}
             Err(e) => eprintln!("[sqz] ✗ could not clean up {}: {e}", kiro_legacy.display()),
         }
+    }
+
+    // User-level Kiro install (~/.kiro), written by `sqz init --global`.
+    match sqz_engine::kiro_integration::remove_kiro_user_steering() {
+        Ok(true) => println!(
+            "[sqz] ✓ removed {}",
+            sqz_engine::kiro_integration::kiro_user_steering_path().display()
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("[sqz] ✗ could not clean up user-level Kiro steering: {e}"),
+    }
+    match sqz_engine::kiro_integration::remove_kiro_user_mcp_config() {
+        Ok(sqz_engine::KiroMcpRemove::Removed) => println!(
+            "[sqz] ✓ removed mcpServers.sqz from {}",
+            sqz_engine::kiro_integration::kiro_user_mcp_path().display()
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!("[sqz] ✗ could not clean up user-level Kiro MCP entry: {e}"),
     }
 
     // Surgically remove sqz's PreToolUse / PreCompact / SessionStart

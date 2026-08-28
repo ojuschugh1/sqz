@@ -1236,18 +1236,33 @@ pub fn install_tool_hooks_scoped_filtered(
             continue;
         }
 
-        // Kiro: steering file + project MCP config, plus cleanup of the
-        // legacy hook file that Kiro never recognized.
+        // Kiro: steering file + MCP config, plus cleanup of the legacy
+        // hook file that Kiro never recognized. At global scope both go
+        // to the user level (~/.kiro), which Kiro applies to every
+        // workspace; at project scope they stay in the workspace.
         if config.tool_name == "Kiro" {
             let _ = crate::kiro_integration::remove_kiro_legacy_hook(project_dir);
-            let steering_changed =
-                crate::kiro_integration::install_kiro_steering(project_dir, sqz_path)
-                    .unwrap_or(false);
-            let mcp_changed = matches!(
-                crate::kiro_integration::install_kiro_mcp_config(project_dir),
-                Ok(crate::kiro_integration::KiroMcpInstall::Created)
-                    | Ok(crate::kiro_integration::KiroMcpInstall::Merged)
-            );
+            let (steering_changed, mcp_changed) = if scope == InstallScope::Global {
+                let steering =
+                    crate::kiro_integration::install_kiro_user_steering(sqz_path)
+                        .unwrap_or(false);
+                let mcp = matches!(
+                    crate::kiro_integration::install_kiro_user_mcp_config(),
+                    Ok(crate::kiro_integration::KiroMcpInstall::Created)
+                        | Ok(crate::kiro_integration::KiroMcpInstall::Merged)
+                );
+                (steering, mcp)
+            } else {
+                let steering =
+                    crate::kiro_integration::install_kiro_steering(project_dir, sqz_path)
+                        .unwrap_or(false);
+                let mcp = matches!(
+                    crate::kiro_integration::install_kiro_mcp_config(project_dir),
+                    Ok(crate::kiro_integration::KiroMcpInstall::Created)
+                        | Ok(crate::kiro_integration::KiroMcpInstall::Merged)
+                );
+                (steering, mcp)
+            };
             if (steering_changed || mcp_changed) && !installed.iter().any(|n| n == "Kiro") {
                 installed.push("Kiro".to_string());
             }

@@ -24,6 +24,33 @@ pub fn kiro_mcp_path(project_dir: &Path) -> PathBuf {
     project_dir.join(".kiro").join("settings").join("mcp.json")
 }
 
+/// Kiro's user-level config root: `$KIRO_HOME` if set, else `~/.kiro`.
+/// Steering and MCP config placed here apply to every workspace.
+pub fn kiro_user_root() -> PathBuf {
+    kiro_user_root_from(
+        std::env::var("KIRO_HOME").ok(),
+        dirs_next::home_dir(),
+    )
+}
+
+fn kiro_user_root_from(kiro_home: Option<String>, home: Option<PathBuf>) -> PathBuf {
+    if let Some(custom) = kiro_home {
+        let trimmed = custom.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    home.unwrap_or_else(|| PathBuf::from(".")).join(".kiro")
+}
+
+pub fn kiro_user_steering_path() -> PathBuf {
+    kiro_user_root().join("steering").join("sqz.md")
+}
+
+pub fn kiro_user_mcp_path() -> PathBuf {
+    kiro_user_root().join("settings").join("mcp.json")
+}
+
 /// The legacy hook file older sqz versions wrote. It used a schema Kiro
 /// never recognized, so it can be deleted safely when we detect it.
 pub fn kiro_legacy_hook_path(project_dir: &Path) -> PathBuf {
@@ -31,6 +58,16 @@ pub fn kiro_legacy_hook_path(project_dir: &Path) -> PathBuf {
 }
 
 pub fn kiro_steering_content(sqz_path: &str) -> String {
+    kiro_steering_content_for(sqz_path, ".kiro/settings/mcp.json")
+}
+
+/// Variant for the user-level install, which mentions the user-level MCP
+/// config location instead of the workspace one.
+pub fn kiro_user_steering_content(sqz_path: &str) -> String {
+    kiro_steering_content_for(sqz_path, "~/.kiro/settings/mcp.json (user-level)")
+}
+
+fn kiro_steering_content_for(sqz_path: &str, mcp_location: &str) -> String {
     format!(
         "\
 ---
@@ -52,7 +89,7 @@ cargo test 2>&1 | {sqz_path} compress
 Do NOT pipe interactive commands (REPLs, `ssh`), compound commands with
 shell operators (`&&`, `>`, `;`), or output that is already short.
 
-The `sqz` MCP server is configured in `.kiro/settings/mcp.json`. Prefer
+The `sqz` MCP server is configured in `{mcp_location}`. Prefer
 its tools when they fit:
 
 - `sqz_read_file` / `sqz_grep` / `sqz_list_dir` — file access with
@@ -73,9 +110,16 @@ If a `«A1»` symbol replaced a value you need verbatim, re-run with
 /// Write the steering file. Refreshes sqz-managed files in place, leaves
 /// a user-authored `.kiro/steering/sqz.md` alone.
 pub fn install_kiro_steering(project_dir: &Path, sqz_path: &str) -> Result<bool> {
-    let path = kiro_steering_path(project_dir);
-    let content = kiro_steering_content(sqz_path);
+    install_kiro_steering_at(&kiro_steering_path(project_dir), &kiro_steering_content(sqz_path))
+}
 
+/// Write the user-level steering file (`~/.kiro/steering/sqz.md`), which
+/// Kiro applies to every workspace.
+pub fn install_kiro_user_steering(sqz_path: &str) -> Result<bool> {
+    install_kiro_steering_at(&kiro_user_steering_path(), &kiro_user_steering_content(sqz_path))
+}
+
+pub(crate) fn install_kiro_steering_at(path: &Path, content: &str) -> Result<bool> {
     if path.exists() {
         let existing = std::fs::read_to_string(&path).map_err(|e| {
             SqzError::Other(format!("read {}: {e}", path.display()))
@@ -97,16 +141,23 @@ pub fn install_kiro_steering(project_dir: &Path, sqz_path: &str) -> Result<bool>
 }
 
 pub fn remove_kiro_steering(project_dir: &Path) -> Result<bool> {
-    let path = kiro_steering_path(project_dir);
+    remove_kiro_steering_at(&kiro_steering_path(project_dir))
+}
+
+pub fn remove_kiro_user_steering() -> Result<bool> {
+    remove_kiro_steering_at(&kiro_user_steering_path())
+}
+
+pub(crate) fn remove_kiro_steering_at(path: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .map_err(|e| SqzError::Other(format!("read {}: {e}", path.display())))?;
     if !content.contains(KIRO_STEERING_SENTINEL) {
         return Ok(false);
     }
-    std::fs::remove_file(&path)
+    std::fs::remove_file(path)
         .map_err(|e| SqzError::Other(format!("remove {}: {e}", path.display())))?;
     Ok(true)
 }
@@ -137,6 +188,12 @@ pub enum KiroMcpInstall {
 
 pub fn install_kiro_mcp_config(project_dir: &Path) -> Result<KiroMcpInstall> {
     install_kiro_mcp_config_at(&kiro_mcp_path(project_dir))
+}
+
+/// Register sqz-mcp in the user-level `~/.kiro/settings/mcp.json`, which
+/// Kiro merges into every workspace.
+pub fn install_kiro_user_mcp_config() -> Result<KiroMcpInstall> {
+    install_kiro_mcp_config_at(&kiro_user_mcp_path())
 }
 
 pub(crate) fn install_kiro_mcp_config_at(path: &Path) -> Result<KiroMcpInstall> {
@@ -198,6 +255,10 @@ pub enum KiroMcpRemove {
 
 pub fn remove_kiro_mcp_config(project_dir: &Path) -> Result<KiroMcpRemove> {
     remove_kiro_mcp_config_at(&kiro_mcp_path(project_dir))
+}
+
+pub fn remove_kiro_user_mcp_config() -> Result<KiroMcpRemove> {
+    remove_kiro_mcp_config_at(&kiro_user_mcp_path())
 }
 
 pub(crate) fn remove_kiro_mcp_config_at(path: &Path) -> Result<KiroMcpRemove> {
@@ -380,5 +441,68 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(parsed["mcpServers"].get("sqz").is_none());
         assert_eq!(parsed["mcpServers"]["aws-docs"]["command"], "uvx");
+    }
+
+    #[test]
+    fn user_root_honors_kiro_home() {
+        assert_eq!(
+            kiro_user_root_from(Some("/custom/kiro".into()), Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/custom/kiro")
+        );
+        assert_eq!(
+            kiro_user_root_from(Some("  ".into()), Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/home/u/.kiro")
+        );
+        assert_eq!(
+            kiro_user_root_from(None, Some(PathBuf::from("/home/u"))),
+            PathBuf::from("/home/u/.kiro")
+        );
+    }
+
+    #[test]
+    fn user_steering_content_mentions_user_level_mcp() {
+        let content = kiro_user_steering_content("/usr/bin/sqz");
+        assert!(content.contains("~/.kiro/settings/mcp.json (user-level)"));
+        assert!(content.contains(KIRO_STEERING_SENTINEL));
+        // Project variant keeps the workspace path.
+        assert!(kiro_steering_content("/usr/bin/sqz").contains("`.kiro/settings/mcp.json`"));
+    }
+
+    #[test]
+    fn user_level_steering_roundtrip_via_at_helpers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steering").join("sqz.md");
+        let content = kiro_user_steering_content("/usr/bin/sqz");
+        assert!(install_kiro_steering_at(&path, &content).unwrap());
+        assert!(path.exists());
+        // Idempotent on identical content.
+        assert!(!install_kiro_steering_at(&path, &content).unwrap());
+        // Removes only sqz-authored files.
+        assert!(remove_kiro_steering_at(&path).unwrap());
+        assert!(!path.exists());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "my own steering\n").unwrap();
+        assert!(!remove_kiro_steering_at(&path).unwrap());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn user_mcp_merge_preserves_existing_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings").join("mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"builder-mcp":{"command":"/x/builder-mcp","args":[]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            install_kiro_mcp_config_at(&path).unwrap(),
+            KiroMcpInstall::Merged
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed["mcpServers"]["builder-mcp"]["command"], "/x/builder-mcp");
+        assert_eq!(parsed["mcpServers"]["sqz"]["command"], "sqz-mcp");
     }
 }
