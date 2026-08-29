@@ -204,6 +204,21 @@ impl CompressionPipeline {
             }
         }
 
+        // Aligned-column table compaction: collapse alignment padding in
+        // tabular CLI output (docker ps, kubectl get, ps aux, ...) to a
+        // two-space separator. Cells survive byte-exact; the detector
+        // refuses anything with leading indentation, so code, YAML,
+        // diffs, and pretty JSON are never touched. Runs before entropy
+        // truncation so the truncator scores the compact form.
+        if !lossless && !is_json && content.raw.len() > 200 {
+            if let Some(table_result) =
+                crate::table_compactor::compact_aligned_table(&content.raw)
+            {
+                content.raw = table_result.text;
+                stages_applied.push("table_compact".to_owned());
+            }
+        }
+
         // Entropy-weighted truncation for long non-JSON content.
         // LOSSY — skipped on the lossless file-read path (issue #32).
         // Benign-aware threshold: output with no error markers (clean
@@ -579,6 +594,52 @@ mod tests {
     /// file-read path (sqz_read_file / sqz_grep / sqz_list_dir) must never
     /// silently drop content. `compress_lossless` keeps every segment; the
     /// default `compress` truncates below-median-entropy segments.
+    #[test]
+    fn table_compact_stage_fires_on_tabular_output_only() {
+        let pipeline = CompressionPipeline::new(&default_preset());
+
+        let table = "\
+NAME                          READY   STATUS    RESTARTS   AGE
+api-6d4cf56db6-2m5xk          1/1     Running   0          4d20h
+api-6d4cf56db6-9lq2v          1/1     Running   0          4d20h
+worker-7c9f8b5d44-abcde       1/1     Running   2          12h
+worker-7c9f8b5d44-fghij       0/1     Pending   0          3m
+ingress-nginx-controller-x    1/1     Running   0          30d
+";
+        let preset = default_preset();
+        let result = pipeline.compress(table, &ctx(), &preset).unwrap();
+        assert!(
+            result.stages_applied.iter().any(|s| s == "table_compact"),
+            "stages: {:?}",
+            result.stages_applied
+        );
+        assert!(result.data.contains("api-6d4cf56db6-2m5xk"), "{}", result.data);
+
+        let code = "\
+fn main() {
+    let alignment_one   = 1;
+    let alignment_two   = 2;
+    let alignment_three = 3;
+    let alignment_four  = 4;
+    println!(\"{}\", alignment_one + alignment_two);
+}
+";
+        let result = pipeline.compress(code, &ctx(), &preset).unwrap();
+        assert!(
+            !result.stages_applied.iter().any(|s| s == "table_compact"),
+            "code must never hit the table compactor: {:?}",
+            result.stages_applied
+        );
+
+        // The lossless path must never table-compact either.
+        let result = pipeline.compress_lossless(table, &ctx(), &preset).unwrap();
+        assert!(
+            !result.stages_applied.iter().any(|s| s == "table_compact"),
+            "lossless path must stay byte-faithful: {:?}",
+            result.stages_applied
+        );
+    }
+
     #[test]
     fn compress_lossless_never_drops_segments() {
         let preset = default_preset();
