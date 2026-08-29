@@ -15,6 +15,9 @@ mod go;
 mod cloud;
 mod jvm;
 mod ruby;
+mod xcode;
+mod android;
+mod dotnet;
 #[cfg(test)]
 mod props;
 
@@ -70,6 +73,11 @@ fn dispatch(cmd: &str, output: &str) -> Option<String> {
         "gradle" | "gradlew" | "./gradlew" => jvm::format_gradle(parts.get(1).copied(), output),
         "mvn" | "maven" => jvm::format_maven(parts.get(1).copied(), output),
 
+        // Apple / Android / .NET
+        "xcodebuild" => Some(xcode::format_xcodebuild(output)),
+        "adb" if parts.get(1) == Some(&"logcat") => Some(android::format_logcat(output)),
+        "logcat" => Some(android::format_logcat(output)),
+        "dotnet" => dotnet::format_dotnet(parts.get(1).copied(), output),
         // Ruby
         "rspec" => Some(ruby::format_rspec(output)),
         "rubocop" => Some(ruby::format_rubocop(output)),
@@ -122,6 +130,17 @@ mod tests {
         assert!(format_command("grep foo bar.txt", "bar.txt:1:foo").is_some());
         assert!(format_command("tree", ".\n├── src\n└── Cargo.toml").is_some());
         assert!(format_command("curl http://example.com", "response").is_some());
+    }
+
+    #[test]
+    fn test_mobile_dotnet_dispatch() {
+        assert!(format_command("xcodebuild -scheme App", "** BUILD SUCCEEDED **").is_some());
+        assert!(format_command("adb logcat -d", "08-29 10:00:01.000  1  1 E Tag: boom").is_some());
+        assert!(format_command("logcat", "08-29 10:00:01.000  1  1 E Tag: boom").is_some());
+        assert!(format_command("dotnet build", "Build succeeded.").is_some());
+        assert!(format_command("dotnet test", "Passed! - Failed: 0, Passed: 1, Total: 1").is_some());
+        assert!(format_command("adb devices", "List of devices attached").is_none());
+        assert!(format_command("dotnet run", "hello").is_none());
     }
 
     #[test]
