@@ -251,6 +251,7 @@ impl McpServer {
         match request.tool_id.as_str() {
             "passthrough" => self.handle_passthrough(request),
             "expand" => self.handle_expand(request),
+            "sqz_recall" => self.handle_sqz_recall(request),
             "sqz_read_file" => self.handle_sqz_read_file(request),
             "sqz_grep" => self.handle_sqz_grep(request),
             "sqz_list_dir" => self.handle_sqz_list_dir(request),
@@ -294,6 +295,73 @@ impl McpServer {
             output,
             tokens_original,
             tokens_compressed,
+        })
+    }
+
+    /// Full-text search over everything that flowed through sqz this
+    /// session (and earlier ones): cached command output and session
+    /// summaries. BM25-ranked. Each `output` hit carries a ref the agent
+    /// can pass to `expand` for the full original — so re-finding
+    /// something already seen costs a snippet plus a ~13-token ref
+    /// instead of re-running the command or re-reading the file.
+    fn handle_sqz_recall(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
+        let query = request
+            .input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                SqzError::Other("sqz_recall: input must be { \"query\": \"<terms>\" }".to_string())
+            })?;
+        let limit = request
+            .input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.clamp(1, 25) as u32)
+            .unwrap_or(5);
+
+        let hits = self.engine.session_store().recall_search(query, limit)?;
+        let mut output = if hits.is_empty() {
+            format!("[sqz:recall no matches for \"{query}\"]")
+        } else {
+            let mut out = format!("[sqz:recall query=\"{query}\" hits={}]\n", hits.len());
+            let mut any_output_kind = false;
+            for (i, hit) in hits.iter().enumerate() {
+                let snippet = hit.snippet.replace('\n', " ");
+                if hit.kind == "output" {
+                    any_output_kind = true;
+                    out.push_str(&format!(
+                        "{}. [{} {}] ref={} — {}\n",
+                        i + 1,
+                        hit.kind,
+                        hit.created_at,
+                        &hit.ref_hash[..hit.ref_hash.len().min(16)],
+                        snippet,
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "{}. [{} {}] id={} — {}\n",
+                        i + 1,
+                        hit.kind,
+                        hit.created_at,
+                        hit.ref_hash,
+                        snippet,
+                    ));
+                }
+            }
+            if any_output_kind {
+                out.push_str("Pass a ref to the expand tool for the full original content.\n");
+            }
+            out
+        };
+        if output.ends_with('\n') {
+            output.pop();
+        }
+        let tokens = estimate_tokens(&output);
+        Ok(ToolCallResponse {
+            tool_id: request.tool_id,
+            output,
+            tokens_original: tokens,
+            tokens_compressed: tokens,
         })
     }
 
@@ -1057,6 +1125,44 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
             compression_transforms: vec![
                 "none: returns cached original bytes".to_string(),
+            ],
+            ..Default::default()
+        },
+        // Session-corpus search. Everything that flows through sqz is
+        // FTS5-indexed (command output, session summaries), so an agent
+        // can re-find content it has already seen instead of re-running
+        // the command or re-reading the file. Hits come back as short
+        // snippets plus a ref that `expand` resolves to the full bytes.
+        ToolDefinition {
+            id: "sqz_recall".to_string(),
+            name: "Recall (Search Session Memory)".to_string(),
+            description: "Full-text search over everything sqz has seen: \
+                command outputs from this and previous sessions, and \
+                session summaries. Use this BEFORE re-running a command \
+                or re-reading a file to check whether the answer is \
+                already known — a hit costs a snippet plus a ~13-token \
+                ref instead of the full output. Results are BM25-ranked; \
+                pass an `output` hit's ref to the `expand` tool for the \
+                complete original content."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search terms (implicit AND, e.g. \"auth middleware error\")."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max hits to return (1-25). Default 5.",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
+            }),
+            compression_transforms: vec![
+                "bm25_rank: hits ordered by FTS5 relevance".to_string(),
+                "snippet: ~24 tokens of context per hit with >>match<< markers".to_string(),
             ],
             ..Default::default()
         },
@@ -1962,6 +2068,83 @@ complexity_threshold = 0.4
         let resp = server.handle_tool_call(req).unwrap();
         assert!(resp.output.contains("hash-not-found"));
         assert!(resp.output.contains("deadbeef00000000"));
+    }
+
+    #[test]
+    fn recall_tool_finds_previously_compressed_content() {
+        let (mut server, _dir) = make_server();
+        // Compress something so it lands in the cache and recall index.
+        let text = format!(
+            "unique-recall-marker deployment rollout failed with status 503\n{}",
+            "surrounding output line with ordinary words\n".repeat(20)
+        );
+        let req = ToolCallRequest {
+            tool_id: "compress".to_string(),
+            input: serde_json::json!({ "text": text }),
+            intent: None,
+        };
+        server.handle_tool_call(req).unwrap();
+
+        let req = ToolCallRequest {
+            tool_id: "sqz_recall".to_string(),
+            input: serde_json::json!({ "query": "rollout 503" }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).unwrap();
+        assert!(
+            resp.output.contains("hits=") && resp.output.contains("ref="),
+            "expected a ranked hit with a ref: {}",
+            resp.output
+        );
+        assert!(resp.output.contains(">>rollout<<"), "snippet markers missing: {}", resp.output);
+
+        // The advertised ref must expand back to the original content.
+        let ref_prefix = resp
+            .output
+            .split("ref=")
+            .nth(1)
+            .unwrap()
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect::<String>();
+        let req = ToolCallRequest {
+            tool_id: "expand".to_string(),
+            input: serde_json::json!({ "prefix": ref_prefix }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).unwrap();
+        assert!(
+            resp.output.contains("unique-recall-marker"),
+            "expand must recover the indexed original: {}",
+            resp.output
+        );
+    }
+
+    #[test]
+    fn recall_tool_reports_no_matches_cleanly() {
+        let (mut server, _dir) = make_server();
+        let req = ToolCallRequest {
+            tool_id: "sqz_recall".to_string(),
+            input: serde_json::json!({ "query": "nothing-indexed-yet-zzz" }),
+            intent: None,
+        };
+        let resp = server.handle_tool_call(req).unwrap();
+        assert!(resp.output.contains("no matches"), "{}", resp.output);
+    }
+
+    #[test]
+    fn test_default_tools_advertise_recall() {
+        let (mut server, _dir) = make_server();
+        let line = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+        let resp = server.handle_jsonrpc_line_unwrap(line);
+        let tools = resp.result.unwrap().get("tools").cloned().unwrap();
+        let ids: Vec<String> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()).map(String::from))
+            .collect();
+        assert!(ids.iter().any(|n| n == "sqz_recall"), "tools: {ids:?}");
     }
 
     #[test]

@@ -97,6 +97,8 @@ its tools when they fit:
 - `compress` — compress a blob of text you already have.
 - `passthrough` — return text unchanged (escape hatch).
 - `expand` — resolve a `§ref:HASH§` token back to the original bytes.
+- `sqz_recall` — full-text search over everything sqz has compressed
+  (recover context lost to compaction).
 
 If you see a `§ref:HASH§` token you can't parse, run
 `{sqz_path} expand <prefix>` or set `SQZ_NO_DEDUP=1` on the command.

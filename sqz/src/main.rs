@@ -165,6 +165,19 @@ enum Command {
         prefix: String,
     },
 
+    /// Search everything sqz has seen (command outputs, session
+    /// summaries) with BM25-ranked full-text search. Hits point back
+    /// at cached originals recoverable via `sqz expand`.
+    Recall {
+        /// Search terms (joined with implicit AND).
+        #[arg(required = true)]
+        query: Vec<String>,
+
+        /// Maximum hits to show.
+        #[arg(long, default_value_t = 5)]
+        limit: u32,
+    },
+
     /// Export a session to CTX format.
     Export {
         /// Session ID to export.
@@ -454,6 +467,7 @@ fn main() {
             cmd_compress(text, &mode, verify, no_cache, cmd, no_abbrev)
         }
         Some(Command::Expand { prefix }) => cmd_expand(&prefix),
+        Some(Command::Recall { query, limit }) => cmd_recall(&query.join(" "), limit),
         Some(Command::Export { session_id }) => cmd_export(&session_id),
         Some(Command::Import { file }) => cmd_import(&file),
         Some(Command::Status { json }) => cmd_status(json),
@@ -1199,6 +1213,59 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
         }
     }
     finish(marker_exit);
+}
+
+/// `sqz recall <query>` — BM25 search over indexed session content.
+fn cmd_recall(query: &str, limit: u32) {
+    let engine = require_engine();
+    let hits = match engine.session_store().recall_search(query, limit.clamp(1, 50)) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[sqz] recall error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if hits.is_empty() {
+        println!("[sqz] no matches for \"{query}\".");
+        println!("[sqz] the index covers content compressed by sqz; run some commands through it first.");
+        return;
+    }
+
+    println!();
+    println!("  {}", colors::bold(&colors::cyan(&format!("🔎 recall: \"{query}\""))));
+    println!("  {}", colors::dim(&"─".repeat(70)));
+    for (i, hit) in hits.iter().enumerate() {
+        let age = human_age(&hit.created_at);
+        let snippet = hit.snippet.replace('\n', " ");
+        println!(
+            "  {}. {} {}",
+            i + 1,
+            colors::dim(&format!("[{} · {}]", hit.kind, age)),
+            snippet,
+        );
+        if hit.kind == "output" {
+            let prefix = &hit.ref_hash[..hit.ref_hash.len().min(16)];
+            println!("     {}", colors::dim(&format!("full content: sqz expand {prefix}")));
+        } else {
+            println!("     {}", colors::dim(&format!("session: {}", hit.ref_hash)));
+        }
+    }
+    println!();
+}
+
+/// Rough human age from an RFC 3339 timestamp ("3m ago", "2h ago", "5d ago").
+fn human_age(rfc3339: &str) -> String {
+    let Ok(ts) = rfc3339.parse::<chrono::DateTime<chrono::Utc>>() else {
+        return rfc3339.to_string();
+    };
+    let secs = (chrono::Utc::now() - ts).num_seconds().max(0);
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
 }
 
 /// `sqz export <session-id>` — export session to CTX.
@@ -2821,7 +2888,34 @@ fn cmd_discover(days: u32) {
         println!();
     }
 
-    // Suggest high-value commands
+    // Formatter gaps: commands from real history where compression is
+    // barely helping. This is where a new formatter (or an issue filed
+    // upstream) would buy the most.
+    let gaps = store.formatter_gaps(days, 8).unwrap_or_default();
+    if !gaps.is_empty() {
+        println!("  Weak spots — high volume, under 25% reduction:");
+        println!();
+        println!("    {:<22} {:>6} {:>10} {:>10}", "command", "calls", "tokens in", "reduction");
+        for g in &gaps {
+            let cmd_display = if g.command.chars().count() > 20 {
+                let cut: String = g.command.chars().take(19).collect();
+                format!("{cut}…")
+            } else {
+                g.command.clone()
+            };
+            println!(
+                "    {:<22} {:>6} {:>10} {:>9.1}%",
+                cmd_display, g.invocations, g.tokens_in, g.reduction_pct(),
+            );
+        }
+        println!();
+        println!("  A per-command formatter usually turns these into 60-90% reductions.");
+        println!("  Recognize one? File it: https://github.com/ojuschugh1/sqz/issues");
+        println!();
+        return;
+    }
+
+    // No measured gaps — fall back to the general adoption suggestions.
     println!("  High-value commands to route through sqz:");
     println!("    git status/diff/log  → 70-80% reduction");
     println!("    cargo test/build     → 80-90% reduction (failures only)");

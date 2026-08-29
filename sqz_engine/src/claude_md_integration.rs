@@ -110,6 +110,10 @@ sqz pipeline:
   stays focused. **PREFER this over `ls -la` via Bash** when you want
   to see a project layout.
 
+- **`sqz_recall`** — full-text search over everything sqz has
+  compressed in past sessions. Use it to recover context lost to
+  compaction (an error message, a file you read yesterday).
+
 The built-in `Read`, `Grep`, `Glob` tools remain available. Use them for:
 - Tiny config files (<1KB) where compression can't help.
 - Byte-exact reads you'll hash or diff (lockfiles, signatures).

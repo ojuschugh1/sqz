@@ -197,7 +197,7 @@ pub use pipeline::{CompressionPipeline, SessionContext};
 pub use pin_manager::PinManager;
 pub use plugin_api::{PluginLoader, PluginManifest, PluginSource, SqzPlugin};
 pub use prompt_cache::{CacheBoundary, Message, PromptCacheDetector};
-pub use session_store::{CommandStats, CompressionStats, DailyGain, RegretStats, SessionStore, SessionSummary};
+pub use session_store::{CommandStats, CompressionStats, DailyGain, RecallHit, RegretStats, SessionStore, SessionSummary};
 pub use session_continuity::{
     SessionContinuityManager, SessionGuide, Snapshot, SnapshotEvent, SnapshotEventType,
 };

@@ -134,6 +134,18 @@ CREATE TABLE IF NOT EXISTS metadata (
     key         TEXT PRIMARY KEY,
     value       TEXT NOT NULL
 );
+
+-- Full-text search over everything that flowed through sqz: cached
+-- command output (kind='output', ref_hash expandable via `sqz expand`)
+-- and session summaries (kind='session', ref_hash = session id). Lets
+-- agents re-find content they have already seen instead of re-running
+-- commands or re-reading files. BM25-ranked via FTS5.
+CREATE VIRTUAL TABLE IF NOT EXISTS recall_index USING fts5(
+    content,
+    ref_hash UNINDEXED,
+    kind UNINDEXED,
+    created_at UNINDEXED
+);
 "#;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -284,6 +296,13 @@ impl SessionStore {
                 data,
             ],
         )?;
+        if !session.compressed_summary.is_empty() {
+            self.recall_index_upsert(
+                &session.id,
+                "session",
+                session.compressed_summary.as_bytes(),
+            );
+        }
 
         Ok(session.id.clone())
     }
@@ -480,7 +499,66 @@ impl SessionStore {
                        original = COALESCE(excluded.original, original)"#,
             params![hash, data, now, original],
         )?;
+        if let Some(bytes) = original {
+            self.recall_index_upsert(hash, "output", bytes);
+        }
         Ok(())
+    }
+
+    /// Index content for `sqz recall`. Binary content (NUL bytes) and
+    /// empty content are skipped; oversized content is indexed up to a
+    /// cap so one giant log can't bloat the index.
+    fn recall_index_upsert(&self, ref_hash: &str, kind: &str, content: &[u8]) {
+        const MAX_INDEXED_BYTES: usize = 262_144;
+        if content.is_empty() || content.contains(&0) {
+            return;
+        }
+        let text = String::from_utf8_lossy(content);
+        let capped: &str = if text.len() > MAX_INDEXED_BYTES {
+            let mut end = MAX_INDEXED_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            &text[..end]
+        } else {
+            &text
+        };
+        let now = Utc::now().to_rfc3339();
+        let _ = self.db.execute(
+            "DELETE FROM recall_index WHERE ref_hash = ?1",
+            params![ref_hash],
+        );
+        let _ = self.db.execute(
+            "INSERT INTO recall_index (content, ref_hash, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![capped, ref_hash, kind, now],
+        );
+    }
+
+    /// BM25-ranked full-text search over indexed content. Returns the
+    /// best `limit` hits with a highlighted snippet each.
+    pub fn recall_search(&self, query: &str, limit: u32) -> Result<Vec<RecallHit>> {
+        let match_expr = fts_query(query);
+        if match_expr.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.db.prepare(
+            "SELECT ref_hash, kind, snippet(recall_index, 0, '>>', '<<', ' … ', 24), created_at \
+             FROM recall_index WHERE recall_index MATCH ?1 \
+             ORDER BY bm25(recall_index) LIMIT ?2",
+        ).map_err(SqzError::SessionStore)?;
+        let rows = stmt.query_map(params![match_expr, limit], |row| {
+            Ok(RecallHit {
+                ref_hash: row.get(0)?,
+                kind: row.get(1)?,
+                snippet: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        }).map_err(SqzError::SessionStore)?;
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row.map_err(SqzError::SessionStore)?);
+        }
+        Ok(hits)
     }
 
     /// Retrieve the stored original bytes for a cached hash, if the
@@ -510,6 +588,10 @@ impl SessionStore {
             "DELETE FROM cache_entries WHERE hash = ?1",
             params![hash],
         )?;
+        let _ = self.db.execute(
+            "DELETE FROM recall_index WHERE ref_hash = ?1",
+            params![hash],
+        );
         Ok(())
     }
 
@@ -864,6 +946,42 @@ impl SessionStore {
         Ok(stats)
     }
 
+    /// Command families where compression is barely helping: meaningful
+    /// volume, under 25% reduction, ranked by tokens that still reached
+    /// the model. This is the formatter backlog, computed from real
+    /// history instead of guesses. Dedup rows are excluded (a ref is
+    /// already the best possible outcome).
+    pub fn formatter_gaps(&self, days: u32, limit: u32) -> Result<Vec<CommandStats>> {
+        let offset = format!("-{days} days");
+        let mut stmt = self.db.prepare(
+            "SELECT mode, COUNT(*), SUM(tokens_original), SUM(tokens_compressed) \
+             FROM compression_log \
+             WHERE created_at >= date('now', ?1) AND mode != 'dedup' \
+             GROUP BY mode \
+             HAVING SUM(tokens_original) >= 500 \
+                AND (SUM(tokens_original) - SUM(tokens_compressed)) * 100.0 \
+                    / SUM(tokens_original) < 25.0 \
+             ORDER BY SUM(tokens_compressed) DESC \
+             LIMIT ?2",
+        ).map_err(SqzError::SessionStore)?;
+        let rows = stmt.query_map(params![offset, limit], |row| {
+            let tokens_in: u64 = row.get(2)?;
+            let tokens_out: u64 = row.get(3)?;
+            Ok(CommandStats {
+                command: row.get(0)?,
+                invocations: row.get(1)?,
+                tokens_in,
+                tokens_out,
+                tokens_saved: tokens_in.saturating_sub(tokens_out),
+            })
+        }).map_err(SqzError::SessionStore)?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.map_err(SqzError::SessionStore)?);
+        }
+        Ok(results)
+    }
+
     /// Rerun-regret counts grouped by command, most regretted first.
     pub fn regret_by_command(&self, limit: u32) -> Result<Vec<(String, u32)>> {
         let mut stmt = self.db.prepare(
@@ -1172,6 +1290,9 @@ impl SessionStore {
         ).unwrap_or(0);
         self.db.execute("DELETE FROM cache_entries", [])
             .map_err(SqzError::SessionStore)?;
+        let _ = self.db.execute(
+            "DELETE FROM recall_index WHERE kind = 'output'", [],
+        );
         // Also clear the compaction marker so freshness checks don't
         // reference timestamps from the deleted entries.
         let _ = self.db.execute(
@@ -1215,6 +1336,7 @@ impl SessionStore {
         self.db.execute("DELETE FROM sessions", []).map_err(SqzError::SessionStore)?;
         self.db.execute("DELETE FROM known_files", []).map_err(SqzError::SessionStore)?;
         self.db.execute("DELETE FROM metadata", []).map_err(SqzError::SessionStore)?;
+        let _ = self.db.execute("DELETE FROM recall_index", []);
         // VACUUM to reclaim disk space.
         let _ = self.db.execute("VACUUM", []);
         Ok(())
@@ -1371,6 +1493,35 @@ pub struct CommandStats {
     pub tokens_saved: u64,
 }
 
+/// One `sqz recall` search hit.
+#[derive(Debug, Clone)]
+pub struct RecallHit {
+    /// Content hash (kind `output`, expandable via `sqz expand`) or
+    /// session id (kind `session`).
+    pub ref_hash: String,
+    pub kind: String,
+    /// Match context with `>>`/`<<` around matched terms.
+    pub snippet: String,
+    pub created_at: String,
+}
+
+/// Build a safe FTS5 MATCH expression from free-form user input: each
+/// whitespace-separated term becomes a quoted phrase (implicit AND), so
+/// FTS5 operator characters in the input can't break the query syntax.
+fn fts_query(raw: &str) -> String {
+    raw.split_whitespace()
+        .filter_map(|term| {
+            let cleaned = term.replace('"', "");
+            if cleaned.is_empty() {
+                None
+            } else {
+                Some(format!("\"{cleaned}\""))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Aggregated compression-regret signals (see `regret_log`).
 #[derive(Debug, Clone, Default)]
 pub struct RegretStats {
@@ -1428,6 +1579,144 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         apply_schema(&conn).unwrap();
         SessionStore { db: conn }
+    }
+
+    fn test_content(data: &str) -> CompressedContent {
+        CompressedContent {
+            data: data.to_string(),
+            tokens_compressed: 1,
+            tokens_original: 2,
+            stages_applied: vec![],
+            compression_ratio: 0.5,
+            provenance: crate::types::Provenance::default(),
+            verify: None,
+        }
+    }
+
+    #[test]
+    fn recall_indexes_cache_originals_and_searches() {
+        let store = in_memory_store();
+        let content = test_content("compressed");
+        store
+            .save_cache_entry_with_original(
+                "hash-auth",
+                &content,
+                Some(b"error: auth middleware rejected the session token"),
+            )
+            .unwrap();
+        store
+            .save_cache_entry_with_original(
+                "hash-build",
+                &content,
+                Some(b"cargo build finished in 32s with zero warnings"),
+            )
+            .unwrap();
+
+        let hits = store.recall_search("auth middleware", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].ref_hash, "hash-auth");
+        assert_eq!(hits[0].kind, "output");
+        assert!(hits[0].snippet.contains(">>auth<<"), "snippet: {}", hits[0].snippet);
+
+        // Re-saving the same hash must not duplicate index rows.
+        store
+            .save_cache_entry_with_original(
+                "hash-auth",
+                &content,
+                Some(b"error: auth middleware rejected the session token"),
+            )
+            .unwrap();
+        assert_eq!(store.recall_search("middleware", 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recall_skips_binary_and_survives_odd_queries() {
+        let store = in_memory_store();
+        let content = test_content("c");
+        store
+            .save_cache_entry_with_original("hash-bin", &content, Some(b"binary\x00payload"))
+            .unwrap();
+        assert!(store.recall_search("binary", 5).unwrap().is_empty());
+
+        // FTS5 operator characters in the query must not error.
+        for q in ["NOT AND OR", "\"unbalanced", "col:umn", "wild*", "(paren", "-", ""] {
+            let _ = store.recall_search(q, 5).unwrap();
+        }
+    }
+
+    #[test]
+    fn recall_deletion_and_clear_coherence() {
+        let store = in_memory_store();
+        let content = test_content("c");
+        store
+            .save_cache_entry_with_original("hash-x", &content, Some(b"kubectl rollout restarted deployment"))
+            .unwrap();
+        assert_eq!(store.recall_search("rollout", 5).unwrap().len(), 1);
+
+        store.delete_cache_entry("hash-x").unwrap();
+        assert!(store.recall_search("rollout", 5).unwrap().is_empty());
+
+        // clear_cache drops output entries but keeps session summaries.
+        store
+            .save_cache_entry_with_original("hash-y", &content, Some(b"terraform plan shows three changes"))
+            .unwrap();
+        let session = make_session("sess-recall", "/tmp/p", "refactored the billing retry loop");
+        store.save_session(&session).unwrap();
+        store.clear_cache().unwrap();
+        assert!(store.recall_search("terraform", 5).unwrap().is_empty());
+        let session_hits = store.recall_search("billing retry", 5).unwrap();
+        assert_eq!(session_hits.len(), 1);
+        assert_eq!(session_hits[0].kind, "session");
+        assert_eq!(session_hits[0].ref_hash, "sess-recall");
+
+        store.reset_all().unwrap();
+        assert!(store.recall_search("billing", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recall_ranks_better_matches_first() {
+        let store = in_memory_store();
+        let content = test_content("c");
+        store
+            .save_cache_entry_with_original(
+                "hash-dense",
+                &content,
+                Some(b"panic unwrap panic unwrap panic in worker thread"),
+            )
+            .unwrap();
+        store
+            .save_cache_entry_with_original(
+                "hash-sparse",
+                &content,
+                Some(format!("{} panic once at the end", "filler line of ordinary words\n".repeat(50)).as_bytes()),
+            )
+            .unwrap();
+        let hits = store.recall_search("panic", 5).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].ref_hash, "hash-dense", "bm25 should rank the denser match first");
+    }
+
+    #[test]
+    fn formatter_gaps_ranks_low_reduction_high_volume() {
+        let store = in_memory_store();
+        // High volume, terrible reduction: a gap.
+        for _ in 0..4 {
+            store.log_compression(1_000, 950, &[], "xcodebuild").unwrap();
+        }
+        // High volume, great reduction: not a gap.
+        for _ in 0..4 {
+            store.log_compression(1_000, 100, &[], "cargo test").unwrap();
+        }
+        // Low volume, bad reduction: filtered by the 500-token floor.
+        store.log_compression(100, 95, &[], "tiny-cmd").unwrap();
+        // Dedup rows never count as gaps.
+        store.log_compression(5_000, 13, &["dedup".to_string()], "dedup").unwrap();
+
+        let gaps = store.formatter_gaps(7, 10).unwrap();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(gaps[0].command, "xcodebuild");
+        assert_eq!(gaps[0].invocations, 4);
+        assert!(gaps[0].reduction_pct() < 25.0);
     }
 
     #[test]

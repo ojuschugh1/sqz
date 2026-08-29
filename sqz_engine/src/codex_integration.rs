@@ -119,10 +119,12 @@ Do NOT pipe output for:
 If `sqz` is not on PATH, run commands normally.
 
 The `sqz-mcp` MCP server is also available — Codex reads it from
-`~/.codex/config.toml` under `[mcp_servers.sqz]`. It exposes three
-tools: `compress` (the default pipeline), `passthrough` (return text
-unchanged — the escape hatch below), and `expand` (resolve a
-`§ref:HASH§` token back to the original bytes).
+`~/.codex/config.toml` under `[mcp_servers.sqz]`. It exposes
+`compress` (the default pipeline), `passthrough` (return text
+unchanged — the escape hatch below), `expand` (resolve a
+`§ref:HASH§` token back to the original bytes), and `sqz_recall`
+(full-text search over everything sqz has compressed — recover
+context lost to compaction).
 
 ## Escape hatch — when sqz output confuses you
 
