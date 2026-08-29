@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`sqz recall` — full-text search over session memory.** Everything
+  that flows through sqz is now indexed in a local SQLite FTS5 table
+  (BM25-ranked, snippet highlighting, binary content skipped). When an
+  agent's context is compacted away, `sqz recall "connection refused"`
+  finds the original output and prints the `sqz expand` ref to recover
+  it byte-exact. Exposed to agents as the `sqz_recall` MCP tool. The
+  index respects eviction: cache clears and entry deletion drop the
+  matching rows.
+- **Generic table compactor.** Aligned-column output from commands
+  without a dedicated formatter (`ps aux`, `netstat`, database CLIs)
+  collapses its alignment padding to two-space separators. The detector
+  is deliberately strict — 5+ rows, zero leading whitespace, and
+  full-height separator bands required — so code, YAML, diffs, and
+  JSON never match.
+- **New formatters: xcodebuild, adb logcat, dotnet.** Apple builds
+  collapse to diagnostics + verdict (compiler invocations and
+  environment noise dropped), logcat keeps errors/fatals plus capped
+  warnings with consecutive-duplicate folding, and dotnet build/test
+  keep MSBuild diagnostics (deduplicated across target frameworks) and
+  failing-test blocks.
+- **`sqz discover` ranks your weakest-compressing commands** from real
+  usage history (high token volume, low reduction) so you can see
+  which formatter would pay off next — and file an issue for it.
 - **Global Kiro integration** — `sqz init --global` now installs Kiro at
   the user level: steering at `~/.kiro/steering/sqz.md` and the MCP
   server in `~/.kiro/settings/mcp.json`, both of which Kiro applies to

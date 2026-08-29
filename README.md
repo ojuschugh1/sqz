@@ -233,7 +233,7 @@ Claude → git status → [sqz hook rewrites] → compressed output (85% smaller
 ```
 
 What gets compressed:
-- **Shell output** — 40+ per-command formatters (git, cargo, npm/pnpm/yarn, pytest, ruff, go test, docker, kubectl, aws, terraform, gradle, gh, grep/rg, tree, curl, and more)
+- **Shell output** — 45+ per-command formatters (git, cargo, npm/pnpm/yarn, pytest, ruff, go test, docker, kubectl, aws, terraform, gradle, xcodebuild, adb logcat, dotnet, gh, grep/rg, tree, curl, and more)
 - **JSON** — strips nulls, compact encoding, TOON format
 - **Logs** — collapses repeated lines
 - **Test output** — shows failures only (state-machine parsers for Rust, Go, Python, JS, JVM)
@@ -314,7 +314,8 @@ sqz stats --cost              # Estimated $ saved under a prompt-cached billing 
 sqz stats --breakdown         # Per-command token usage breakdown
 sqz stats --project .         # Stats for current project only
 sqz stats --project list      # List all tracked projects
-sqz discover                  # Find missed savings
+sqz discover                  # Find missed savings (incl. your weakest-compressing commands)
+sqz recall "auth timeout"     # Full-text search everything sqz has compressed
 sqz resume                    # Re-inject session context after compaction
 sqz vizit                     # Live terminal dashboard (like htop for AI agents)
 sqz hook claude               # Process a PreToolUse hook (Claude Code)
@@ -343,6 +344,21 @@ export SQZ_NO_DEDUP=1
 # 4. MCP passthrough tool (returns input byte-exact, zero transforms)
 # Available via tools/list when sqz-mcp is running
 ```
+
+### Recall: search everything sqz has seen
+
+Everything that flows through sqz is indexed locally (SQLite FTS5, on your
+machine, nothing leaves it). When your agent compacts its context and loses
+that error message from an hour ago, search for it instead of re-running
+the command:
+
+```sh
+$ sqz recall "connection refused"
+  1. [git · 2h ago]  … curl: (7) Failed to connect: >>connection refused<< on port 5432 …
+     full content: sqz expand 3f9a1c05e2d84b17
+```
+
+Agents get the same thing as the `sqz_recall` MCP tool.
 
 ## Track Your Own Savings
 
@@ -431,7 +447,7 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 
 ## How Compression Works
 
-1. **Per-command formatters** — 40+ commands across 9 ecosystems get purpose-built compression:
+1. **Per-command formatters** — 45+ commands across 12 ecosystems get purpose-built compression:
 
    | Ecosystem | Commands |
    |---|---|
@@ -443,15 +459,18 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
    | Cloud | aws, terraform plan/apply/init, gcloud |
    | Containers | docker/podman ps/images/build, kubectl get/describe/logs/apply |
    | JVM | gradle build/test, maven |
+   | Mobile | xcodebuild (build + test), adb logcat |
+   | .NET | dotnet build/publish/test |
    | System | grep/rg, tree, find/fd, ls, curl/wget |
    | GitHub | gh pr/issue/run (JSON + table) |
 
    Unknown commands fall through to the generic compression pipeline — no output is ever left uncompressed.
 
-2. **Structural summaries** — code files compressed to imports + function signatures + call graph (~70% reduction). The model sees the architecture, not implementation noise.
-3. **Dedup cache** — SHA-256 content hash, persistent across sessions. Second read = 13-token reference.
-4. **JSON pipeline** — strip nulls → project out debug fields → flatten → collapse arrays → TOON encoding (lossless compact format)
-5. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
+2. **Table compactor** — aligned-column output from tools without a dedicated formatter (`ps aux`, `netstat`, database CLIs) collapses its padding runs to two-space separators. The detector is strict — indented lines, code, YAML, and JSON never match.
+3. **Structural summaries** — code files compressed to imports + function signatures + call graph (~70% reduction). The model sees the architecture, not implementation noise.
+4. **Dedup cache** — SHA-256 content hash, persistent across sessions. Second read = 13-token reference.
+5. **JSON pipeline** — strip nulls → project out debug fields → flatten → collapse arrays → TOON encoding (lossless compact format)
+6. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
 
 For the full technical details, see [docs/](docs/).
 
