@@ -508,7 +508,7 @@ cargo build --release
 
 ## License
 
-[Elastic License 2.0](LICENSE) (ELv2) — use, fork, modify freely. Two restrictions: no competing hosted service, no removing license notices.
+[Elastic License 2.0](LICENSE) (ELv2) — use, fork, modify freely. Two restrictions: no competing hosted service, no removing license notices. 
 
 ## Links
 
