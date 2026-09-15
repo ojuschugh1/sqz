@@ -177,7 +177,11 @@ impl SqzEngine {
 
         // Step 2: If Safe mode, skip aggressive pipeline and go straight to safe compress
         if mode == crate::confidence_router::CompressionMode::Safe {
-            eprintln!("[sqz] fallback: safe mode — content classified as high-risk (stack trace / migration / secret)");
+            // Silent by default: in the hook path every stderr line lands in
+            // the agent's context, and a passthrough has nothing to report.
+            if std::env::var_os("SQZ_VERBOSE").is_some() {
+                eprintln!("[sqz] safe mode: high-risk content passed through unchanged");
+            }
             return self.compress_safe(input, &pipeline, &ctx);
         }
 
@@ -501,6 +505,12 @@ impl SqzEngine {
     /// and risk pattern analysis.
     pub fn route_compression_mode(&self, content: &str) -> crate::confidence_router::CompressionMode {
         self.confidence_router.route(content)
+    }
+
+    /// Count tokens the way `compress` counts `tokens_original`.
+    pub fn count_tokens(&self, text: &str) -> u32 {
+        let preset = self.preset.lock().unwrap();
+        self.pipeline.lock().unwrap().count_tokens(text, &preset)
     }
 }
 

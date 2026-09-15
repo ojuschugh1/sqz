@@ -248,11 +248,14 @@ impl CliProxy {
             }
         }
 
-        // Step 3: Try per-command formatter
+        // Step 3: Try per-command formatter. Same net-win gate as the
+        // pipeline path: the stats header costs the agent ~12 tokens, so a
+        // formatter that trims a few blank lines is a net loss.
+        const NET_WIN_MIN_TOKENS: u32 = 16;
         if let Some(formatted) = format_command(cmd, output) {
             let tokens_original = (output.len() as u32 + 3) / 4;
             let tokens_compressed = (formatted.len() as u32 + 3) / 4;
-            if tokens_compressed < tokens_original {
+            if tokens_original.saturating_sub(tokens_compressed) >= NET_WIN_MIN_TOKENS {
                 // Persist to L2 cache — but skip if content contains secrets
                 // (confidence router detected high-risk patterns like API keys)
                 let mode = self.engine.route_compression_mode(output);
@@ -344,8 +347,7 @@ impl CliProxy {
                 // original passes through and no savings are recorded. The
                 // L2 store above still happens, so a repeat of this content
                 // resolves to a dedup ref.
-                const NET_WIN_MIN_TOKENS: u32 = 16;
-                let tokens_final = (abbreviated.len() as u32).div_ceil(4);
+                let tokens_final = self.engine.count_tokens(&abbreviated);
                 if tokens_original.saturating_sub(tokens_final) < NET_WIN_MIN_TOKENS {
                     return self.apply_context_refs(output);
                 }

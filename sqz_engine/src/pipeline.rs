@@ -102,6 +102,13 @@ impl CompressionPipeline {
         self.compress_inner(input, ctx, preset, true)
     }
 
+    /// Token count with the same tokenizer `compress` used for
+    /// `tokens_original`, so callers that post-process the output can report
+    /// comparable numbers.
+    pub fn count_tokens(&self, text: &str, preset: &Preset) -> u32 {
+        self.token_counter.count(text, &model_family_from_preset(preset))
+    }
+
     fn compress_inner(
         &self,
         input: &str,
@@ -140,6 +147,10 @@ impl CompressionPipeline {
         // Post-stage processing: apply advanced compression techniques
 
         let is_json = ToonEncoder::is_json(&content.raw);
+        // Source code gets no line-dropping stages: an agent that cats a
+        // file is about to edit it, and imports or a class header score as
+        // "low information" to the truncator. Dedup still covers re-reads.
+        let is_code = !is_json && looks_like_code(&content.raw);
 
         // JSON projection: strip internal/debug fields, empty collections,
         // deep nesting, and redundant timestamps before other JSON processing
@@ -156,7 +167,7 @@ impl CompressionPipeline {
         // RLE: collapse repeated patterns in non-JSON content (generalizes condense).
         // Skipped on the lossless path — even reversible `[×N]` markers make a
         // file read non-verbatim. Only apply when content is long enough.
-        if !lossless && !is_json && content.raw.len() > 200 {
+        if !lossless && !is_json && !is_code && content.raw.len() > 200 {
             if let Ok(rle_result) = crate::rle_compressor::rle_compress(&content.raw, 3) {
                 if rle_result.runs_collapsed > 0 {
                     // Safety check: verify critical markers are preserved
@@ -174,7 +185,7 @@ impl CompressionPipeline {
         // except for timestamps/durations/percentages — what exact RLE
         // misses in real logs. Identifier-bearing lines never collapse.
         // Skipped on the lossless path.
-        if !lossless && !is_json && content.raw.len() > 200 {
+        if !lossless && !is_json && !is_code && content.raw.len() > 200 {
             if let Ok(lt_result) = crate::rle_compressor::log_template_collapse(&content.raw, 3) {
                 if lt_result.runs_collapsed > 0 {
                     let has_error = content.raw.contains("ERROR") || content.raw.contains("error:");
@@ -190,7 +201,7 @@ impl CompressionPipeline {
         // Sliding window dedup: catch repeated substrings across non-adjacent lines.
         // Skipped on the lossless path — its `[→Ln]` back-references have no
         // agent-facing expand path and make a file read non-faithful (#32).
-        if !lossless && !is_json && content.raw.len() > 300 {
+        if !lossless && !is_json && !is_code && content.raw.len() > 300 {
             if let Ok(sw_result) = crate::rle_compressor::sliding_window_dedup(&content.raw, 4) {
                 if sw_result.dedup_count > 0 {
                     // Safety check: verify critical markers are preserved
@@ -210,7 +221,7 @@ impl CompressionPipeline {
         // refuses anything with leading indentation, so code, YAML,
         // diffs, and pretty JSON are never touched. Runs before entropy
         // truncation so the truncator scores the compact form.
-        if !lossless && !is_json && content.raw.len() > 200 {
+        if !lossless && !is_json && !is_code && content.raw.len() > 200 {
             if let Some(table_result) =
                 crate::table_compactor::compact_aligned_table(&content.raw)
             {
@@ -226,7 +237,7 @@ impl CompressionPipeline {
         // kicks in, since dropping detail from a success costs more than
         // it saves.
         let entropy_threshold = if looks_benign(&content.raw) { 1000 } else { 500 };
-        if !lossless && !is_json && content.raw.len() > entropy_threshold {
+        if !lossless && !is_json && !is_code && content.raw.len() > entropy_threshold {
             if let Ok(trunc_result) = self.entropy_truncator.truncate_string(&content.raw) {
                 if trunc_result.segments_dropped > 0 {
                     content.raw = trunc_result.text;
@@ -516,6 +527,49 @@ fn looks_like_prose(text: &str) -> bool {
     prose_lines > code_lines
 }
 
+/// Heuristic: is this a source file rather than command output? Needs a
+/// couple of declaration lines and a clear majority of code-shaped lines.
+/// Timestamped lines are ignored so logs never qualify. False positives
+/// only cost compression; false negatives cost imports and class headers.
+fn looks_like_code(text: &str) -> bool {
+    const DECL: &[&str] = &[
+        "def ", "class ", "fn ", "pub ", "func ", "function ", "async ", "import ", "from ",
+        "use ", "package ", "struct ", "impl ", "enum ", "trait ", "interface ", "type ",
+        "export ", "const ", "let ", "var ", "static ", "public ", "private ", "protected ",
+        "return ", "#include", "@",
+    ];
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).take(80).collect();
+    if lines.len() < 3 {
+        return false;
+    }
+    let mut decl = 0usize;
+    let mut codeish = 0usize;
+    for line in &lines {
+        let t = line.trim_start();
+        if t.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        let is_decl = DECL.iter().any(|k| t.starts_with(k));
+        if is_decl {
+            decl += 1;
+        }
+        let ends_like_code = t.trim_end().ends_with(['{', '}', ';', ':', ')', ',']);
+        if is_decl
+            || ends_like_code
+            || t.contains(" = ")
+            || t.starts_with("//")
+            || t.starts_with('#')
+            || t.starts_with("/*")
+            || t.starts_with('*')
+            || line.starts_with("    ")
+            || line.starts_with('\t')
+        {
+            codeish += 1;
+        }
+    }
+    decl >= 2 && codeish * 10 >= lines.len() * 7
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -594,6 +648,41 @@ mod tests {
     /// file-read path (sqz_read_file / sqz_grep / sqz_list_dir) must never
     /// silently drop content. `compress_lossless` keeps every segment; the
     /// default `compress` truncates below-median-entropy segments.
+    #[test]
+    fn source_code_skips_line_dropping_stages() {
+        let pipeline = CompressionPipeline::new(&default_preset());
+        let preset = default_preset();
+        let mut code = String::from(
+            "from dataclasses import dataclass\n\nfrom .errors import RefundError\nfrom .gateway import Gateway\n\n\n@dataclass\nclass RefundService:\n    gateway: Gateway\n\n",
+        );
+        for i in 0..12 {
+            code.push_str(&format!(
+                "    def method_{i}(self, charge: Charge, amount_cents: int) -> Refund:\n        if amount_cents <= 0:\n            raise RefundError(\"invalid refund amount\")\n        refund = self.gateway.refund(charge.id, amount_cents)\n        self.ledger.record(refund)\n        return refund\n\n"
+            ));
+        }
+        assert!(code.len() > 1000);
+        assert!(looks_like_code(&code));
+        let result = pipeline.compress(&code, &ctx(), &preset).unwrap();
+        for stage in ["entropy_truncate", "sliding_window_dedup", "rle", "log_template", "table_compact"] {
+            assert!(!result.stages_applied.iter().any(|s| s == stage), "{stage} ran on source code: {:?}", result.stages_applied);
+        }
+        assert!(result.data.contains("from .errors import RefundError"));
+        assert!(result.data.contains("class RefundService:"));
+
+        let mut log = String::new();
+        for i in 0..60 {
+            log.push_str(&format!("2026-09-14T10:22:{:02}Z INFO  GET /healthz 200 1ms\n", i % 60));
+        }
+        log.push_str("2026-09-14T10:23:41Z ERROR refund failed order=ord_8812\n");
+        assert!(!looks_like_code(&log));
+        let result = pipeline.compress(&log, &ctx(), &preset).unwrap();
+        assert!(result.data.len() < log.len() / 2, "log should still collapse: {}", result.data);
+        assert!(result.data.contains("ERROR refund failed order=ord_8812"));
+
+        let status = "On branch main\n\nChanges not staged for commit:\n\tmodified:   README.md\n\tmodified:   src/lib.rs\n\nUntracked files:\n\tnotes.txt\n";
+        assert!(!looks_like_code(status));
+    }
+
     #[test]
     fn table_compact_stage_fires_on_tabular_output_only() {
         let pipeline = CompressionPipeline::new(&default_preset());
