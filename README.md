@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <strong>Compress LLM context to save tokens and reduce costs</strong>
+  <strong>Pre-injection context compression and session deduplication for AI coding agents</strong>
 </p>
 
 <p align="center">
@@ -50,7 +50,7 @@
 
 sqz compresses command output before it reaches your LLM. Single Rust binary, zero config.
 
-The real win is dedup: when the same file gets read 5 times in a session, sqz sends it once and returns a 13-token reference for every repeat.
+The real win is dedup: when the same file gets read 5 times in a session, sqz sends it once and returns a 13-token reference for every repeat ([how that works, and its limits](docs/stop-rereading-files.md)).
 
 ```
 Without sqz:                    With sqz:
@@ -290,7 +290,9 @@ injects an `sqz_tool_help` tool that serves the full original docs on demand
 (some MCP servers spend 10-40k tokens on `tools/list` alone); `--no-desc`
 keeps descriptions verbatim; `--no-cache` disables dedup refs. Works with
 every MCP client (Claude Code, Cursor, Windsurf, Zed, Codex, Kiro, ...)
-because the client just sees a normal MCP server.
+because the client just sees a normal MCP server. Full guide, including the
+server's own `sqz_read_file` / `sqz_grep` / `sqz_list_dir` tools and per-client
+config: [MCP context compression](docs/mcp-context-compression.md).
 
 ## CLI
 
@@ -472,7 +474,7 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 5. **JSON pipeline** — strip nulls → project out debug fields → flatten → collapse arrays → TOON encoding (lossless compact format)
 6. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
 
-For the full technical details, see [docs/](docs/).
+Measured quality, including what each stage drops and what it never touches: [quality benchmark](docs/quality-benchmark.md). For the full technical details, see [docs/](docs/README.md).
 
 ## Configuration
 
@@ -531,6 +533,12 @@ cargo build --release
 
 ## Links
 
+- [Documentation index](docs/README.md)
+- [How to stop AI coding agents from re-reading the same files](docs/stop-rereading-files.md)
+- [MCP context compression](docs/mcp-context-compression.md)
+- [Quality benchmark: compression ratio vs information preservation](docs/quality-benchmark.md)
+- [Context rot vs context compression](docs/context-rot.md)
+- [Choosing a context compression approach](docs/comparison.md)
 - [White Paper: Pre-Injection Context Compression](docs/whitepaper.md)
 - [Token Savings Benchmark](docs/benchmark.md)
 - [Discord](https://discord.gg/j8EEyH5dSB)

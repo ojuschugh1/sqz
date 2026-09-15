@@ -108,19 +108,15 @@ File: `~/.gemini/settings.json`
 
 ### Codex (OpenAI)
 
-File: `~/.codex/config.json`
+File: `~/.codex/config.toml` (TOML, snake_case key). `sqz init` merges this entry for you and leaves the rest of the file alone.
 
-```json
-{
-  "mcpServers": {
-    "sqz": {
-      "command": "sqz-mcp",
-      "args": ["--transport", "stdio"],
-      "env": {}
-    }
-  }
-}
+```toml
+[mcp_servers.sqz]
+command = "sqz-mcp"
+args = ["--transport", "stdio"]
 ```
+
+See [codex.md](codex.md) for the full setup.
 
 ---
 

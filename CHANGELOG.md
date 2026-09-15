@@ -46,6 +46,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Honored by every surface: shell hook, CLI commands, vizit, and the MCP
   server. The parent directory is created if missing (0700); pre-existing
   directories are never chmodded.
+- **Quality benchmark as a regression test.** `cargo test -p sqz-cli
+  --test quality_bench` pushes 13 realistic command outputs through the
+  real binary and fails if any agent-critical fact (failing test name,
+  assertion, `file:line`, changed diff lines, crashing pod, vulnerability
+  count) goes missing, if a stack trace or secret is altered, if a
+  secret is persisted, or if compressed content cannot be recovered
+  byte-exact with `sqz expand`. Results and methodology in
+  [docs/quality-benchmark.md](docs/quality-benchmark.md).
+- **Docs:** [MCP context compression](docs/mcp-context-compression.md),
+  [stop AI agents re-reading the same files](docs/stop-rereading-files.md),
+  [context rot vs context compression](docs/context-rot.md),
+  [choosing a compression approach](docs/comparison.md), a
+  [Codex CLI guide](docs/integrations/level2/codex.md), a
+  [docs index](docs/README.md) and a root `llms.txt`.
+
+### Fixed
+
+Over-compression found by the quality benchmark on its first run:
+
+- **`npm install`** dropped the `N vulnerabilities (...)` line and the
+  `npm audit fix` hint: an early return on the "added N packages" line
+  skipped everything after it.
+- **`docker ps`** mis-parsed rows whenever COMMAND or CREATED contained
+  spaces (`"uvicorn app:app"`, `2 hours ago`), putting status and ports
+  in the wrong cells. Rows are now sliced at the header's column
+  offsets, and PORTS is kept.
+- **`git status`** dropped the branch name and the ahead/behind line.
+  Both are kept; only "up to date" is elided.
+- **`pytest`** kept only the short-summary line, losing the failure's
+  `file:line`, the failing source line and the `1 failed, 41 passed`
+  totals. New dedicated formatter keeps all three.
+- **`tsc`** only recognised the piped `file(line,col)` layout; with
+  `--pretty` output it fell through to the generic pipeline, which dropped
+  the `Found N errors` summary. Both layouts are parsed now.
+- **Source files read through the hook** (`cat src/x.py`) lost imports
+  and the `class` line to entropy truncation. The pipeline now detects
+  source code and skips every line-dropping stage; savings on file reads
+  come from dedup, as intended.
+- **Inflated savings on the pipeline path.** `sqz stats` compared a BPE
+  token count for the input with a bytes/4 estimate for the output, so
+  unchanged passthroughs were recorded as 15-37% reductions and the
+  stats header was printed on them. Both sides now use the same
+  tokenizer, and the 16-token net-win gate applies to the formatter path
+  too, so a formatter that trims a few blank lines no longer costs the
+  agent a 12-token header.
+- The safe-mode notice on stderr is silent unless `SQZ_VERBOSE` is set:
+  in the hook path every stderr line lands in the agent's context, and a
+  passthrough has nothing to report.
+- The `sqz_read_file` / `sqz_grep` / `sqz_list_dir` tool descriptions
+  claimed signature extraction and line folding that the lossless
+  file-read path (#32) never does. They now describe what happens.
+
+### Changed
+
+- Package descriptions and keywords on crates.io, npm and PyPI now say
+  what sqz is for: pre-injection context compression and session
+  deduplication for AI coding agents.
 
 ## [1.6.1] — 2026-08-16
 

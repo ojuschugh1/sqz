@@ -1,0 +1,31 @@
+# sqz
+
+> Pre-injection context compression and session deduplication for AI coding agents. sqz compresses tool output (shell commands, file reads, MCP tool results) before it enters the model's context window. Deterministic Rust, zero LLM calls, offline, every compressed result recoverable byte-exact. Repeated content becomes a 13-token reference. Works with Claude Code, Cursor, Windsurf, Cline, Gemini CLI, Kiro, OpenCode, Codex CLI, Zed, Copilot CLI, VS Code, JetBrains, Chrome and Firefox.
+
+Install: `cargo install sqz-cli sqz-mcp`, `brew install ojuschugh1/sqz/sqz`, `npm i -g sqz-cli`, `pipx install sqz`, or release binaries. Then `sqz init`. MCP Registry name: `io.github.ojuschugh1/sqz`.
+
+Measured effect across real sessions: 24.7% average token reduction, up to 92% on dedup hits, 0% by construction on stack traces, secrets and source files.
+
+## Docs
+
+- [README](https://github.com/ojuschugh1/sqz/blob/main/README.md): install, supported tools, CLI reference, how compression works
+- [Stop AI coding agents from re-reading the same files](https://github.com/ojuschugh1/sqz/blob/main/docs/stop-rereading-files.md): dedup references, deltas for edited files, built-in Read tool caveat
+- [MCP context compression](https://github.com/ojuschugh1/sqz/blob/main/docs/mcp-context-compression.md): sqz-mcp tools, proxy for any MCP server, per-client config
+- [Quality benchmark](https://github.com/ojuschugh1/sqz/blob/main/docs/quality-benchmark.md): compression ratio vs information preservation, regression-tested
+- [Context rot vs context compression](https://github.com/ojuschugh1/sqz/blob/main/docs/context-rot.md): proactive vs reactive context management
+- [Choosing a context compression approach](https://github.com/ojuschugh1/sqz/blob/main/docs/comparison.md): approaches compared, how to compare tools
+- [Token savings benchmark](https://github.com/ojuschugh1/sqz/blob/main/docs/benchmark.md): session-level dedup numbers
+- [White paper](https://github.com/ojuschugh1/sqz/blob/main/docs/whitepaper.md)
+- [Integrations](https://github.com/ojuschugh1/sqz/blob/main/docs/integrations/README.md): config snippets for every client
+- [Changelog](https://github.com/ojuschugh1/sqz/blob/main/CHANGELOG.md)
+
+## API
+
+- [sqz-engine on docs.rs](https://docs.rs/sqz-engine): compression engine library
+- [sqz-mcp on docs.rs](https://docs.rs/sqz-mcp): MCP server and proxy
+- [sqz-cli on crates.io](https://crates.io/crates/sqz-cli): the `sqz` binary
+
+## Optional
+
+- [BENCHMARKS.md](https://github.com/ojuschugh1/sqz/blob/main/BENCHMARKS.md): per-formatter reductions
+- [Source](https://github.com/ojuschugh1/sqz)
