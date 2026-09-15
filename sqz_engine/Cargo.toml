@@ -2,12 +2,12 @@
 name = "sqz-engine"
 version = "1.6.1"
 edition = "2021"
-description = "Adaptive multi-pass LLM context compression engine — content-aware pipeline with AST parsing, token counting, session persistence, and budget tracking"
+description = "Context compression engine behind sqz: per-command formatters, SHA-256 session dedup, AST structural summaries, token counting and budget tracking for AI coding agents"
 license-file = "../LICENSE"
 repository = "https://github.com/ojuschugh1/sqz"
 homepage = "https://github.com/ojuschugh1/sqz"
-keywords = ["llm", "compression", "context", "tokens", "ai"]
-categories = ["text-processing", "command-line-utilities"]
+keywords = ["llm", "compression", "context-compression", "token-optimization", "coding-agents"]
+categories = ["text-processing", "development-tools"]
 readme = "../README.md"
 exclude = ["proptest-regressions/"]
 

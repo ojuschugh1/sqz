@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sqz"
 version = "1.6.1"
-description = "Universal context intelligence layer — compresses LLM context across CLI, MCP, browser, and IDE"
+description = "Pre-injection context compression and session deduplication for AI coding agents: squeeze tool output, code, JSON and logs before they reach the LLM"
 readme = "README.md"
 license = { text = "Elastic License 2.0 (ELv2)" }
 requires-python = ">=3.8"
-keywords = ["llm", "context", "compression", "mcp", "ai", "cli"]
+keywords = ["llm", "context-compression", "token-optimization", "context-window", "coding-agents", "ai-agents", "mcp", "mcp-server", "claude-code", "cursor", "codex", "compression", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",

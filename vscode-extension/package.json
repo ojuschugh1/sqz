@@ -17,7 +17,12 @@
     "compression",
     "tokens",
     "ai",
-    "mcp"
+    "mcp",
+    "context-compression",
+    "token-optimization",
+    "coding-agents",
+    "claude-code",
+    "copilot"
   ],
   "engines": {
     "vscode": "^1.85.0"

@@ -2,12 +2,12 @@
 name = "sqz-mcp"
 version = "1.6.1"
 edition = "2021"
-description = "MCP server for sqz — expose LLM context compression over Model Context Protocol (stdio/SSE)"
+description = "MCP server and proxy for sqz: compress tool results, file reads and other MCP servers' output before it enters the LLM context (stdio/SSE)"
 license-file = "../LICENSE"
 repository = "https://github.com/ojuschugh1/sqz"
 homepage = "https://github.com/ojuschugh1/sqz"
-keywords = ["llm", "mcp", "compression", "context", "ai"]
-categories = ["command-line-utilities", "web-programming"]
+keywords = ["mcp", "mcp-server", "llm", "coding-agents", "context-compression"]
+categories = ["command-line-utilities", "development-tools", "web-programming"]
 readme = "../README.md"
 
 [[bin]]

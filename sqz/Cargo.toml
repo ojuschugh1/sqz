@@ -2,12 +2,12 @@
 name = "sqz-cli"
 version = "1.6.1"
 edition = "2021"
-description = "Universal LLM context compressor — squeeze tokens from prompts, code, JSON, logs, and conversations"
+description = "Pre-injection context compression and session deduplication for AI coding agents: squeeze tool output, code, JSON and logs before they reach the LLM"
 license-file = "../LICENSE"
 repository = "https://github.com/ojuschugh1/sqz"
 homepage = "https://github.com/ojuschugh1/sqz"
-keywords = ["llm", "compression", "context", "cli", "ai"]
-categories = ["command-line-utilities", "text-processing"]
+keywords = ["llm", "mcp", "claude-code", "coding-agents", "context-compression"]
+categories = ["command-line-utilities", "development-tools", "text-processing"]
 readme = "../README.md"
 include = ["src/**/*", "completions/*", "../LICENSE", "../README.md"]
 
