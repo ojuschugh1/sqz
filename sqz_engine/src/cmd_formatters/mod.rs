@@ -57,9 +57,9 @@ fn dispatch(cmd: &str, output: &str) -> Option<String> {
         "eslint" | "biome" => Some(lint::format_lint(output)),
 
         // Python
-        "pytest" => Some(test_output::format_test_failures(output)),
+        "pytest" => Some(python::format_pytest(output)),
         "python" | "python3" if cmd.contains("pytest") || cmd.contains("-m pytest") => {
-            Some(test_output::format_test_failures(output))
+            Some(python::format_pytest(output))
         }
         "ruff" => python::format_python(cmd, parts.get(1).copied(), output),
         "mypy" => python::format_python(cmd, None, output),

@@ -34,7 +34,8 @@ fn format_install(output: &str) -> String {
     for line in output.lines() {
         let trimmed = line.trim();
         if trimmed.contains("added") && trimmed.contains("packages") {
-            return trimmed.to_string();
+            summary_parts.push(trimmed.to_string());
+            continue;
         }
         // pnpm: "Packages: +42"
         if trimmed.starts_with("Packages:") {
@@ -44,7 +45,7 @@ fn format_install(output: &str) -> String {
         if trimmed.starts_with("Progress:") && trimmed.contains("added") {
             summary_parts.push(trimmed.to_string());
         }
-        if trimmed.contains("vulnerabilities") {
+        if trimmed.contains("vulnerabilities") || trimmed.starts_with("npm audit fix") {
             summary_parts.push(trimmed.to_string());
         }
     }
@@ -155,6 +156,16 @@ mod tests {
         let output = "added 42 packages in 3s\n2 vulnerabilities\n";
         let result = format_install(output);
         assert!(result.contains("added 42 packages"));
+        assert!(result.contains("2 vulnerabilities"));
+    }
+
+    #[test]
+    fn test_npm_install_keeps_audit_summary_and_fix_hint() {
+        let output = "npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported\n\n\
+added 412 packages, and audited 413 packages in 9s\n\n58 packages are looking for funding\n  run `npm fund` for details\n\n\
+3 vulnerabilities (1 moderate, 2 high)\n\nTo address all issues, run:\n  npm audit fix\n\nRun `npm audit` for details.\n";
+        let result = format_install(output);
+        assert_eq!(result, "added 412 packages, and audited 413 packages in 9s\n3 vulnerabilities (1 moderate, 2 high)\nnpm audit fix");
     }
 
     #[test]

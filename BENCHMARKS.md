@@ -152,7 +152,7 @@ these figures, and each row is gated so the numbers can't silently drift:
 | `grep` (100 matches, 5 files) | 1,373 | 238 | **83%** | Group by file, cap per file |
 | `terraform plan` (2 resources) | 121 | 25 | **79%** | +N ~N -N summary + resource list |
 | `cargo clippy` (5 warnings) | 163 | 70 | **57%** | Group by rule + location |
-| `git status` (verbose, 10 files) | 102 | 52 | **49%** | Compact staged/modified/untracked |
+| `git status` (verbose, 10 files) | 102 | 56 | **45%** | Branch line + compact staged/modified/untracked |
 
 Reductions scale with input size: the savings are largest on the verbose, repetitive
 output (package lists, passing-test runs, large match sets) and smaller on output that

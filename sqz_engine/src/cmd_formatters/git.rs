@@ -206,7 +206,7 @@ fn format_git_status(output: &str) -> String {
         return output.to_string();
     }
 
-    let mut result = Vec::new();
+    let mut result = branch_lines(output);
     if !staged.is_empty() {
         result.push(format!("staged({}): {}", staged.len(), staged.join(", ")));
     }
@@ -226,6 +226,35 @@ fn format_git_status(output: &str) -> String {
         }
     }
     result.join("\n")
+}
+
+/// Branch and tracking info: the flush-left prose lines before the first
+/// section, or the `## ` header in porcelain -b output. Locale-independent.
+fn branch_lines(output: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix("## ") {
+            lines.push(rest.trim().to_string());
+            break;
+        }
+        if line.trim().is_empty() || line.trim_end().ends_with(':') {
+            break;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') || is_status_porcelain_line(line) {
+            if lines.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if line.contains("up to date") || line.contains("up-to-date") {
+            continue;
+        }
+        lines.push(line.trim().to_string());
+        if lines.len() == 2 {
+            break;
+        }
+    }
+    lines
 }
 
 fn format_git_log(output: &str) -> String {
@@ -496,8 +525,30 @@ Modifiche di cui verrà eseguito il commit:\n\
   (use \"git restore --staged <file>...\" to unstage)\n\
 \tnew file:   README.md\n";
         let result = format_git_status(output);
+        assert!(result.starts_with("On branch main\n"), "{result}");
         assert!(result.contains("staged(1)"));
         assert!(result.contains("README.md"));
+    }
+
+    #[test]
+    fn test_git_status_keeps_branch_and_tracking() {
+        let output = "On branch feature/x\nYour branch is ahead of 'origin/feature/x' by 2 commits.\n\
+  (use \"git push\" to publish your local commits)\n\nChanges not staged for commit:\n\
+  (use \"git add <file>...\" to update what will be committed)\n\tmodified:   README.md\n";
+        let result = format_git_status(output);
+        let mut lines = result.lines();
+        assert_eq!(lines.next(), Some("On branch feature/x"));
+        assert_eq!(lines.next(), Some("Your branch is ahead of 'origin/feature/x' by 2 commits."));
+        assert_eq!(lines.next(), Some("modified(1): modified:   README.md"));
+        assert!(!result.contains("git push"));
+    }
+
+    #[test]
+    fn test_git_status_porcelain_branch_header() {
+        let output = "## main...origin/main [ahead 1]\n M src/lib.rs\n?? notes.txt\n";
+        let result = format_git_status(output);
+        assert!(result.starts_with("main...origin/main [ahead 1]\n"), "{result}");
+        assert!(result.contains("modified(1): M src/lib.rs"));
     }
 
     #[test]
