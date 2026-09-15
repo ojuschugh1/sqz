@@ -1,43 +1,67 @@
 //! # sqz-mcp
 //!
-//! MCP (Model Context Protocol) server for sqz. This is a thin adapter over
-//! `sqz_engine` that exposes context compression through the MCP transport
-//! layer — either stdio (for local tool integration) or SSE (for network use).
+//! MCP (Model Context Protocol) context-compression server and proxy for AI
+//! coding agents. A thin adapter over [`sqz_engine`] that compresses tool
+//! results before they enter the model's context window: deterministic, no
+//! LLM calls, offline, and every compressed result is recoverable byte-exact.
 //!
-//! ## What it does
+//! Works with any MCP client: Claude Code, Cursor, Windsurf, Cline, Gemini
+//! CLI, Kiro, OpenCode, Codex CLI, Zed, Copilot CLI. `sqz init` (from the
+//! `sqz-cli` crate) registers it for every client it finds. Published on the
+//! official MCP Registry as `io.github.ojuschugh1/sqz`.
 //!
-//! When an MCP-compatible tool (Claude Code, Cursor, etc.) makes a tool call,
-//! sqz-mcp intercepts the response and compresses it before it hits the LLM's
-//! context window. JSON gets TOON-encoded, repeated lines get condensed, ANSI
-//! codes get stripped — the usual sqz pipeline.
+//! ## Tools
 //!
-//! ## Configuration
+//! | Tool | Purpose |
+//! |---|---|
+//! | `sqz_read_file` | Read a file faithfully; a repeat read of unchanged content returns a ~13-token `§ref:HASH§`, a re-read after a small edit returns a line-level delta |
+//! | `sqz_grep` | Literal or regex search, `path:lineno:text` output, capped at `max_matches` |
+//! | `sqz_list_dir` | Directory listing that skips `.git`, `node_modules`, `target`, `dist`, `build`, `vendor` |
+//! | `compress` | Run arbitrary text through the full sqz pipeline (per-command formatters, log folding, JSON compaction, session dedup) |
+//! | `passthrough` | Return text unchanged (escape hatch for models that cannot parse `§ref§` tokens) |
+//! | `expand` | Resolve a `§ref:HASH§` token or hex prefix to the original bytes |
+//! | `sqz_recall` | Full-text search over everything sqz has compressed in past sessions |
 //!
-//! The server loads presets from a directory you specify at startup. Drop a
-//! `.toml` file in there and the server picks it up automatically — hot-reload
-//! is built in, no restart needed.
+//! The read, grep and list tools are lossless: their savings come from the
+//! dedup cache, not from dropping content.
+//!
+//! ## Proxy: compress any other MCP server
+//!
+//! `sqz-mcp proxy -- <upstream command...>` wraps a stdio MCP server and, on
+//! the way back to the client, compresses `tools/call` text results, compacts
+//! `tools/list` descriptions, and injects an `sqz_expand` tool for recovery.
+//! `--lazy-tools` shortens every description to one sentence and adds an
+//! `sqz_tool_help` tool that serves the full documentation on demand;
+//! `--no-desc` keeps descriptions verbatim; `--no-cache` disables dedup refs.
+//! Error results, non-text content and every client-to-server message pass
+//! through untouched. See [`proxy`].
+//!
+//! ## Running the server
 //!
 //! ```text
-//! # Start on stdio (default for MCP tool integration)
-//! sqz-mcp --preset-dir ~/.sqz/presets
-//!
-//! # Start on SSE for network access
-//! sqz-mcp --preset-dir ~/.sqz/presets --transport sse --port 3002
+//! sqz-mcp                                   # stdio, the default for MCP clients
+//! sqz-mcp --transport sse --port 3002       # SSE for network use
+//! sqz-mcp --preset-dir ~/.sqz/presets       # hot-reloaded .toml presets
+//! sqz-mcp proxy --lazy-tools -- npx -y @modelcontextprotocol/server-github
 //! ```
+//!
+//! Set `SQZ_DB_PATH` to keep the dedup cache and stats per project instead of
+//! in `~/.sqz/sessions.db`.
 //!
 //! ## MCP protocol
 //!
-//! The server implements the MCP JSON-RPC interface:
-//!
 //! - `initialize` — returns server capabilities
-//! - `tools/list` — returns registered tools (optionally filtered by intent)
-//! - `tools/call` — compresses tool output through the sqz pipeline
+//! - `tools/list` — returns registered tools (optionally filtered by intent;
+//!   with an `intent` parameter the built-in [`ToolSelector`] ranks tools by
+//!   similarity and returns the top matches)
+//! - `tools/call` — dispatches to the tools above
 //!
-//! ## Tool selection
+//! ## Further reading
 //!
-//! When `tools/list` is called with an `intent` parameter, the built-in
-//! `ToolSelector` ranks tools by semantic similarity and returns the top
-//! matches. This keeps the tool list small and relevant.
+//! - [MCP context compression guide](https://github.com/ojuschugh1/sqz/blob/main/docs/mcp-context-compression.md)
+//! - [Quality benchmark: compression ratio vs information preservation](https://github.com/ojuschugh1/sqz/blob/main/docs/quality-benchmark.md)
+//! - [How to stop AI coding agents from re-reading the same files](https://github.com/ojuschugh1/sqz/blob/main/docs/stop-rereading-files.md)
+//! - [Repository](https://github.com/ojuschugh1/sqz)
 
 
 pub mod proxy;
@@ -1195,15 +1219,15 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 reference on repeat reads instead of the full content. \
                 \
                 Returns the file content with a header `[sqz_read_file \
-                path=... size=...]` followed by the compressed body. \
-                Preserves filenames, identifiers, paths, URLs, and line \
-                numbers byte-exact; collapses repeated blocks, strips \
-                ANSI, extracts code signatures for recognised languages. \
+                path=... size=...]` followed by the body. The body is \
+                faithful: every line, identifier and line number survives, \
+                only ANSI escape codes are stripped. The saving comes from \
+                the dedup cache, not from dropping content. \
                 \
-                Use the built-in `Read` tool for: tiny config files (<1KB), \
-                files you need byte-exact (lockfiles, signatures). Use \
-                `sqz_read_file` for: source files >2KB, log files, JSON \
-                outputs, any file you'll read more than once."
+                Use the built-in `Read` tool for tiny config files (<1KB) \
+                where the header costs more than it saves. Use \
+                `sqz_read_file` for source files >2KB, log files, JSON \
+                outputs, and any file you'll read more than once."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1221,11 +1245,9 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["path"]
             }),
             compression_transforms: vec![
-                "sha256_cache: repeat reads return a ~13-token §ref:HASH§ token".to_string(),
-                "ast_extract: source code collapses to signatures".to_string(),
-                "condense: repeated identical lines collapse to max 3".to_string(),
-                "path_shorten: common prefixes → ~/".to_string(),
-                "safe_fallback: error/warning lines preserved verbatim".to_string(),
+                "sha256_cache: repeat reads of unchanged content return a ~13-token §ref:HASH§ token".to_string(),
+                "ansi_strip: removes color/formatting codes".to_string(),
+                "lossless: no lines are dropped, folded, or summarized".to_string(),
             ],
             ..Default::default()
         },
@@ -1239,8 +1261,9 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 an agent actually wants to see. \
                 \
                 PREFER this over `ls -la` via Bash when you want to see a \
-                project layout — the compression is tuned for directory \
-                listings specifically (path_shorten, condense)."
+                project layout: no permission/owner/date columns, bulk \
+                directories skipped, and repeat listings of an unchanged \
+                tree dedupe to a 13-token reference."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1258,9 +1281,9 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
             compression_transforms: vec![
-                "path_shorten: common path prefixes replaced with ~/".to_string(),
-                "condense: repeated entry patterns collapse".to_string(),
+                "skip_bulk_dirs: .git, node_modules, target, dist, build, vendor, __pycache__ omitted".to_string(),
                 "sha256_cache: repeat listings dedupe via §ref§".to_string(),
+                "lossless: every listed entry survives verbatim".to_string(),
             ],
             ..Default::default()
         },
@@ -1274,9 +1297,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 so a popular term doesn't flood the context. \
                 \
                 PREFER this over the built-in `Grep` for any search that \
-                might return more than a handful of lines — the compressed \
-                output is typically 40-70% smaller, and repeat searches for \
-                the same pattern dedupe to a 13-token reference."
+                might return more than a handful of lines: the match cap \
+                keeps one search from flooding the context, every match \
+                line survives verbatim, and repeat searches for the same \
+                pattern dedupe to a 13-token reference."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1304,9 +1328,9 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["pattern"]
             }),
             compression_transforms: vec![
-                "condense: duplicate match lines collapse".to_string(),
-                "path_shorten: common path prefixes replaced with ~/".to_string(),
+                "max_matches: search stops after the cap (default 200); the header reports the match count".to_string(),
                 "sha256_cache: repeat searches dedupe via §ref§".to_string(),
+                "lossless: every match line survives verbatim".to_string(),
             ],
             ..Default::default()
         },

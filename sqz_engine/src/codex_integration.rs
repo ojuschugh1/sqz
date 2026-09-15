@@ -122,9 +122,12 @@ The `sqz-mcp` MCP server is also available — Codex reads it from
 `~/.codex/config.toml` under `[mcp_servers.sqz]`. It exposes
 `compress` (the default pipeline), `passthrough` (return text
 unchanged — the escape hatch below), `expand` (resolve a
-`§ref:HASH§` token back to the original bytes), and `sqz_recall`
+`§ref:HASH§` token back to the original bytes), `sqz_recall`
 (full-text search over everything sqz has compressed — recover
-context lost to compaction).
+context lost to compaction), and `sqz_read_file` / `sqz_grep` /
+`sqz_list_dir` (file access with a dedup cache: a repeat read of an
+unchanged file costs ~13 tokens). Prefer those three over `cat`,
+`grep` and `ls` for anything you might read more than once.
 
 ## Escape hatch — when sqz output confuses you
 
