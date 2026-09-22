@@ -151,6 +151,9 @@ impl CompressionPipeline {
         // file is about to edit it, and imports or a class header score as
         // "low information" to the truncator. Dedup still covers re-reads.
         let is_code = !is_json && looks_like_code(&content.raw);
+        if is_code {
+            stages_applied.push("source_code".to_owned());
+        }
 
         // JSON projection: strip internal/debug fields, empty collections,
         // deep nesting, and redundant timestamps before other JSON processing
@@ -666,6 +669,7 @@ mod tests {
         for stage in ["entropy_truncate", "sliding_window_dedup", "rle", "log_template", "table_compact"] {
             assert!(!result.stages_applied.iter().any(|s| s == stage), "{stage} ran on source code: {:?}", result.stages_applied);
         }
+        assert!(result.stages_applied.iter().any(|s| s == "source_code"), "{:?}", result.stages_applied);
         assert!(result.data.contains("from .errors import RefundError"));
         assert!(result.data.contains("class RefundService:"));
 

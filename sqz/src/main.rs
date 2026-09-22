@@ -1299,18 +1299,10 @@ fn cmd_export(session_id: &str) {
 /// Exit codes: `0` on hit, `1` on no-match, `2` on ambiguous-prefix, `3`
 /// on engine init / DB error. Lets shell pipelines detect each case.
 fn cmd_expand(raw: &str) {
-    // Strip the `§ref:…§` wrapper so callers can paste the token as-is.
-    // Also accept a leading `ref:` without the §'s, which is what some
-    // terminals render §ref:…§ as when unicode is stripped.
-    let trimmed = raw.trim();
-    let prefix = trimmed
-        .strip_prefix('§')
-        .unwrap_or(trimmed)
-        .strip_prefix("ref:")
-        .unwrap_or(trimmed.strip_prefix('§').unwrap_or(trimmed))
-        .trim_end_matches('§')
-        .trim()
-        .to_string();
+    // Accepts the bare prefix, the whole `§ref:…§` token pasted as-is,
+    // `ref:…` as some terminals render it, and the ranged `…:L40-80` form.
+    let (prefix, range) = sqz_engine::parse_ref_token(raw);
+    let prefix = prefix.to_string();
 
     let engine = match sqz_engine::SqzEngine::new() {
         Ok(e) => e,
@@ -1320,7 +1312,7 @@ fn cmd_expand(raw: &str) {
         }
     };
 
-    match engine.cache_manager().expand_prefix(&prefix) {
+    match engine.cache_manager().expand_ref(raw) {
         Ok(Some(sqz_engine::ExpandResult::Original { hash, bytes })) => {
             use std::io::Write;
             // Write raw bytes — the original may legitimately not be
@@ -1331,7 +1323,13 @@ fn cmd_expand(raw: &str) {
                 eprintln!("[sqz] expand: stdout write error: {e}");
                 std::process::exit(3);
             }
-            eprintln!("[sqz] expanded ref prefix '{prefix}' → {} bytes (full hash {hash})", bytes.len());
+            match range {
+                Some((a, b)) => eprintln!(
+                    "[sqz] expanded ref prefix '{prefix}' lines {a}-{b} → {} bytes (full hash {hash})",
+                    bytes.len()
+                ),
+                None => eprintln!("[sqz] expanded ref prefix '{prefix}' → {} bytes (full hash {hash})", bytes.len()),
+            }
         }
         Ok(Some(sqz_engine::ExpandResult::CompressedOnly { hash, compressed })) => {
             // Pre-migration cache entry — we only have the compressed

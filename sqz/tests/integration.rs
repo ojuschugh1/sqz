@@ -65,6 +65,59 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).to_string()
 }
 
+fn run_with_db(db: &std::path::Path, args: &[&str], stdin: Option<&str>) -> Output {
+    use std::io::Write;
+    let mut child = Command::new(sqz_bin())
+        .args(args)
+        .env("SQZ_DB_PATH", db)
+        .env_remove("SQZ_NO_DEDUP")
+        .env_remove("SQZ_NO_ABBREV")
+        .current_dir(workspace_root())
+        .stdin(if stdin.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn sqz");
+    if let Some(s) = stdin {
+        child.stdin.take().unwrap().write_all(s.as_bytes()).unwrap();
+    }
+    child.wait_with_output().unwrap()
+}
+
+// ── slice refs ────────────────────────────────────────────────────────────────
+
+/// `cat f.py` then `sed -n '41,80p' f.py`: the range comes back as a
+/// line-range ref to the full read, and `sqz expand` on that ref returns
+/// exactly those lines.
+#[test]
+fn test_ranged_reread_becomes_line_range_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    let file: String = (1..=50)
+        .map(|i| format!("def handler_{i:03}(request):\n    token = request.headers.get('Authorization')\n    return verify(token, scope='handler_{i:03}')\n\n"))
+        .collect();
+    let lines: Vec<&str> = file.split_inclusive('\n').collect();
+    let slice: String = lines[40..80].concat();
+
+    let full = run_with_db(&db, &["compress", "--cmd", "cat auth.py"], Some(&file));
+    assert!(full.status.success());
+    assert!(stdout(&full).contains("def handler_050"), "first read serves the file");
+
+    let ranged = run_with_db(&db, &["compress", "--cmd", "sed -n '41,80p' auth.py"], Some(&slice));
+    let out = stdout(&ranged);
+    assert!(out.starts_with("§ref:") && out.trim_end().ends_with(":L41-80§"), "expected a line-range ref, got: {out}");
+    assert!(stderr(&ranged).contains("lines 41-80 of 200"), "{}", stderr(&ranged));
+
+    let expanded = run_with_db(&db, &["expand", out.trim()], None);
+    assert!(expanded.status.success(), "{}", stderr(&expanded));
+    assert_eq!(String::from_utf8_lossy(&expanded.stdout), slice);
+
+    // Same slice with the cache disabled is served in full.
+    let raw = run_with_db(&db, &["compress", "--no-cache", "--cmd", "sed -n '41,80p' auth.py"], Some(&slice));
+    assert!(!stdout(&raw).contains("§ref:"));
+    assert!(stdout(&raw).contains("def handler_020"));
+}
+
 // ── basic CLI ─────────────────────────────────────────────────────────────────
 
 #[test]

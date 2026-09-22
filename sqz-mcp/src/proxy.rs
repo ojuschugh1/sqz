@@ -37,9 +37,10 @@ const LAZY_DESCRIPTION_CHARS: usize = 160;
 
 const INSTRUCTIONS_NOTE: &str = "\n\nNote: tool results pass through the sqz \
 compression proxy. A result of the form §ref:HASH§ means you have already \
-seen this exact content earlier in the session. If you need any compressed \
-or referenced result verbatim, call the sqz_expand tool with the ref token \
-or hash prefix.";
+seen this exact content earlier in the session; §ref:HASH:L40-80§ means \
+lines 40-80 of content you have already seen in full. If you need any \
+compressed or referenced result verbatim, call the sqz_expand tool with the \
+ref token or hash prefix.";
 
 const LAZY_TOOLS_NOTE: &str = " Tool descriptions are shortened to one \
 sentence to save context; call the sqz_tool_help tool with a tool name to \
@@ -183,7 +184,7 @@ impl ProxyState {
         }) {
             tools.push(serde_json::json!({
                 "name": EXPAND_TOOL_NAME,
-                "description": "Expand a §ref:HASH§ token (or bare hex prefix) from a compressed tool result back to the original verbatim content.",
+                "description": "Expand a §ref:HASH§ token (or bare hex prefix) from a compressed tool result back to the original verbatim content. A ranged token §ref:HASH:L40-80§ returns just those lines.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -321,12 +322,8 @@ impl ProxyState {
             .pointer("/params/arguments/ref")
             .and_then(|r| r.as_str())
             .unwrap_or("");
-        let prefix = raw
-            .trim()
-            .trim_start_matches("§ref:")
-            .trim_end_matches('§')
-            .trim();
-        let body = match self.engine.cache_manager().expand_prefix(prefix) {
+        let (prefix, _) = sqz_engine::parse_ref_token(raw);
+        let body = match self.engine.cache_manager().expand_ref(raw) {
             Ok(Some(exp)) => {
                 let text = match exp {
                     sqz_engine::ExpandResult::Original { bytes, .. } => {

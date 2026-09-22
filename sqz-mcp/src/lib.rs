@@ -310,7 +310,7 @@ impl McpServer {
         let raw_input = serde_json::to_string(&request.input)
             .map_err(|e| SqzError::Other(format!("input serialization error: {e}")))?;
 
-        let tokens_original = estimate_tokens(&raw_input);
+        let tokens_original = self.engine.count_tokens(&raw_input);
         let (output, tokens_compressed) = self.compress_cached(&raw_input, false)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
@@ -434,15 +434,11 @@ impl McpServer {
             .ok_or_else(|| {
                 SqzError::Other("expand: input must be { \"prefix\": \"<hex>\" }".to_string())
             })?;
-        // Strip the `§ref:…§` wrapper so callers can paste the token raw.
-        let prefix = raw
-            .trim()
-            .trim_start_matches('§')
-            .trim_start_matches("ref:")
-            .trim_end_matches('§')
-            .trim();
+        // Accepts the bare prefix, the pasted `§ref:…§` token, and the
+        // ranged `§ref:…:L40-80§` form (returns just those lines).
+        let (prefix, range) = sqz_engine::parse_ref_token(raw);
 
-        let result = self.engine.cache_manager().expand_prefix(prefix)?;
+        let result = self.engine.cache_manager().expand_ref(raw)?;
         let output = match result {
             Some(sqz_engine::ExpandResult::Original { bytes, hash }) => {
                 // Best-effort UTF-8 conversion. Non-UTF-8 bytes become
@@ -452,7 +448,10 @@ impl McpServer {
                 // output should use the CLI's `sqz expand` which writes
                 // raw bytes to stdout.
                 let as_text = String::from_utf8_lossy(&bytes).into_owned();
-                format!("[sqz:expand hash={hash}]\n{as_text}")
+                match range {
+                    Some((a, b)) => format!("[sqz:expand hash={hash} lines={a}-{b}]\n{as_text}"),
+                    None => format!("[sqz:expand hash={hash}]\n{as_text}"),
+                }
             }
             Some(sqz_engine::ExpandResult::CompressedOnly { compressed, hash }) => {
                 format!(
@@ -582,30 +581,47 @@ impl McpServer {
         // UTF-8 with lossy fallback for non-text files — JSON-RPC
         // requires strings, so there's no byte-exact path here. Hosts
         // that care about binary safety should use their native tool.
-        let raw_text = String::from_utf8_lossy(truncated_slice).into_owned();
+        let full_text = String::from_utf8_lossy(truncated_slice).into_owned();
 
-        let tokens_original = estimate_tokens(&raw_text);
+        // Optional line range, 1-based like the host's Read tool. The slice
+        // is cut from the full text by byte offset so it is a verbatim
+        // substring: if the whole file was read earlier in the session the
+        // cache answers with a §ref:HASH:L<a>-<b>§ instead of the lines.
+        let offset = request.input.get("offset").and_then(|v| v.as_u64()).map(|v| v.max(1) as usize);
+        let limit = request.input.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let total_lines = full_text.lines().count();
+        let (raw_text, range) = match (offset, limit) {
+            (None, None) => (full_text, None),
+            (offset, limit) => {
+                let start = offset.unwrap_or(1);
+                let end = match limit {
+                    Some(n) => start.saturating_add(n).saturating_sub(1).min(total_lines),
+                    None => total_lines,
+                };
+                if start > total_lines {
+                    return Err(SqzError::Other(format!(
+                        "sqz_read_file: offset {start} is past the end of '{}' ({total_lines} lines)",
+                        path.display()
+                    )));
+                }
+                (line_range(&full_text, start, end).to_string(), Some((start, end)))
+            }
+        };
+
+        let tokens_original = self.engine.count_tokens(&raw_text);
         let (compressed_data, tokens_compressed) = self.compress_cached(&raw_text, true)?;
 
         // Attach a small header so the agent knows where the content
         // came from and whether it was truncated. The header lives
         // outside the compressed body so it's not lost to any stage.
-        let output = if was_truncated {
-            format!(
-                "[sqz_read_file path={} size={} truncated_to={}]\n{}",
-                path.display(),
-                bytes.len(),
-                max_bytes,
-                compressed_data
-            )
-        } else {
-            format!(
-                "[sqz_read_file path={} size={}]\n{}",
-                path.display(),
-                bytes.len(),
-                compressed_data
-            )
-        };
+        let mut header = format!("[sqz_read_file path={} size={}", path.display(), bytes.len());
+        if let Some((a, b)) = range {
+            header.push_str(&format!(" lines={a}-{b} of {total_lines}"));
+        }
+        if was_truncated {
+            header.push_str(&format!(" truncated_to={max_bytes}"));
+        }
+        let output = format!("{header}]\n{compressed_data}");
 
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
@@ -647,7 +663,7 @@ impl McpServer {
         list_dir_recursive(&root, &root, 0, max_depth, &mut lines)?;
 
         let raw = lines.join("\n");
-        let tokens_original = estimate_tokens(&raw);
+        let tokens_original = self.engine.count_tokens(&raw);
         let (compressed_data, tokens_compressed) = self.compress_cached(&raw, true)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
@@ -733,7 +749,7 @@ impl McpServer {
         grep_walk(&root, pattern, regex.as_ref(), max_matches, &mut matches)?;
 
         let raw = matches.join("\n");
-        let tokens_original = estimate_tokens(&raw);
+        let tokens_original = self.engine.count_tokens(&raw);
         let (compressed_data, tokens_compressed) = self.compress_cached(&raw, true)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
@@ -1130,10 +1146,11 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             description: "Resolve a `§ref:HASH§` dedup token (or a bare \
                 hex prefix) back to the original pre-compression content. \
                 Use this if you see a `§ref:…§` token in tool output and \
-                need the full text it points at. Returns either the raw \
-                original bytes (for cache entries from sqz ≥ 0.10.0) or \
-                the compressed-but-legible form with a note (for older \
-                entries)."
+                need the full text it points at. A ranged token \
+                `§ref:HASH:L40-80§` returns just those lines. Returns \
+                either the raw original bytes (for cache entries from sqz \
+                ≥ 0.10.0) or the compressed-but-legible form with a note \
+                (for older entries)."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1217,12 +1234,19 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 than ~2KB or that you might need to read multiple times in \
                 the same session — the dedup cache returns a 13-token \
                 reference on repeat reads instead of the full content. \
+                Use `offset` and `limit` for ranged reads, exactly like \
+                the built-in Read: if you already read the file in full \
+                earlier in the session, a ranged re-read returns a short \
+                `§ref:HASH:L40-80§` line-range reference instead of the \
+                lines, and a re-read after a small edit returns only the \
+                changed lines. \
                 \
                 Returns the file content with a header `[sqz_read_file \
-                path=... size=...]` followed by the body. The body is \
-                faithful: every line, identifier and line number survives, \
-                only ANSI escape codes are stripped. The saving comes from \
-                the dedup cache, not from dropping content. \
+                path=... size=... lines=40-80 of 500]` followed by the \
+                body. The body is faithful: every line, identifier and \
+                line number survives, only ANSI escape codes are stripped. \
+                The saving comes from the dedup cache, not from dropping \
+                content. \
                 \
                 Use the built-in `Read` tool for tiny config files (<1KB) \
                 where the header costs more than it saves. Use \
@@ -1236,6 +1260,14 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Path to the file, relative to the working directory or absolute."
                     },
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-based line to start from. Omit to read from the top."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of lines to return from `offset`. Omit to read to the end."
+                    },
                     "max_bytes": {
                         "type": "integer",
                         "description": "Optional cap on bytes read. Default 4 MB. Truncation is reported in the header.",
@@ -1246,6 +1278,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
             compression_transforms: vec![
                 "sha256_cache: repeat reads of unchanged content return a ~13-token §ref:HASH§ token".to_string(),
+                "slice_ref: a line range of content already read in full returns §ref:HASH:L<a>-<b>§".to_string(),
+                "delta: a re-read after a small edit returns only the changed lines".to_string(),
                 "ansi_strip: removes color/formatting codes".to_string(),
                 "lossless: no lines are dropped, folded, or summarized".to_string(),
             ],
@@ -1342,6 +1376,25 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
 /// Rough token estimate: ~4 characters per token (GPT-style approximation).
 fn estimate_tokens(text: &str) -> u32 {
     ((text.len() as f64) / 4.0).ceil() as u32
+}
+
+/// Lines `start..=end` (1-based) of `text` as a verbatim substring,
+/// trailing newline included when the file has one there.
+fn line_range(text: &str, start: usize, end: usize) -> &str {
+    let mut line = 1;
+    let mut begin = None;
+    for (i, ch) in text.char_indices() {
+        if line == start && begin.is_none() {
+            begin = Some(i);
+        }
+        if ch == '\n' {
+            if line == end {
+                return &text[begin.unwrap_or(i)..=i];
+            }
+            line += 1;
+        }
+    }
+    begin.map(|b| &text[b..]).unwrap_or("")
 }
 
 // ── File-reading helpers for sqz_list_dir / sqz_grep ─────────────────────────
@@ -2414,6 +2467,140 @@ complexity_threshold = 0.4
             second.tokens_compressed < 30,
             "dedup ref should be ~13 tokens, got {}",
             second.tokens_compressed
+        );
+    }
+
+    fn python_module(fns: usize) -> String {
+        (1..=fns)
+            .map(|i| format!("def handler_{i:03}(request):\n    token = request.headers.get('Authorization')\n    return verify(token, scope='handler_{i:03}')\n\n"))
+            .collect()
+    }
+
+    #[test]
+    fn test_sqz_read_file_ranged_read_returns_lines_with_header() {
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("auth.py");
+        let content = python_module(50);
+        std::fs::write(&file_path, &content).unwrap();
+
+        let resp = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_read_file".to_string(),
+                input: serde_json::json!({ "path": file_path.to_string_lossy(), "offset": 5, "limit": 4 }),
+                intent: None,
+            })
+            .expect("ranged read");
+        let (header, body) = resp.output.split_once('\n').unwrap();
+        assert!(header.ends_with(" lines=5-8 of 200]"), "{header}");
+        assert_eq!(body, line_range(&content, 5, 8));
+        assert_eq!(body.lines().count(), 4);
+        assert!(body.starts_with("def handler_002"), "{body}");
+        assert!(body.ends_with("\n\n"), "line 8 is the blank line after handler_002");
+
+        // offset alone reads to the end; limit alone reads from the top.
+        let tail = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_read_file".to_string(),
+                input: serde_json::json!({ "path": file_path.to_string_lossy(), "offset": 197 }),
+                intent: None,
+            })
+            .unwrap();
+        assert!(tail.output.contains(" lines=197-200 of 200]"), "{}", tail.output);
+        let head = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_read_file".to_string(),
+                input: serde_json::json!({ "path": file_path.to_string_lossy(), "limit": 3 }),
+                intent: None,
+            })
+            .unwrap();
+        assert!(head.output.contains(" lines=1-3 of 200]"), "{}", head.output);
+        assert!(head.output.ends_with("    return verify(token, scope='handler_001')\n"), "{}", head.output);
+
+        let past_end = server.handle_tool_call(ToolCallRequest {
+            tool_id: "sqz_read_file".to_string(),
+            input: serde_json::json!({ "path": file_path.to_string_lossy(), "offset": 500 }),
+            intent: None,
+        });
+        assert!(past_end.is_err());
+    }
+
+    #[test]
+    fn test_sqz_read_file_slice_after_full_read_returns_line_range_ref() {
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("auth.py");
+        let content = python_module(50);
+        std::fs::write(&file_path, &content).unwrap();
+        let hash = sqz_engine::CacheManager::sha256_hex(content.as_bytes());
+
+        let full = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_read_file".to_string(),
+                input: serde_json::json!({ "path": file_path.to_string_lossy() }),
+                intent: None,
+            })
+            .unwrap();
+        assert!(!full.output.contains("§ref:"));
+
+        // The commenter's case: 8.5% of reads were a line range of a file
+        // already read in full. Exact-hash dedup and near-duplicate
+        // matching both miss this; containment catches it.
+        let slice = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_read_file".to_string(),
+                input: serde_json::json!({ "path": file_path.to_string_lossy(), "offset": 41, "limit": 40 }),
+                intent: None,
+            })
+            .unwrap();
+        let expected = format!("§ref:{}:L41-80§", &hash[..16]);
+        assert!(slice.output.ends_with(&expected), "{}", slice.output);
+        assert!(slice.output.contains(" lines=41-80 of 200]"));
+        assert!(slice.tokens_compressed < 25 && slice.tokens_original > 200, "{} / {}", slice.tokens_compressed, slice.tokens_original);
+
+        // The ranged ref expands to exactly those lines.
+        let expanded = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "expand".to_string(),
+                input: serde_json::json!({ "prefix": expected }),
+                intent: None,
+            })
+            .unwrap();
+        let (header, body) = expanded.output.split_once('\n').unwrap();
+        assert!(header.contains("lines=41-80"), "{header}");
+        assert_eq!(body, line_range(&content, 41, 80));
+
+        // Two lines of a file are too small to be worth a ref: content comes back.
+        let tiny = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_read_file".to_string(),
+                input: serde_json::json!({ "path": file_path.to_string_lossy(), "offset": 1, "limit": 2 }),
+                intent: None,
+            })
+            .unwrap();
+        assert!(!tiny.output.contains("§ref:"), "{}", tiny.output);
+        assert!(tiny.output.contains("def handler_001"));
+    }
+
+    #[test]
+    fn test_read_tools_count_tokens_with_one_tokenizer() {
+        // Regression: tokens_original used chars/4 while tokens_compressed
+        // came from the BPE tokenizer, so a verbatim grep result logged
+        // as a negative saving.
+        let (mut server, dir) = make_server();
+        for i in 0..40 {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), "fn needle_fn() -> Result<(), Error> { Ok(()) }\n").unwrap();
+        }
+        let resp = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_grep".to_string(),
+                input: serde_json::json!({ "pattern": "needle_fn", "path": dir.path().to_string_lossy() }),
+                intent: None,
+            })
+            .unwrap();
+        assert!(
+            resp.tokens_compressed <= resp.tokens_original,
+            "verbatim result must never log as negative savings: {} -> {}",
+            resp.tokens_original,
+            resp.tokens_compressed
         );
     }
 

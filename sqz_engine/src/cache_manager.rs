@@ -80,6 +80,31 @@ pub struct DedupHit {
     pub prev_accessed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// A ranged re-read of content the model already has, returned by
+/// [`CacheManager::check_slice_with_meta`]. The agent read a file in
+/// full earlier and is now reading lines `start_line..=end_line` of it.
+#[derive(Debug, Clone)]
+pub struct SliceHit {
+    /// `§ref:<hash_prefix>:L<start>-<end>§`, or a plain `§ref:<hash_prefix>§`
+    /// when the range covers the whole original.
+    pub inline_ref: String,
+    /// Full 64-hex SHA-256 of the containing original.
+    pub hash: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    /// Line count of the containing original.
+    pub total_lines: usize,
+    /// Approximate token cost of the reference.
+    pub token_cost: u32,
+}
+
+/// Smallest slice worth referencing. Below this the ref token costs
+/// about as much as the text, and short multi-line snippets are common
+/// enough to match by coincidence.
+const MIN_SLICE_BYTES: usize = 160;
+/// How many recent originals to scan per lookup.
+const SLICE_CANDIDATES: usize = 32;
+
 /// Tracks when a dedup ref was last sent, so we can detect staleness.
 ///
 /// Historically used for an in-memory per-process turn counter; now kept
@@ -374,6 +399,14 @@ impl CacheManager {
             }
         }
 
+        // Ranged re-read of a file the model already has in full.
+        if let Some(hit) = self.check_slice_with_meta(content)? {
+            return Ok(CacheResult::Dedup {
+                inline_ref: hit.inline_ref,
+                token_cost: hit.token_cost,
+            });
+        }
+
         // Near-duplicate check: compare against recent cache entries
         let text = String::from_utf8_lossy(content).into_owned();
         let _ = self.store.record_cache_miss().map_err(|e| eprintln!("[sqz] cache miss record error: {e}"));
@@ -524,6 +557,58 @@ impl CacheManager {
         }
     }
 
+    /// Is `content` a line range of something the model already has?
+    ///
+    /// Exact-hash dedup misses the common case: the agent read a file in
+    /// full, then re-reads lines 40-80 of it. Near-duplicate matching
+    /// misses it too (a 40-line slice of a 500-line file has a Jaccard
+    /// similarity near 0.1). This checks containment instead: the slice
+    /// must appear verbatim, on line boundaries, in a recent cached
+    /// original that is still fresh, and the same bytes must also appear
+    /// in what was actually served for that original, so a ref never
+    /// points at lines a lossy stage dropped. Touches the parent entry
+    /// on a hit.
+    pub fn check_slice_with_meta(&self, content: &[u8]) -> Result<Option<SliceHit>> {
+        let slice = strip_one_trailing_newline(content);
+        if slice.len() < MIN_SLICE_BYTES || !slice.contains(&b'\n') {
+            return Ok(None);
+        }
+        for candidate in self.store.recent_originals(slice.len(), SLICE_CANDIDATES)? {
+            let Some((start_line, end_line)) = find_line_range(&candidate.original, slice) else {
+                continue;
+            };
+            if !self.is_ref_fresh(&candidate.hash) {
+                continue;
+            }
+            let served: CompressedContent = match serde_json::from_str(&candidate.data_json) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if !served.data.as_bytes().windows(slice.len()).any(|w| w == slice) {
+                continue;
+            }
+            let total_lines = count_lines(&candidate.original);
+            let hash_prefix = &candidate.hash[..16];
+            let inline_ref = if start_line == 1 && end_line == total_lines {
+                format!("§ref:{hash_prefix}§")
+            } else {
+                format!("§ref:{hash_prefix}:L{start_line}-{end_line}§")
+            };
+            let token_cost = 13 + (inline_ref.len().saturating_sub(22) as u32).div_ceil(3);
+            self.record_ref_sent(&candidate.hash);
+            let _ = self.store.record_cache_hit();
+            return Ok(Some(SliceHit {
+                inline_ref,
+                hash: candidate.hash,
+                start_line,
+                end_line,
+                total_lines,
+                token_cost,
+            }));
+        }
+        Ok(None)
+    }
+
     /// Store a compressed result in the persistent cache, keyed by the
     /// SHA-256 hash of the original content.
     ///
@@ -591,6 +676,31 @@ impl CacheManager {
         }))
     }
 
+    /// Resolve a ref token in any of the forms an agent might paste:
+    /// `a1b2c3d4`, `§ref:a1b2c3d4§`, `ref:a1b2c3d4`, or the ranged
+    /// `§ref:a1b2c3d4:L40-80§`. A range narrows the returned bytes to
+    /// those lines (1-based, inclusive).
+    pub fn expand_ref(&self, raw: &str) -> Result<Option<ExpandResult>> {
+        let (prefix, range) = parse_ref_token(raw);
+        let Some(result) = self.expand_prefix(prefix)? else {
+            return Ok(None);
+        };
+        let Some((start, end)) = range else {
+            return Ok(Some(result));
+        };
+        Ok(Some(match result {
+            ExpandResult::Original { hash, bytes } => ExpandResult::Original {
+                hash,
+                bytes: slice_lines(&bytes, start, end).to_vec(),
+            },
+            ExpandResult::CompressedOnly { hash, compressed } => ExpandResult::CompressedOnly {
+                hash,
+                compressed: String::from_utf8_lossy(slice_lines(compressed.as_bytes(), start, end))
+                    .into_owned(),
+            },
+        }))
+    }
+
     /// Invalidate the cache entry for `path` if its current content is known.
     ///
     /// Reads the file at `path`, computes its hash, and removes the matching
@@ -631,6 +741,88 @@ impl CacheManager {
         }
 
         Ok(freed)
+    }
+}
+
+fn strip_one_trailing_newline(bytes: &[u8]) -> &[u8] {
+    match bytes {
+        [rest @ .., b'\n'] => rest,
+        _ => bytes,
+    }
+}
+
+fn count_lines(bytes: &[u8]) -> usize {
+    let body = strip_one_trailing_newline(bytes);
+    if body.is_empty() {
+        0
+    } else {
+        1 + body.iter().filter(|&&b| b == b'\n').count()
+    }
+}
+
+/// Find `slice` in `original` starting at a line start and ending at a line
+/// end. Returns 1-based inclusive line numbers of the first such occurrence.
+fn find_line_range(original: &[u8], slice: &[u8]) -> Option<(usize, usize)> {
+    if slice.is_empty() || slice.len() > original.len() {
+        return None;
+    }
+    let mut from = 0;
+    while from + slice.len() <= original.len() {
+        let rel = original[from..].windows(slice.len()).position(|w| w == slice)?;
+        let at = from + rel;
+        let end = at + slice.len();
+        let starts_line = at == 0 || original[at - 1] == b'\n';
+        let ends_line = end == original.len() || original[end] == b'\n';
+        if starts_line && ends_line {
+            let start_line = 1 + original[..at].iter().filter(|&&b| b == b'\n').count();
+            let end_line = start_line + slice.iter().filter(|&&b| b == b'\n').count();
+            return Some((start_line, end_line));
+        }
+        from = at + 1;
+    }
+    None
+}
+
+/// Split a ref token into its hex prefix and optional `L<start>-<end>` range.
+/// Accepts `a1b2`, `ref:a1b2`, `§ref:a1b2§`, `§ref:a1b2:L40-80§`.
+pub fn parse_ref_token(raw: &str) -> (&str, Option<(usize, usize)>) {
+    let body = raw
+        .trim()
+        .trim_start_matches('§')
+        .trim_start_matches("ref:")
+        .trim_end_matches('§')
+        .trim();
+    let Some((prefix, range)) = body.split_once(":L") else {
+        return (body, None);
+    };
+    let parsed = range
+        .split_once('-')
+        .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)))
+        .filter(|(a, b)| *a >= 1 && b >= a);
+    match parsed {
+        Some(r) => (prefix, Some(r)),
+        None => (body, None),
+    }
+}
+
+/// Bytes of lines `start..=end` (1-based) of `bytes`, newlines included.
+fn slice_lines(bytes: &[u8], start: usize, end: usize) -> &[u8] {
+    let mut line = 1;
+    let mut begin = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if line == start && begin.is_none() {
+            begin = Some(i);
+        }
+        if b == b'\n' {
+            if line == end {
+                return &bytes[begin.unwrap_or(i)..=i];
+            }
+            line += 1;
+        }
+    }
+    match begin {
+        Some(b) => &bytes[b..],
+        None => &[],
     }
 }
 
@@ -676,6 +868,165 @@ mod tests {
         // this lookup — so it must exist and not be in the future.
         let prev = hit.prev_accessed_at.expect("expected prior access time");
         assert!(prev <= before + chrono::Duration::seconds(1));
+    }
+
+    fn source_file(lines: usize) -> Vec<u8> {
+        let mut s = String::new();
+        for i in 1..=lines {
+            s.push_str(&format!("def handler_{i:03}(request):\n    return verify(request, scope='h{i:03}')\n"));
+        }
+        s.into_bytes()
+    }
+
+    fn lines_of(bytes: &[u8], start: usize, end: usize) -> Vec<u8> {
+        slice_lines(bytes, start, end).to_vec()
+    }
+
+    #[test]
+    fn slice_of_fresh_original_returns_line_range_ref() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        let file = source_file(60);
+        cm.get_or_compress_lossless(Path::new("auth.py"), &file, &pipeline).unwrap();
+        let hash = CacheManager::sha256_hex(&file);
+
+        let slice = lines_of(&file, 41, 60);
+        let hit = cm.check_slice_with_meta(&slice).unwrap().expect("slice hit");
+        assert_eq!(hit.inline_ref, format!("§ref:{}:L41-60§", &hash[..16]));
+        assert_eq!((hit.start_line, hit.end_line, hit.total_lines), (41, 60, 120));
+        assert!(hit.token_cost > 13 && hit.token_cost < 25, "{}", hit.token_cost);
+
+        // Same answer through the cache-aware compress path.
+        match cm.get_or_compress_lossless(Path::new("auth.py"), &slice, &pipeline).unwrap() {
+            CacheResult::Dedup { inline_ref, .. } => assert_eq!(inline_ref, hit.inline_ref),
+            _ => panic!("expected slice dedup"),
+        }
+        // Without the trailing newline the ref is the same.
+        let mut no_nl = slice.clone();
+        no_nl.pop();
+        assert_eq!(cm.check_slice_with_meta(&no_nl).unwrap().unwrap().inline_ref, hit.inline_ref);
+    }
+
+    #[test]
+    fn slice_ref_requires_line_boundaries_and_size() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        let file = source_file(60);
+        cm.get_or_compress_lossless(Path::new("auth.py"), &file, &pipeline).unwrap();
+
+        // Starts mid-line: not a line range.
+        let mid = &lines_of(&file, 10, 20)[4..];
+        assert!(cm.check_slice_with_meta(mid).unwrap().is_none());
+        // Single line, even a long one, is not worth a ref.
+        let one = lines_of(&file, 10, 10);
+        assert!(cm.check_slice_with_meta(&one).unwrap().is_none());
+        // Two lines under 160 bytes: below the size floor.
+        let two = lines_of(&file, 10, 11);
+        assert!(two.len() < MIN_SLICE_BYTES);
+        assert!(cm.check_slice_with_meta(&two).unwrap().is_none());
+        // Content that is not in any original.
+        let other = source_file(6).into_iter().map(|b| if b == b'h' { b'x' } else { b }).collect::<Vec<_>>();
+        assert!(cm.check_slice_with_meta(&other).unwrap().is_none());
+    }
+
+    #[test]
+    fn slice_ref_not_served_after_compaction() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        let file = source_file(60);
+        cm.get_or_compress_lossless(Path::new("auth.py"), &file, &pipeline).unwrap();
+        let slice = lines_of(&file, 1, 30);
+        assert!(cm.check_slice_with_meta(&slice).unwrap().is_some());
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cm.notify_compaction();
+        assert!(cm.check_slice_with_meta(&slice).unwrap().is_none(), "model no longer has the original");
+    }
+
+    #[test]
+    fn slice_ref_only_for_lines_the_model_actually_saw() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let file = source_file(60);
+        // Simulate a lossy first serving that dropped the second half.
+        let served = String::from_utf8(lines_of(&file, 1, 60)).unwrap();
+        let compressed = CompressedContent {
+            data: served,
+            tokens_compressed: 100,
+            tokens_original: 200,
+            stages_applied: vec!["entropy_truncate".into()],
+            compression_ratio: 0.5,
+            provenance: Default::default(),
+            verify: None,
+        };
+        cm.store_compressed(&file, &compressed).unwrap();
+
+        assert!(cm.check_slice_with_meta(&lines_of(&file, 10, 40)).unwrap().is_some(), "served lines are referenceable");
+        assert!(cm.check_slice_with_meta(&lines_of(&file, 70, 100)).unwrap().is_none(), "dropped lines must be re-sent");
+    }
+
+    #[test]
+    fn whole_file_minus_trailing_newline_gets_plain_ref() {
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        let file = source_file(30);
+        cm.get_or_compress_lossless(Path::new("a.py"), &file, &pipeline).unwrap();
+        let hash = CacheManager::sha256_hex(&file);
+        let mut no_nl = file.clone();
+        no_nl.pop();
+        let hit = cm.check_slice_with_meta(&no_nl).unwrap().unwrap();
+        assert_eq!(hit.inline_ref, format!("§ref:{}§", &hash[..16]));
+    }
+
+    #[test]
+    fn expand_ref_parses_every_token_form_and_slices_lines() {
+        assert_eq!(parse_ref_token("a1b2c3d4"), ("a1b2c3d4", None));
+        assert_eq!(parse_ref_token("§ref:a1b2c3d4§"), ("a1b2c3d4", None));
+        assert_eq!(parse_ref_token(" ref:a1b2c3d4 "), ("a1b2c3d4", None));
+        assert_eq!(parse_ref_token("§ref:a1b2c3d4:L40-80§"), ("a1b2c3d4", Some((40, 80))));
+        assert_eq!(parse_ref_token("a1b2c3d4:L7-7"), ("a1b2c3d4", Some((7, 7))));
+        assert_eq!(parse_ref_token("a1b2c3d4:L9-3"), ("a1b2c3d4:L9-3", None), "inverted range is not a range");
+
+        let (store, _dir) = in_memory_store();
+        let cm = CacheManager::new(store, u64::MAX);
+        let pipeline = make_pipeline();
+        let file = source_file(20);
+        cm.get_or_compress_lossless(Path::new("a.py"), &file, &pipeline).unwrap();
+        let hash = CacheManager::sha256_hex(&file);
+
+        match cm.expand_ref(&format!("§ref:{}:L5-8§", &hash[..16])).unwrap().unwrap() {
+            ExpandResult::Original { bytes, .. } => assert_eq!(bytes, lines_of(&file, 5, 8)),
+            _ => panic!("expected original bytes"),
+        }
+        match cm.expand_ref(&hash[..16]).unwrap().unwrap() {
+            ExpandResult::Original { bytes, .. } => assert_eq!(bytes, file),
+            _ => panic!("expected original bytes"),
+        }
+        // Range past the end returns what exists.
+        match cm.expand_ref(&format!("{}:L39-99", &hash[..16])).unwrap().unwrap() {
+            ExpandResult::Original { bytes, .. } => assert_eq!(bytes, lines_of(&file, 39, 40)),
+            _ => panic!("expected original bytes"),
+        }
+    }
+
+    #[test]
+    fn line_helpers() {
+        let text = b"a\nbb\nccc\ndddd\n";
+        assert_eq!(count_lines(text), 4);
+        assert_eq!(count_lines(b"a\nbb"), 2);
+        assert_eq!(count_lines(b""), 0);
+        assert_eq!(find_line_range(text, b"bb\nccc"), Some((2, 3)));
+        assert_eq!(find_line_range(text, b"b\nccc"), None);
+        assert_eq!(find_line_range(text, b"bb\ncc"), None);
+        assert_eq!(find_line_range(text, b"a\nbb\nccc\ndddd"), Some((1, 4)));
+        assert_eq!(slice_lines(text, 2, 3), b"bb\nccc\n");
+        assert_eq!(slice_lines(text, 4, 9), b"dddd\n");
+        assert_eq!(slice_lines(text, 5, 9), b"");
+        assert_eq!(slice_lines(b"x\ny", 2, 2), b"y");
     }
 
     #[test]

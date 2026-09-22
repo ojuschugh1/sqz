@@ -582,6 +582,30 @@ impl SessionStore {
         }
     }
 
+    /// Most recently accessed entries that still hold their original bytes
+    /// and are at least `min_len` bytes long, newest first. Candidates for
+    /// slice matching: a ranged re-read can only be a slice of something
+    /// larger than itself.
+    pub fn recent_originals(&self, min_len: usize, limit: usize) -> Result<Vec<SliceCandidate>> {
+        let mut stmt = self.db.prepare(
+            "SELECT hash, original, data FROM cache_entries \
+             WHERE original IS NOT NULL AND length(original) > ?1 \
+             ORDER BY accessed_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![min_len as i64, limit as i64], |row| {
+            Ok(SliceCandidate {
+                hash: row.get(0)?,
+                original: row.get(1)?,
+                data_json: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Delete a cache entry by content hash.
     pub fn delete_cache_entry(&self, hash: &str) -> Result<()> {
         self.db.execute(
@@ -956,7 +980,7 @@ impl SessionStore {
         let mut stmt = self.db.prepare(
             "SELECT mode, COUNT(*), SUM(tokens_original), SUM(tokens_compressed) \
              FROM compression_log \
-             WHERE created_at >= date('now', ?1) AND mode != 'dedup' \
+             WHERE created_at >= date('now', ?1) AND mode NOT IN ('dedup', 'slice') \
              GROUP BY mode \
              HAVING SUM(tokens_original) >= 500 \
                 AND (SUM(tokens_original) - SUM(tokens_compressed)) * 100.0 \
@@ -1491,6 +1515,15 @@ pub struct CommandStats {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub tokens_saved: u64,
+}
+
+/// A cache entry with its original bytes and the served form (JSON
+/// `CompressedContent`), as returned by [`SessionStore::recent_originals`].
+#[derive(Debug, Clone)]
+pub struct SliceCandidate {
+    pub hash: String,
+    pub original: Vec<u8>,
+    pub data_json: String,
 }
 
 /// One `sqz recall` search hit.

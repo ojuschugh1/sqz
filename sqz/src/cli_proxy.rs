@@ -248,6 +248,19 @@ impl CliProxy {
             }
         }
 
+        // Step 2b: a line range of a file the model already has in full
+        // (`sed -n '40,80p' f`, `head -50 f` after `cat f`).
+        if !opts.no_cache {
+            if let Ok(Some(hit)) = self.engine.cache_manager().check_slice_with_meta(output.as_bytes()) {
+                eprintln!(
+                    "[sqz] slice ref: lines {}-{} of {} already in context",
+                    hit.start_line, hit.end_line, hit.total_lines
+                );
+                self.log_slice_hit(output, &hit);
+                return hit.inline_ref;
+            }
+        }
+
         // Step 3: Try per-command formatter. Same net-win gate as the
         // pipeline path: the stats header costs the agent ~12 tokens, so a
         // formatter that trims a few blank lines is a net loss.
@@ -310,7 +323,8 @@ impl CliProxy {
                 // hook environment. See the regression tests
                 // `abbreviator_opt_out_preserves_repeated_identifiers` and
                 // `abbreviator_default_on_still_abbreviates` below.
-                let abbreviated = if opts.abbreviate {
+                let is_source = compressed.stages_applied.iter().any(|s| s == "source_code");
+                let abbreviated = if opts.abbreviate && !is_source {
                     let mut abbr = self.abbreviator.borrow_mut();
                     abbr.observe(&compressed.data);
                     match abbr.abbreviate(&compressed.data) {
@@ -423,6 +437,19 @@ impl CliProxy {
             DEDUP_REF_TOKENS,
             &["dedup".to_string()],
             "dedup",
+            project_str.as_deref(),
+        );
+    }
+
+    fn log_slice_hit(&self, output: &str, hit: &sqz_engine::SliceHit) {
+        let tokens_original = (output.len() as u32 + 3) / 4;
+        let project = std::env::current_dir().ok();
+        let project_str = project.as_ref().map(|p| p.to_string_lossy().to_string());
+        let _ = self.engine.session_store().log_compression_with_project(
+            tokens_original,
+            hit.token_cost,
+            &["slice".to_string()],
+            "slice",
             project_str.as_deref(),
         );
     }
@@ -945,6 +972,27 @@ mod tests {
         let opts = InterceptOptions { no_cache: true, abbreviate: true };
         let result = proxy.intercept_output_with_options("build", &output, opts);
         assert_eq!(result, output, "sub-threshold savings must pass through verbatim");
+    }
+
+    #[test]
+    fn source_code_is_served_verbatim_and_slices_of_it_become_refs() {
+        let (proxy, _dir) = isolated_proxy();
+        let tag = unique_sha();
+        let file: String = (1..=50)
+            .map(|i| format!("def handler_{i:03}(request):\n    token = request.headers.get('Authorization-{tag}')\n    return verify(token, scope='handler_{i:03}')\n\n"))
+            .collect();
+
+        let first = proxy.intercept_output_with_options("cat auth.py", &file, InterceptOptions::default());
+        assert_eq!(first, file, "source code must not be abbreviated, folded, or truncated");
+
+        let lines: Vec<&str> = file.split_inclusive('\n').collect();
+        let slice: String = lines[40..80].concat();
+        let second = proxy.intercept_output_with_options("sed -n '41,80p' auth.py", &slice, InterceptOptions::default());
+        assert!(second.starts_with("§ref:") && second.ends_with(":L41-80§"), "{second}");
+
+        let no_cache = InterceptOptions { no_cache: true, ..InterceptOptions::default() };
+        let third = proxy.intercept_output_with_options("sed -n '41,80p' auth.py", &slice, no_cache);
+        assert_eq!(third, slice);
     }
 
     #[test]
