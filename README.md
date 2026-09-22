@@ -44,6 +44,7 @@
   <a href="#install">Install</a> ·
   <a href="#how-it-works">How It Works</a> ·
   <a href="#supported-tools">Supported Tools</a> ·
+  <a href="#compress-any-mcp-server">MCP Proxy</a> ·
   <a href="docs/quality-benchmark.md">Benchmark</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
   <a href="https://discord.gg/j8EEyH5dSB">Discord</a>
@@ -182,6 +183,42 @@ preserved — sqz merges its entries rather than overwriting.
 
 Plain `sqz init` (project scope) is useful when you want sqz active only
 inside one repo.
+
+After installing, `sqz doctor` checks the whole chain — binary, database,
+shell hook, which clients are detected vs actually routed through sqz, and
+whether anything was compressed recently — and prints the fix for each gap
+it finds.
+
+### See what sqz would have saved, before installing any hook
+
+If you already use Claude Code or Kiro, your transcripts are on disk. Replay
+them through the sqz engine and get a counterfactual estimate on your own
+sessions — computed locally, nothing uploaded:
+
+```sh
+$ sqz discover --replay
+sqz discover — counterfactual replay (last 7 days)
+────────────────────────────────────────────────────────
+
+  Sessions replayed:   24
+  Tool outputs:        43
+  Tokens (original):   116,598
+  Tokens (compressed):  92,560
+
+  Estimated avoidable: 24,038 tokens (20.6%)
+
+  Largest opportunities:
+
+    source                tokens in    avoidable
+    web_fetch                 58,102       12,288
+    read                      37,085       10,486
+```
+
+It scans `~/.claude/projects` and `~/.kiro/sessions/cli`, or point it
+anywhere with `--transcripts PATH`. Each session replays against a fresh
+throwaway cache, so dedup references never pretend to span sessions, and the
+report says "estimate" because that's what it is: these outputs were not
+compressed at the time.
 
 **Only using one agent?** Pass `--only` (or `--skip`) to limit which
 configs are written:
@@ -333,7 +370,10 @@ sqz stats --cost              # Estimated $ saved under a prompt-cached billing 
 sqz stats --breakdown         # Per-command token usage breakdown
 sqz stats --project .         # Stats for current project only
 sqz stats --project list      # List all tracked projects
+sqz stats --share             # Five-line share card sized for a paste into an issue or post
+sqz doctor                    # Verify sqz is installed, wired into your clients, and active
 sqz discover                  # Find missed savings (incl. your weakest-compressing commands)
+sqz discover --replay         # Counterfactual replay of your agent transcripts (Claude Code, Kiro)
 sqz recall "auth timeout"     # Full-text search everything sqz has compressed
 sqz resume                    # Re-inject session context after compaction
 sqz vizit                     # Live terminal dashboard (like htop for AI agents)

@@ -2,7 +2,7 @@
 
 > Pre-injection context compression and session deduplication for AI coding agents. sqz compresses tool output (shell commands, file reads, MCP tool results) before it enters the model's context window. Deterministic Rust, zero LLM calls, offline, every compressed result recoverable byte-exact. Repeated content becomes a 13-token reference. Works with Claude Code, Cursor, Windsurf, Cline, Gemini CLI, Kiro, OpenCode, Codex CLI, Zed, Copilot CLI, VS Code, JetBrains, Chrome and Firefox.
 
-Install: `cargo install sqz-cli sqz-mcp`, `brew install ojuschugh1/sqz/sqz`, `npm i -g sqz-cli`, `pipx install sqz`, or release binaries. Then `sqz init`. MCP Registry name: `io.github.ojuschugh1/sqz`.
+Install: `cargo install sqz-cli sqz-mcp`, `brew install ojuschugh1/sqz/sqz`, `npm i -g sqz-cli`, `pipx install sqz`, or release binaries. Then `sqz init`. `sqz doctor` verifies the wiring end to end. `sqz discover --replay` estimates savings by replaying existing Claude Code or Kiro transcripts locally, before any hook is installed. MCP Registry name: `io.github.ojuschugh1/sqz`.
 
 Measured effect across real sessions: 24.7% average token reduction, up to 92% on dedup hits, 0% by construction on stack traces, secrets and source files.
 

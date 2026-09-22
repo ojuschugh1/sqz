@@ -7,7 +7,9 @@ cargo install sqz-cli sqz-mcp     # or: brew install ojuschugh1/sqz/sqz · npm i
 sqz init                          # installs hooks, MCP server and agent guidance for every client it finds
 ```
 
-Then work as usual. `sqz stats --breakdown` shows what it saved, per command, from your own sessions.
+Then work as usual. `sqz stats --breakdown` shows what it saved, per command, from your own sessions. `sqz doctor` verifies the whole chain: binary, database, shell hook, which clients are actually routed through sqz, and whether anything was compressed recently.
+
+Not installed yet? If you already use Claude Code or Kiro, `sqz discover --replay` replays your existing transcripts through the engine and reports what it would have saved — a counterfactual estimate on your own sessions, computed locally.
 
 ## Where the tokens actually go
 
