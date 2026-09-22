@@ -2,7 +2,7 @@
 
 **Ojus Chugh** (ojuschugh@gmail.com)
 
-*May 2026 — revised August 2026 to reflect sqz 1.4.0*
+*May 2026 — revised September 2026 to reflect sqz 1.8.0*
 
 ---
 
@@ -58,7 +58,11 @@ Agentic sessions exhibit high repetition: the same file is read multiple times, 
 
 This is analogous to the demand paging concept described in [8], where context content is loaded on-demand rather than kept resident. The key insight is that in coding sessions, **the dominant savings come not from compressing individual outputs harder, but from recognizing that the same content appears repeatedly.**
 
-A reference is only emitted while the content it points at is plausibly still in the model's context: refs expire after a freshness window (30 minutes of wall-clock time by default, tunable in turns) and are invalidated eagerly when the agent framework compacts its history, at which point the content is re-sent in full. As of 1.4.0, entries can also be **pinned** (`sqz pin`), exempting them from the freshness check — useful for stable knowledge-base content (project docs, system prompts) that multiple agents sharing the session store reference across days.
+A reference is only emitted while the content it points at is plausibly still in the model's context: refs expire after a freshness window (30 minutes of wall-clock time by default) and are invalidated eagerly when the agent framework compacts its history, at which point the content is re-sent in full. As of 1.4.0, entries can also be **pinned** (`sqz pin`), exempting them from the freshness check — useful for stable knowledge-base content (project docs, system prompts) that multiple agents sharing the session store reference across days.
+
+**Near-duplicate deltas.** A file re-read after a small edit is not byte-identical, so exact hashing misses it. sqz detects near-duplicates of cached entries and emits a line-level delta — only the changed lines, plus a reference to the version the model already has. Since 1.5.0 a session-lifetime MinHash LSH index selects delta candidates, so a file re-read late in a long session still matches its earlier version rather than only the most recent cache entries.
+
+**Ranged (slice) references, 1.8.0.** A field measurement across 92 real Claude Code sessions found that byte-identical repeats were rare (0.3% of result characters; 1 in 542 file reads) but 8.5% of file reads were a *line range* of a file already read in full — `sed -n '41,80p'` after `cat`, or a ranged read tool call. Exact hashing misses these entirely, and near-duplicate matching does too: a 40-line slice of a 500-line file has a Jaccard similarity near 0.1. sqz therefore checks *containment*: when new output is, on line boundaries, a slice of a fresh full read whose served bytes also contain the slice, it emits `§ref:HASH:L41-80§` instead of the lines. The second condition matters — the slice must appear in what was actually delivered to the model, so a ranged reference can never point at lines a lossy stage dropped. Guards: at least 160 bytes and two lines, and the same freshness and compaction rules as whole-content refs. The reference is not a summary; it is a pointer to bytes the model already holds, and `sqz expand 'HASH:L41-80'` recovers exactly those lines on demand.
 
 Measured empirically: dedup accounts for 92% reduction on repeat reads, compared to 21-58% from first-pass structural compression.
 
@@ -113,8 +117,12 @@ Unlike prompt compression tools that require API interception or model-specific 
 | OpenCode | TypeScript plugin |
 | Codex | AGENTS.md guidance + config.toml MCP entry |
 | Zed | .rules/AGENTS.md instructions + context_servers MCP entry |
+| Copilot CLI | preToolUse hook |
+| Any MCP server | `sqz-mcp proxy` wrapper (since 1.6.0) |
 
 A single `sqz init` command detects installed frameworks and configures the appropriate hooks. The compression is transparent — the agent receives compressed output without knowing sqz exists.
+
+Since 1.6.0 the MCP proxy provides a framework-independent integration surface: `sqz-mcp proxy -- <upstream command>` wraps any stdio MCP server, compresses its tool results through the full pipeline (dedup references on repeats, safe mode for stack traces and secrets, error results untouched), optionally compacts verbose tool descriptions in `tools/list`, and injects an `sqz_expand` tool so the agent can recover any original byte-exact. The client sees a normal MCP server, so this works with every MCP client regardless of whether it supports hooks.
 
 ---
 
@@ -174,9 +182,9 @@ sqz is implemented as a single Rust binary with zero runtime dependencies. Compr
 - **Token counting**: the compression pipeline counts tokens with real BPE tokenizers (tiktoken `o200k_base` for OpenAI models — exact; `cl100k_base` as a ~5%-variance approximation for Claude and Gemini; chars/4 for unknown local models). The dedup fast path and MCP-side estimates still use the chars/4 heuristic for latency, so aggregate savings figures mix exact and approximate counts.
 - **JSONC round-trip**: For tools using JSON-with-comments configs, programmatic merging cannot preserve comments. sqz warns before merging OpenCode configs and refuses to rewrite Zed settings files entirely, printing a copy-paste snippet instead — safe, but it leaves one manual step for those users.
 - **No semantic compression**: sqz does not use an LLM to summarize content. This is by design (zero latency, zero cost, deterministic), but means it cannot capture semantic redundancy across structurally different outputs.
-- **Dedup granularity**: Currently whole-content SHA-256. Sub-file dedup (paragraph-level) could capture partial overlaps in modified files.
+- **Dedup granularity**: exact whole-content hashing, line-aligned slice containment (1.8.0), and near-duplicate deltas via MinHash LSH [14] (1.5.0) cover identical, ranged, and lightly-edited re-reads. Overlaps that are not line-aligned, and structural duplicates across different serializations (the same record fetched once as JSON and once as a table), still re-send in full.
 
-Future directions include wiring the existing MinHash LSH primitive [14] into sub-file dedup, integration with KV cache compression methods [7], and learned formatters that adapt to project-specific output patterns.
+Future directions include structural dedup across serializations, integration with KV cache compression methods [7], learned formatters that adapt to project-specific output patterns, and an end-to-end evaluation measuring agent task success with and without compression rather than token counts alone.
 
 ---
 
@@ -226,7 +234,7 @@ sqz demonstrates that significant token savings (24.7% average, 92% on dedup hit
   title = {sqz: Pre-Injection Context Compression for Agentic Code Generation},
   year = {2026},
   url = {https://github.com/ojuschugh1/sqz},
-  version = {1.4.0}
+  version = {1.8.0}
 }
 ```
 
