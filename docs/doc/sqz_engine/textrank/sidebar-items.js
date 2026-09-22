@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["textrank_compress"],"struct":["TextRankConfig","TextRankResult"]};

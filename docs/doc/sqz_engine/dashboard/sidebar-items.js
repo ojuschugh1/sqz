@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["CommandBreakdown","DashboardConfig","DashboardHtml","DashboardMetrics","DashboardServer","SessionHistoryEntry","ToolBreakdown"]};

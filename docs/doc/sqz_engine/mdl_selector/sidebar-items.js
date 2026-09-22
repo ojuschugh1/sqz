@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["profile_content","select_stages"],"struct":["ContentProfile","MdlSelection","StageCandidate"]};

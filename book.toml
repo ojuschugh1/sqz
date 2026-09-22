@@ -1,0 +1,37 @@
+[book]
+title = "sqz: context compression for AI coding agents"
+description = "sqz compresses tool output before it enters the model's context window. Pre-injection compression and session deduplication for Claude Code, Cursor, Codex, Kiro, Zed and any MCP client. Deterministic Rust, zero LLM calls, every result recoverable byte-exact."
+authors = ["Ojus Chugh"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+create-missing = false
+
+[output.html]
+site-url = "/sqz/"
+git-repository-url = "https://github.com/ojuschugh1/sqz"
+edit-url-template = "https://github.com/ojuschugh1/sqz/edit/main/{path}"
+default-theme = "rust"
+preferred-dark-theme = "navy"
+no-section-label = true
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+limit-results = 20
+
+# The old Pages site was raw rustdoc at the root; the API docs now live
+# under /api/. Keep the URLs people have bookmarked working. mdBook renders
+# README.md as index.html but leaves links to README.md alone, so those get
+# a redirect too.
+[output.html.redirect]
+"/sqz_engine/index.html" = "/sqz/api/sqz_engine/index.html"
+"/sqz_mcp/index.html" = "/sqz/api/sqz_mcp/index.html"
+"/sqz/index.html" = "/sqz/api/sqz/index.html"
+"/sqz_wasm/index.html" = "/sqz/api/sqz_wasm/index.html"
+"/README.html" = "/sqz/index.html"
+"/integrations/README.html" = "/sqz/integrations/index.html"

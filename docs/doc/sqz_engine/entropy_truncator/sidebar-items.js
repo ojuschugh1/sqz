@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["EntropyTruncArrayResult","EntropyTruncConfig","EntropyTruncResult","EntropyTruncator","ScoredSegment"]};

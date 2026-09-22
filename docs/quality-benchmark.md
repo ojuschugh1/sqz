@@ -8,7 +8,7 @@ Reproduce it:
 cargo test -p sqz-cli --test quality_bench -- --nocapture
 ```
 
-Source: [`sqz/tests/quality_bench.rs`](../sqz/tests/quality_bench.rs). The fixtures, facts and gates are all in that one file.
+Source: [`sqz/tests/quality_bench.rs`](https://github.com/ojuschugh1/sqz/blob/main/sqz/tests/quality_bench.rs). The fixtures, facts and gates are all in that one file.
 
 ## What is measured
 
@@ -89,4 +89,4 @@ Listed because they are the kind of loss that a ratio-only benchmark hides, and 
 
 ## Adding a fixture
 
-Add a `fx(...)` entry to `fixtures()` in [`sqz/tests/quality_bench.rs`](../sqz/tests/quality_bench.rs) with the raw output, the facts an agent would need, and optional noise lines. If a fact goes missing, the test fails with the fixture name and the missing strings. If you use a command daily and sqz mangles it, that fixture plus the failing test is the best issue report you can file.
+Add a `fx(...)` entry to `fixtures()` in [`sqz/tests/quality_bench.rs`](https://github.com/ojuschugh1/sqz/blob/main/sqz/tests/quality_bench.rs) with the raw output, the facts an agent would need, and optional noise lines. If a fact goes missing, the test fails with the fixture name and the missing strings. If you use a command daily and sqz mangles it, that fixture plus the failing test is the best issue report you can file.

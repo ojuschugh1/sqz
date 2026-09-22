@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["HookAction","HookType"],"fn":["generate_platform_config","known_platforms"],"struct":["Hook","HookContext","HookManager"]};

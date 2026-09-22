@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["compress_with_custom_sinks","compress_with_sinks"]};

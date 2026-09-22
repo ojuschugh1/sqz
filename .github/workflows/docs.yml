@@ -14,6 +14,10 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  MDBOOK_VERSION: v0.5.4
+  SITE_URL: https://ojuschugh1.github.io/sqz
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,18 +27,45 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build docs
-        run: cargo doc --workspace --no-deps --document-private-items --exclude sqz-wasm
-
-      - name: Add redirect from root
+      - name: Install mdBook
         run: |
-          echo '<meta http-equiv="refresh" content="0; url=sqz_engine/index.html">' \
-            > target/doc/index.html
+          curl -sSL "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_VERSION}/mdbook-${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C /usr/local/bin mdbook
+          mdbook --version
+
+      - name: Build site from docs/
+        run: mdbook build
+
+      - name: Build API docs under /api/
+        run: |
+          cargo doc --workspace --no-deps --exclude sqz-wasm
+          mkdir -p target/book/api
+          cp -r target/doc/. target/book/api/
+          echo '<meta http-equiv="refresh" content="0; url=sqz_engine/index.html">' > target/book/api/index.html
+
+      - name: Finish pages (index title, robots, sitemap, llms.txt)
+        run: |
+          # mdBook titles the landing page "Overview - <book>"; the book title alone reads better in search.
+          sed -i 's|<title>Overview - sqz: context compression for AI coding agents</title>|<title>sqz: context compression for AI coding agents</title>|' target/book/index.html
+          cp llms.txt target/book/llms.txt
+          printf 'User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /print.html\n\nSitemap: %s/sitemap.xml\n' "$SITE_URL" > target/book/robots.txt
+          {
+            echo '<?xml version="1.0" encoding="UTF-8"?>'
+            echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            find target/book -name '*.html' -not -path 'target/book/api/*' -not -name '404.html' -not -name 'print.html' -not -name 'toc.html' -not -name 'README.html' \
+              | grep -v -E '/(sqz|sqz_engine|sqz_mcp|sqz_wasm)/index.html$' | sort | while read -r f; do
+              rel="${f#target/book/}"
+              [ "$rel" = "index.html" ] && rel=""
+              rel="${rel%index.html}"
+              printf '  <url><loc>%s/%s</loc><lastmod>%s</lastmod></url>\n' "$SITE_URL" "$rel" "$(date -u +%Y-%m-%d)"
+            done
+            echo '</urlset>'
+          } > target/book/sitemap.xml
+          echo "sitemap entries: $(grep -c '<loc>' target/book/sitemap.xml)"
 
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: target/doc
+          path: target/book
 
   deploy:
     needs: build

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["char_entropy","compress_code"]};

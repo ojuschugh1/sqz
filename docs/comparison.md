@@ -79,4 +79,4 @@ Compression ratio alone rewards the tool that drops the most. Measure these inst
 5. **Regret in real use.** Does the tool track how often the agent re-runs a command whose output had not changed, or asks for the original back? That rate is the field measurement of over-compression.
 6. **The built-in Read tool.** Test a session where the agent reads files through the client's native tool, not Bash. Most shell-level tools report a number that excludes this path entirely.
 
-sqz's fixtures for points 1-4 are plain text in [`sqz/tests/quality_bench.rs`](../sqz/tests/quality_bench.rs); pipe them through any other tool and compare. Results for sqz, including the zeros, are in the [quality benchmark](quality-benchmark.md). Session-level dedup numbers are in [benchmark.md](benchmark.md).
+sqz's fixtures for points 1-4 are plain text in [`sqz/tests/quality_bench.rs`](https://github.com/ojuschugh1/sqz/blob/main/sqz/tests/quality_bench.rs); pipe them through any other tool and compare. Results for sqz, including the zeros, are in the [quality benchmark](quality-benchmark.md). Session-level dedup numbers are in [benchmark.md](benchmark.md).

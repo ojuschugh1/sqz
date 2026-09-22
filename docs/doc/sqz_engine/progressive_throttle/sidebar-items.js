@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ThrottleLevel"],"struct":["ProgressiveThrottler","ThrottleConfig"]};

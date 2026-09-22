@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["HookScope"],"fn":["generate_hook_configs","install_tool_hooks","process_hook"],"struct":["ToolHookConfig"]};

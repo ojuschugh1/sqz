@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["rle_compress","sliding_window_dedup"],"struct":["RleResult","SlidingWindowResult"]};

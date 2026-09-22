@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["bpe_compress"],"struct":["BpeConfig","BpeResult","MergeRule"]};

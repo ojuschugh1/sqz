@@ -8,6 +8,7 @@ Measured effect across real sessions: 24.7% average token reduction, up to 92% o
 
 ## Docs
 
+- [Documentation site](https://ojuschugh1.github.io/sqz/): every guide below, with search
 - [README](https://github.com/ojuschugh1/sqz/blob/main/README.md): install, supported tools, CLI reference, how compression works
 - [Stop AI coding agents from re-reading the same files](https://github.com/ojuschugh1/sqz/blob/main/docs/stop-rereading-files.md): dedup references, deltas for edited files, built-in Read tool caveat
 - [MCP context compression](https://github.com/ojuschugh1/sqz/blob/main/docs/mcp-context-compression.md): sqz-mcp tools, proxy for any MCP server, per-client config

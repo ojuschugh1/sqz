@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ApiFormat"],"fn":["build_http_response","compress_request","parse_http_request"],"struct":["ProxyConfig","ProxyStats"]};

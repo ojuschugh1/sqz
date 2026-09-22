@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["FileReadMode"],"fn":["analyze_block_entropies","compute_entropy"],"struct":["BlockEntropy","FileReader","ReadResult"]};

@@ -52,7 +52,7 @@ None of these is a summary. Each points at bytes the model already has in its co
 
 Two more details make this safe rather than clever:
 
-**Freshness.** A reference is only served if the content was last seen within the last 30 minutes and after the most recent context compaction. Claude Code's PreCompact hook calls `sqz hook precompact`, which marks every cached reference stale; the next read sends the full file again because the model's context no longer has it. If sqz cannot tell, it sends the file.
+**Freshness.** A reference is only served if the content was last seen within the last 30 minutes and after the most recent context compaction. Claude Code's PreCompact hook calls `sqz hook precompact`, which marks every cached reference stale; the next read sends the full file again because the model's context no longer has it. If sqz cannot tell, it sends the file. On clients without a compaction hook you can shorten the window with `SQZ_REF_TTL_SECS` (seconds; `0` disables refs entirely).
 
 **Recovery.** `sqz expand e03d5588` on the CLI, or the `expand` MCP tool, returns the original byte-exact. `sqz expand 'e03d5588:L41-80'` returns just those lines. Nothing is ever unrecoverable.
 
@@ -86,7 +86,7 @@ shows the saved tokens per day as a bar chart, so you can see the effect the day
 ## What this does not fix
 
 - Reads through a client's built-in Read tool, for the reason above. The instruction file steers the agent to `sqz_read_file`, including for ranged reads; it cannot force it. The 8.5% figure above was measured on built-in Read calls, which is exactly the path sqz never sees unless the agent is redirected.
-- The first read. sqz compresses command output where it safely can (see [how compression works](../README.md#how-compression-works)), but a source file read is served in full by design, because an agent that reads a file is usually about to edit it. The saving on files is the repeat, not the first read.
+- The first read. sqz compresses command output where it safely can (see [how compression works](https://github.com/ojuschugh1/sqz/blob/main/README.md#how-compression-works)), but a source file read is served in full by design, because an agent that reads a file is usually about to edit it. The saving on files is the repeat, not the first read.
 - The transcript re-send. Every provider re-sends the full conversation each turn; sqz makes what enters the transcript smaller, it cannot change how the provider bills it. Prompt caching helps with the re-send and stacks with sqz: `sqz stats --cost` models the saving under a cached billing model, which is the conservative case.
 
 ## Setup
