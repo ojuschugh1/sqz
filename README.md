@@ -19,7 +19,7 @@
     3,003 compressions ·
     <strong>178,442 tokens saved</strong> ·
     24.7% avg reduction · up to
-    <strong>92%</strong> with dedup
+    <strong>92%</strong> on output the model already has
   </sub>
 </p>
 
@@ -40,18 +40,31 @@
 </p>
 
 <p align="center">
+  <a href="https://ojuschugh1.github.io/sqz/">Docs</a> ·
   <a href="#install">Install</a> ·
   <a href="#how-it-works">How It Works</a> ·
   <a href="#supported-tools">Supported Tools</a> ·
+  <a href="docs/quality-benchmark.md">Benchmark</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
   <a href="https://discord.gg/j8EEyH5dSB">Discord</a>
 </p>
 
 ---
 
-sqz compresses command output before it reaches your LLM. Single Rust binary, zero config.
+AI coding agents spend most of their input tokens on tool output: build logs, test runs, `git status`, the same file read again after every edit. All of it goes into the context window raw, and it is re-sent on every turn after that.
 
-Most of the saving comes from command output: build logs, test runs, `git status`, package installs, compressed by formatters that know what each command looks like. On top of that sits dedup: anything the model already has in its context (the same `git status` run again, a file it just read, or a line range of that file) comes back as a short reference instead of the content ([how that works, and its limits](docs/stop-rereading-files.md)).
+sqz compresses tool output before it enters the context. Per-command formatters keep what an agent acts on (the failing test, the assertion, the `file:line`) and drop what it does not. Anything the model already has in context comes back as a short reference instead of the content. Source code, stack traces and secrets pass through untouched.
+
+```sh
+cargo install sqz-cli sqz-mcp     # or: brew install ojuschugh1/sqz/sqz · npm i -g sqz-cli · pipx install sqz
+sqz init                          # hooks + MCP server + agent guidance for every client it finds
+```
+
+<p align="center">
+  <img src="assets/demo.gif" alt="sqz: a 200-line file is served in full, a re-read of lines 41-80 becomes a line-range reference, cargo test output collapses to the failure, and sqz stats shows both" width="800">
+</p>
+
+<sub>Real output from the release binary (<code>assets/demo.tape</code>). Regenerate with <code>vhs assets/demo.tape</code>.</sub>
 
 ```
 Without sqz:                              With sqz:
@@ -64,15 +77,17 @@ git status, unchanged:       160 tokens       13 tokens  (§ref:…§)
 Total:                     5,690 tokens    4,151 tokens  (27% saved, nothing dropped)
 ```
 
+Single Rust binary, deterministic, no LLM calls, works offline. Every compressed result can be recovered byte-exact with `sqz expand`.
+
 > [!NOTE]
 > **Name disambiguation:** this repo, [ojuschugh1/sqz](https://github.com/ojuschugh1/sqz), is an independent project and is not affiliated with any other similarly named or working tool or other compression projects that shorten "squeeze". If you installed `sqz` / `sqz-cli` / `sqz-mcp` from crates.io, npm, PyPI, or Homebrew, it comes from this repository.
 
 ## Token Savings
 
 > **24.7%** average reduction across 3,003 real compressions ·
-> **92%** saved on repeated file reads ·
-> **86%** on shell/git output ·
-> **13-token** refs for cached content
+> **13-token** refs for output the model already has ·
+> **100%** of agent-critical facts kept in the [quality benchmark](docs/quality-benchmark.md) ·
+> **0%** by construction on source code, stack traces and secrets
 
 One developer's week, measured from actual `sqz gain` output:
 
@@ -107,15 +122,15 @@ Single-command compression (measured via `cargo test -p sqz-engine benchmarks`):
 
 ### Session-level with dedup
 
-Where the real savings live — the cache sends each file once, repeats cost 13 tokens:
+Anything the model already has in its context comes back as a reference. Measured with the release binary against a throwaway database, using the fixtures in `sqz/tests/quality_bench.rs` and `demo/`:
 
-| Scenario | Without sqz | With sqz | Saved |
+| Repeat | Without sqz | With sqz | Saved |
 |---|---:|---:|---:|
-| Same file read 5× | 10,000 | 826 | **92%** |
-| Same JSON response 3× | 192 | 79 | **59%** |
-| Test-fix-test cycle (3 runs) | 15,000 | 5,186 | **65%** |
+| Unchanged `git status` run again | 155 | 13 | **92%** |
+| Lines 41-80 of a 200-line file read earlier | 305 | 16 | **95%** |
+| Same `cargo test` output, nothing changed | 303 | 13 | **96%** |
 
-Single-command compression ranges from 2–58% depending on content. Repeated reads drop to 13 tokens each. Your mileage will vary with how repetitive your tool calls are — agentic sessions with many file re-reads see the biggest wins.
+A word on what actually repeats. A user who counted 92 of their own Claude Code sessions found identical whole-file re-reads in 1 of 542 reads, and line-range re-reads in 8.5% of them. So sqz does not lead with "the same file read five times": the repeats that happen in practice are unchanged command output, line ranges of a file already read, and files re-read after a small edit, and each has its own reference type ([details](docs/stop-rereading-files.md)). Sessions with noisy command output and repeated commands see the biggest wins.
 
 ## Install
 
@@ -345,6 +360,10 @@ echo "..." | sqz compress --no-cache
 # 3. Disable dedup globally (env var)
 export SQZ_NO_DEDUP=1
 
+# 3b. Or just shorten the ref freshness window (seconds, default 1800).
+# Useful on clients without a compaction hook; 0 disables refs.
+export SQZ_REF_TTL_SECS=300
+
 # 4. MCP passthrough tool (returns input byte-exact, zero transforms)
 # Available via tools/list when sqz-mcp is running
 ```
@@ -472,7 +491,7 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 
 2. **Table compactor** — aligned-column output from tools without a dedicated formatter (`ps aux`, `netstat`, database CLIs) collapses its padding runs to two-space separators. The detector is strict — indented lines, code, YAML, and JSON never match.
 3. **Structural summaries** — code files compressed to imports + function signatures + call graph (~70% reduction). The model sees the architecture, not implementation noise.
-4. **Dedup cache** — SHA-256 content hash, persistent across sessions. Byte-identical output the model already has = 13-token reference. A line range of a file the model already has in full (`sed -n '40,80p'`, `sqz_read_file` with `offset`/`limit`) = `§ref:HASH:L40-80§`. A re-read after a small edit = only the changed lines. References are only served while the original is still in context (30-minute window, reset on compaction).
+4. **Dedup cache** — SHA-256 content hash, persistent across sessions. Byte-identical output the model already has = 13-token reference. A line range of a file the model already has in full (`sed -n '40,80p'`, `sqz_read_file` with `offset`/`limit`) = `§ref:HASH:L40-80§`. A re-read after a small edit = only the changed lines. References are only served while the original is still in context (30-minute window, tunable via `SQZ_REF_TTL_SECS`, reset on compaction).
 5. **JSON pipeline** — strip nulls → project out debug fields → flatten → collapse arrays → TOON encoding (lossless compact format)
 6. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
 

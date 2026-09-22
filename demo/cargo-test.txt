@@ -1,0 +1,31 @@
+   Compiling sqz-engine v1.8.0 (/work/sqz/sqz_engine)
+   Compiling sqz-cli v1.8.0 (/work/sqz/sqz)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.41s
+     Running unittests src/lib.rs (target/debug/deps/sqz_engine-9f3c2a1b)
+
+running 8 tests
+test cache::tests::evicts_oldest_first ... ok
+test cache::tests::hash_is_stable ... ok
+test pipeline::tests::json_roundtrip ... ok
+test pipeline::tests::strips_ansi ... ok
+test session::tests::persists_across_reopen ... ok
+test session::tests::regret_window_default ... ok
+test tokens::tests::estimate_matches_tiktoken_within_5pct ... FAILED
+test tokens::tests::zero_length ... ok
+
+failures:
+
+---- tokens::tests::estimate_matches_tiktoken_within_5pct stdout ----
+thread 'tokens::tests::estimate_matches_tiktoken_within_5pct' panicked at sqz_engine/src/tokens.rs:88:9:
+assertion `left == right` failed: estimate drifted
+  left: 1042
+ right: 987
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tokens::tests::estimate_matches_tiktoken_within_5pct
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p sqz-engine --lib`
