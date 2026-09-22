@@ -264,6 +264,11 @@ enum Command {
         #[arg(long)]
         json: bool,
 
+        /// Print a short plain-text card of your savings, with the regret
+        /// rate alongside, for pasting into a post or issue.
+        #[arg(long)]
+        share: bool,
+
         /// Show an estimated billed-cost saving under a prompt-cached
         /// serving model. Token reduction is not the same as cost
         /// reduction (arXiv:2607.12161): with provider caching, a saved
@@ -477,7 +482,7 @@ fn main() {
         Some(Command::Dashboard { port }) => cmd_dashboard(port),
         Some(Command::Proxy { port }) => cmd_proxy(port),
         Some(Command::Uninstall { yes }) => cmd_uninstall(yes),
-        Some(Command::Stats { session_id, project, breakdown, json, cost, price_in, cache_write_mult, cache_read_mult, reread_turns }) => {
+        Some(Command::Stats { session_id, project, breakdown, json, share, cost, price_in, cache_write_mult, cache_read_mult, reread_turns }) => {
             let cost_opts = if cost {
                 let mut a = sqz_engine::SavingsAssumptions::default();
                 if let Some(v) = price_in { a.price_in_per_mtok = v; }
@@ -488,7 +493,11 @@ fn main() {
             } else {
                 None
             };
-            cmd_stats(session_id, project, breakdown, json, cost_opts)
+            if share {
+                cmd_stats_share(project)
+            } else {
+                cmd_stats(session_id, project, breakdown, json, cost_opts)
+            }
         }
         Some(Command::Gain { days, project }) => cmd_gain(days, project),
         Some(Command::Discover { days }) => cmd_discover(days),
@@ -1149,6 +1158,9 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
         };
         let compressed = proxy.intercept_output_with_options(&label, &input, opts);
         print!("{}", compressed);
+        if input.ends_with('\n') && !compressed.ends_with('\n') {
+            println!();
+        }
         finish(marker_exit);
         return;
     }
@@ -2421,6 +2433,109 @@ mod colors {
 }
 
 /// `sqz stats [session-id]` — full compression stats report.
+/// Numbers behind `sqz stats --share`, separated from the store so the
+/// card layout can be tested without a database.
+struct ShareCard {
+    first_day: String,
+    last_day: String,
+    compressions: u32,
+    tokens_in: u64,
+    tokens_out: u64,
+    /// Tokens saved by dedup and slice references specifically.
+    reference_saved: u64,
+    reruns: u32,
+    expands: u32,
+}
+
+impl ShareCard {
+    fn render(&self) -> String {
+        let saved = self.tokens_in.saturating_sub(self.tokens_out);
+        let pct = if self.tokens_in == 0 { 0.0 } else { saved as f64 * 100.0 / self.tokens_in as f64 };
+        let ref_share = if saved == 0 { 0.0 } else { self.reference_saved as f64 * 100.0 / saved as f64 };
+        let regret_rate = if self.compressions == 0 {
+            0.0
+        } else {
+            self.reruns as f64 * 100.0 / self.compressions as f64
+        };
+        let period = if self.first_day == self.last_day {
+            self.first_day.clone()
+        } else {
+            format!("{} to {}", self.first_day, self.last_day)
+        };
+        let mut out = String::new();
+        out.push_str(&format!("sqz, {period}\n"));
+        out.push_str(&format!(
+            "{} tool outputs compressed: {} tokens in, {} out, {} saved ({pct:.1}%)\n",
+            group(self.compressions as u64),
+            group(self.tokens_in),
+            group(self.tokens_out),
+            group(saved),
+        ));
+        out.push_str(&format!(
+            "{ref_share:.0}% of the saving came from references to output the model already had\n"
+        ));
+        out.push_str(&format!(
+            "regret: {} quick re-runs ({regret_rate:.1}% of compressions), {} ref expands\n",
+            self.reruns, self.expands
+        ));
+        out.push_str("measured by sqz stats, https://github.com/ojuschugh1/sqz\n");
+        out
+    }
+}
+
+fn group(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn cmd_stats_share(project: Option<String>) {
+    let engine = require_engine();
+    let store = engine.session_store();
+    let project_dir = project.as_deref().map(resolve_project_filter);
+    let cs = match project_dir.as_deref() {
+        Some(dir) => store.compression_stats_for_project(dir).unwrap_or_default(),
+        None => store.compression_stats().unwrap_or_default(),
+    };
+    if cs.total_compressions == 0 {
+        eprintln!("[sqz] nothing to share yet: no compressions logged.");
+        std::process::exit(1);
+    }
+    let breakdown = match project_dir.as_deref() {
+        Some(dir) => store.command_breakdown_for_project(500, dir).unwrap_or_default(),
+        None => store.command_breakdown(500).unwrap_or_default(),
+    };
+    let reference_saved = breakdown
+        .iter()
+        .filter(|c| c.command == "dedup" || c.command == "slice")
+        .map(|c| c.tokens_saved)
+        .sum();
+    let regret = store.regret_stats().unwrap_or_default();
+    let (first, last) = store
+        .compression_period()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let day = |ts: &str| ts.get(..10).unwrap_or(ts).to_string();
+    let card = ShareCard {
+        first_day: day(&first),
+        last_day: day(&last),
+        compressions: cs.total_compressions,
+        tokens_in: cs.total_tokens_in,
+        tokens_out: cs.total_tokens_out,
+        reference_saved,
+        reruns: regret.reruns,
+        expands: regret.expands,
+    };
+    print!("{}", card.render());
+}
+
 fn cmd_stats(session_id: Option<String>, project: Option<String>, breakdown: bool, json: bool, cost_opts: Option<sqz_engine::SavingsAssumptions>) {
     let engine = require_engine();
 

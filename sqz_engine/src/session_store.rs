@@ -561,6 +561,23 @@ impl SessionStore {
         Ok(hits)
     }
 
+    /// First and last compression timestamps (RFC 3339), or `None` when
+    /// nothing has been logged yet.
+    pub fn compression_period(&self) -> Result<Option<(String, String)>> {
+        let row: Option<(Option<String>, Option<String>)> = self
+            .db
+            .query_row(
+                "SELECT MIN(created_at), MAX(created_at) FROM compression_log",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        Ok(match row {
+            Some((Some(a), Some(b))) => Some((a, b)),
+            _ => None,
+        })
+    }
+
     /// Retrieve the stored original bytes for a cached hash, if the
     /// caller populated them via `save_cache_entry_with_original`.
     ///

@@ -250,3 +250,57 @@ mod shell_hook_tests {
         assert_eq!(unique.len(), paths.len(), "each shell must have a unique RC path");
     }
 }
+
+#[cfg(test)]
+mod share_card_tests {
+    use crate::{group, ShareCard};
+
+    #[test]
+    fn share_card_reports_savings_and_regret_side_by_side() {
+        let card = ShareCard {
+            first_day: "2026-09-01".into(),
+            last_day: "2026-09-22".into(),
+            compressions: 3003,
+            tokens_in: 721_840,
+            tokens_out: 543_398,
+            reference_saved: 44_296,
+            reruns: 41,
+            expands: 3,
+        };
+        let text = card.render();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "sqz, 2026-09-01 to 2026-09-22");
+        assert_eq!(lines[1], "3,003 tool outputs compressed: 721,840 tokens in, 543,398 out, 178,442 saved (24.7%)");
+        assert_eq!(lines[2], "25% of the saving came from references to output the model already had");
+        assert_eq!(lines[3], "regret: 41 quick re-runs (1.4% of compressions), 3 ref expands");
+        assert!(lines[4].contains("github.com/ojuschugh1/sqz"));
+        assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn share_card_single_day_and_zero_division() {
+        let card = ShareCard {
+            first_day: "2026-09-22".into(),
+            last_day: "2026-09-22".into(),
+            compressions: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            reference_saved: 0,
+            reruns: 0,
+            expands: 0,
+        };
+        let text = card.render();
+        assert!(text.starts_with("sqz, 2026-09-22\n"));
+        assert!(text.contains("0 saved (0.0%)"));
+        assert!(text.contains("(0.0% of compressions)"));
+    }
+
+    #[test]
+    fn group_inserts_thousands_separators() {
+        assert_eq!(group(0), "0");
+        assert_eq!(group(999), "999");
+        assert_eq!(group(1000), "1,000");
+        assert_eq!(group(178_442), "178,442");
+        assert_eq!(group(1_234_567), "1,234,567");
+    }
+}

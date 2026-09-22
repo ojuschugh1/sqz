@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::ast_parser::AstParser;
 use crate::budget_tracker::{BudgetTracker, UsageReport};
@@ -126,6 +127,23 @@ impl SqzEngine {
         Some(path)
     }
 
+    /// How long a dedup ref stays valid after the original was served.
+    ///
+    /// `SQZ_REF_TTL_SECS` overrides the 30-minute default. Clients that
+    /// compact context aggressively (or have no PreCompact hook) can set
+    /// this lower so refs stop pointing at content the model has already
+    /// dropped. Unparseable or empty values fall back to the default.
+    fn ref_ttl_from_env(value: Option<String>) -> Duration {
+        const DEFAULT: Duration = Duration::from_secs(30 * 60);
+        match value.as_deref().map(str::trim) {
+            Some(raw) if !raw.is_empty() => raw
+                .parse::<u64>()
+                .map(Duration::from_secs)
+                .unwrap_or(DEFAULT),
+            _ => DEFAULT,
+        }
+    }
+
     /// Create with a custom preset and a file-backed session store.
     ///
     /// Opens a single SQLite connection for the session store. The cache
@@ -145,7 +163,11 @@ impl SqzEngine {
             pipeline: Arc::new(Mutex::new(pipeline)),
             model_router: Arc::new(Mutex::new(ModelRouter::new(&preset))),
             session_store,
-            cache_manager: CacheManager::new(cache_store, 512 * 1024 * 1024),
+            cache_manager: CacheManager::with_ref_age_duration(
+                cache_store,
+                512 * 1024 * 1024,
+                Self::ref_ttl_from_env(std::env::var("SQZ_REF_TTL_SECS").ok()),
+            ),
             budget_tracker: BudgetTracker::new(window_size, &preset),
             cost_calculator: CostCalculator::with_defaults(),
             ast_parser: AstParser::new(),
@@ -742,6 +764,42 @@ complexity_threshold = 0.4
             let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o755, "pre-existing parent must not be chmodded");
         }
+    }
+
+    #[test]
+    fn ref_ttl_env_parses_seconds_and_falls_back() {
+        use std::time::Duration;
+        // Unset, empty, whitespace, garbage → 30-minute default.
+        assert_eq!(SqzEngine::ref_ttl_from_env(None), Duration::from_secs(1800));
+        assert_eq!(
+            SqzEngine::ref_ttl_from_env(Some(String::new())),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            SqzEngine::ref_ttl_from_env(Some("  ".into())),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            SqzEngine::ref_ttl_from_env(Some("ten".into())),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            SqzEngine::ref_ttl_from_env(Some("-5".into())),
+            Duration::from_secs(1800)
+        );
+        // Valid values are honored, including 0 (disable refs entirely).
+        assert_eq!(
+            SqzEngine::ref_ttl_from_env(Some("300".into())),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            SqzEngine::ref_ttl_from_env(Some(" 60 ".into())),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            SqzEngine::ref_ttl_from_env(Some("0".into())),
+            Duration::ZERO
+        );
     }
 
     #[test]

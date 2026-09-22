@@ -105,7 +105,7 @@ fn test_ranged_reread_becomes_line_range_ref() {
 
     let ranged = run_with_db(&db, &["compress", "--cmd", "sed -n '41,80p' auth.py"], Some(&slice));
     let out = stdout(&ranged);
-    assert!(out.starts_with("§ref:") && out.trim_end().ends_with(":L41-80§"), "expected a line-range ref, got: {out}");
+    assert!(out.starts_with("§ref:") && out.ends_with(":L41-80§\n"), "expected a newline-terminated line-range ref, got: {out:?}");
     assert!(stderr(&ranged).contains("lines 41-80 of 200"), "{}", stderr(&ranged));
 
     let expanded = run_with_db(&db, &["expand", out.trim()], None);

@@ -5,6 +5,27 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`sqz stats --share`** renders a five-line share card (date range,
+  totals, how much of the saving came from references, regret rate)
+  sized for a paste into an issue or post.
+- **`SQZ_REF_TTL_SECS`** overrides the 30-minute dedup ref freshness
+  window. Useful on clients without a compaction hook; `0` disables
+  refs entirely.
+- **Documentation site** at <https://ojuschugh1.github.io/sqz/> built
+  with mdBook from `docs/`, with the rustdoc API reference under
+  `/api/`. Replaces the raw rustdoc tree that previously lived in
+  `docs/` and the redirect `docs/index.html`.
+
+### Fixed
+
+- `sqz compress` preserves the trailing newline when the input ended
+  with one, so hook-wrapped commands no longer glue the next prompt
+  onto the last output line.
+
 ## [1.8.0] — 2026-09-22
 
 ### Added
