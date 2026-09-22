@@ -5,6 +5,45 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Line-range references for ranged re-reads.** A user who counted 92
+  of their own Claude Code sessions found that byte-identical repeats
+  were rare (0.3% of result characters, 1 in 542 file reads) but 8.5%
+  of file reads were a line range of a file already read in full. Exact
+  hash dedup misses those, and so did near-duplicate matching (a
+  40-line slice of a 500-line file has a Jaccard similarity near 0.1).
+  sqz now checks containment: when new output is, on line boundaries,
+  a slice of a recent full read the model still has in context, it
+  returns `§ref:HASH:L40-80§` instead of the lines. Guards: at least
+  160 bytes and two lines, the same freshness and compaction rules as
+  plain refs, and the bytes must also appear in what was actually
+  served for the full read, so a ranged ref never points at lines a
+  lossy stage dropped. Works through the shell hook (`sed -n`, `head`,
+  `tail` after `cat`) and the MCP read tool. Logged as its own `slice`
+  row in `sqz stats --breakdown` so you can see how often it fires.
+- **`sqz_read_file` takes `offset` and `limit`** (1-based lines, same
+  meaning as the host's Read tool) so agents can route ranged reads
+  through sqz. The header reports `lines=40-80 of 500`.
+- **`sqz expand` and the `expand` MCP tool accept ranged tokens**
+  (`sqz expand 'a1b2c3d4:L40-80'`) and return just those lines.
+
+### Fixed
+
+- MCP `compress`, `sqz_grep` and `sqz_list_dir` counted the input with
+  a bytes/4 estimate and the output with the BPE tokenizer, so verbatim
+  results logged as negative savings (about -5% on grep). Both sides
+  now use the same tokenizer.
+
+### Changed
+
+- README and docs no longer lead with "the same file read five times".
+  Measured, identical file re-reads are rare; the savings come from
+  command output, unchanged-output refs, ranged refs and deltas, and
+  the docs now say so with the numbers.
+
 ## [1.7.0] — 2026-09-22
 
 ### Added

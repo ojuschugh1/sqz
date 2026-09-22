@@ -50,16 +50,17 @@
 
 sqz compresses command output before it reaches your LLM. Single Rust binary, zero config.
 
-The real win is dedup: when the same file gets read 5 times in a session, sqz sends it once and returns a 13-token reference for every repeat ([how that works, and its limits](docs/stop-rereading-files.md)).
+Most of the saving comes from command output: build logs, test runs, `git status`, package installs, compressed by formatters that know what each command looks like. On top of that sits dedup: anything the model already has in its context (the same `git status` run again, a file it just read, or a line range of that file) comes back as a short reference instead of the content ([how that works, and its limits](docs/stop-rereading-files.md)).
 
 ```
-Without sqz:                    With sqz:
+Without sqz:                              With sqz:
 
-File read #1:  2,000 tokens     File read #1:  ~800 tokens (compressed)
-File read #2:  2,000 tokens     File read #2:  ~13 tokens  (dedup ref)
-File read #3:  2,000 tokens     File read #3:  ~13 tokens  (dedup ref)
-───────────────────────         ───────────────────────
-Total:         6,000 tokens     Total:         ~826 tokens (86% saved)
+cat auth.py (500 lines):   4,000 tokens    4,000 tokens  (source is served in full)
+cargo test (1 failure):    1,200 tokens      120 tokens  (failure, assertion, file:line)
+sed -n '40,80p' auth.py:     330 tokens       18 tokens  (§ref:…:L40-80§ to the read above)
+git status, unchanged:       160 tokens       13 tokens  (§ref:…§)
+─────────────────────────────────────      ─────────────
+Total:                     5,690 tokens    4,151 tokens  (27% saved, nothing dropped)
 ```
 
 > [!NOTE]
@@ -470,7 +471,7 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 
 2. **Table compactor** — aligned-column output from tools without a dedicated formatter (`ps aux`, `netstat`, database CLIs) collapses its padding runs to two-space separators. The detector is strict — indented lines, code, YAML, and JSON never match.
 3. **Structural summaries** — code files compressed to imports + function signatures + call graph (~70% reduction). The model sees the architecture, not implementation noise.
-4. **Dedup cache** — SHA-256 content hash, persistent across sessions. Second read = 13-token reference.
+4. **Dedup cache** — SHA-256 content hash, persistent across sessions. Byte-identical output the model already has = 13-token reference. A line range of a file the model already has in full (`sed -n '40,80p'`, `sqz_read_file` with `offset`/`limit`) = `§ref:HASH:L40-80§`. A re-read after a small edit = only the changed lines. References are only served while the original is still in context (30-minute window, reset on compaction).
 5. **JSON pipeline** — strip nulls → project out debug fields → flatten → collapse arrays → TOON encoding (lossless compact format)
 6. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
 
