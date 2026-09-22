@@ -31,7 +31,14 @@ jobs:
           npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Publish to npm
-        run: cd npm && npm publish --registry=https://registry.npmjs.org --access=public
+        run: |
+          VERSION="${{ github.event.release.tag_name || github.event.inputs.tag_name }}"
+          VERSION="${VERSION#v}"
+          if npm view "sqz-cli@$VERSION" version >/dev/null 2>&1; then
+            echo "sqz-cli@$VERSION already on npm, skipping"
+            exit 0
+          fi
+          cd npm && npm publish --registry=https://registry.npmjs.org --access=public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
