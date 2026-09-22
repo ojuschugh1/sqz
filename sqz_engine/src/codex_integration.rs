@@ -126,8 +126,10 @@ unchanged — the escape hatch below), `expand` (resolve a
 (full-text search over everything sqz has compressed — recover
 context lost to compaction), and `sqz_read_file` / `sqz_grep` /
 `sqz_list_dir` (file access with a dedup cache: a repeat read of an
-unchanged file costs ~13 tokens). Prefer those three over `cat`,
-`grep` and `ls` for anything you might read more than once.
+unchanged file costs ~13 tokens, and a ranged re-read via `offset` /
+`limit` of a file you already have in full returns a
+`§ref:HASH:L40-80§` line-range reference). Prefer those three over
+`cat`, `grep` and `ls` for anything you might read more than once.
 
 ## Escape hatch — when sqz output confuses you
 

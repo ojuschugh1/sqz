@@ -111,6 +111,8 @@ The `sqz` MCP server is registered in Zed's `settings.json` under
 - `compress` — compress a blob of text you already have.
 - `passthrough` — return text unchanged (escape hatch).
 - `expand` — resolve a `§ref:HASH§` token back to the original bytes.
+  `§ref:HASH:L40-80§` means lines 40-80 of content you already have in
+  full; `expand` on it returns just those lines.
 - `sqz_recall` — full-text search over everything sqz has compressed
   (recover context lost to compaction).
 

@@ -97,8 +97,12 @@ sqz pipeline:
 - **`sqz_read_file`** — read a file from disk and return a compressed
   view. **PREFER this over the built-in `Read` tool** for any file
   larger than ~2KB or any file you might read more than once in the
-  same session. Repeat reads return a 13-token `§ref:HASH§` reference
-  instead of the full content.
+  same session, **including ranged reads** (`offset` / `limit`, same
+  meaning as the built-in Read). Repeat reads return a 13-token
+  `§ref:HASH§` reference instead of the full content; a ranged re-read
+  of a file you already have in full returns `§ref:HASH:L40-80§`,
+  meaning lines 40-80 of that content. Call `expand` on either token
+  if you need the bytes again.
 
 - **`sqz_grep`** — search files for a literal string or regex.
   **PREFER this over the built-in `Grep`** for anything that might
