@@ -1,4 +1,6 @@
 mod cli_proxy;
+mod doctor;
+mod replay;
 mod shell_hook;
 mod tests;
 mod vizit;
@@ -97,6 +99,18 @@ enum Command {
         #[arg(long)]
         ci: bool,
     },
+
+    /// Check that sqz is installed, wired into your AI tools, and actually compressing.
+    ///
+    /// Reports three layers: installation (binary, database), wiring
+    /// (shell hook, per-client configs at project and user level), and
+    /// activity (compressions logged recently). The gap between layers is
+    /// the diagnosis — "Cursor is installed but not routed through sqz",
+    /// "hooks installed but nothing compressed in 7 days".
+    ///
+    /// Exit codes: 0 = healthy, 1 = actionable problems found,
+    /// 2 = sqz itself is broken (database unreadable).
+    Doctor,
 
     /// Compress text from stdin or a positional argument.
     Compress {
@@ -309,10 +323,26 @@ enum Command {
     },
 
     /// Find missed savings opportunities by analyzing recent command history.
+    ///
+    /// With --replay, replays your existing agent transcripts (Claude Code,
+    /// Kiro) through the current sqz engine and reports what it would have
+    /// saved — a counterfactual estimate on your own sessions, computed
+    /// locally, before you install any hook.
     Discover {
         /// Number of days to analyze (default: 7).
         #[arg(long, default_value_t = 7)]
         days: u32,
+
+        /// Replay agent transcripts through the current engine instead of
+        /// reading sqz's own history. Scans ~/.claude/projects and
+        /// ~/.kiro/sessions/cli for .jsonl files modified in the window.
+        #[arg(long)]
+        replay: bool,
+
+        /// Transcript file or directory to replay (implies --replay).
+        /// A directory is scanned recursively for .jsonl files.
+        #[arg(long, value_name = "PATH")]
+        transcripts: Option<std::path::PathBuf>,
     },
 
     /// Resume a previous session — inject a session guide into the context.
@@ -468,6 +498,7 @@ fn main() {
         }
 
         Some(Command::Init { yes, global, only, skip, ci }) => cmd_init(yes, global, only, skip, ci),
+        Some(Command::Doctor) => std::process::exit(doctor::run()),
         Some(Command::Compress { text, mode, verify, no_cache, cmd, no_abbrev }) => {
             cmd_compress(text, &mode, verify, no_cache, cmd, no_abbrev)
         }
@@ -500,7 +531,12 @@ fn main() {
             }
         }
         Some(Command::Gain { days, project }) => cmd_gain(days, project),
-        Some(Command::Discover { days }) => cmd_discover(days),
+        Some(Command::Discover { days, replay, transcripts }) => {
+            if replay || transcripts.is_some() {
+                std::process::exit(replay::run(days, transcripts));
+            }
+            cmd_discover(days)
+        }
         Some(Command::Resume { session_id }) => cmd_resume(session_id),
         Some(Command::Hook { tool }) => cmd_hook(&tool),
         Some(Command::Compact) => cmd_compact(),

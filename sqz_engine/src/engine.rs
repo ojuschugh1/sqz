@@ -127,6 +127,20 @@ impl SqzEngine {
         Some(path)
     }
 
+    /// Whether informational stderr lines should be suppressed.
+    ///
+    /// `SQZ_QUIET=1` silences the per-compression progress lines ("N/M
+    /// tokens", "dedup hit", "fallback: verifier confidence …"). Errors
+    /// still print. Used by `sqz discover --replay`, which compresses
+    /// thousands of outputs in one run, and available to users whose
+    /// hook setup surfaces stderr where it isn't wanted.
+    pub fn quiet_stderr() -> bool {
+        match std::env::var("SQZ_QUIET") {
+            Ok(v) => !v.is_empty() && v != "0",
+            Err(_) => false,
+        }
+    }
+
     /// How long a dedup ref stays valid after the original was served.
     ///
     /// `SQZ_REF_TTL_SECS` overrides the 30-minute default. Clients that
@@ -217,8 +231,10 @@ impl SqzEngine {
 
         // Step 5: If verifier signals low confidence, re-compress with safe settings
         if fallback && result.data != input {
-            eprintln!("[sqz] fallback: verifier confidence {:.2} below threshold — re-compressing in safe mode",
-                result.verify.as_ref().map(|v| v.confidence).unwrap_or(0.0));
+            if !Self::quiet_stderr() {
+                eprintln!("[sqz] fallback: verifier confidence {:.2} below threshold — re-compressing in safe mode",
+                    result.verify.as_ref().map(|v| v.confidence).unwrap_or(0.0));
+            }
             let safe_result = self.compress_safe(input, &pipeline, &ctx)?;
             return Ok(safe_result);
         }

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`sqz doctor` — deployment validator.** Checks the three layers that
+  actually go wrong: installation (binary, database), wiring (shell
+  hook, per-client sqz configs at project and user level, client
+  detected vs actually routed through sqz), and activity (compressions
+  logged recently). The diagnosis is the gap between layers — "Cursor
+  is installed but not routed through sqz", "hooks installed but
+  nothing compressed in 7 days" — each with the command that fixes it.
+  Exit codes: 0 healthy, 1 problems found, 2 sqz itself broken.
+- **`sqz discover --replay` — counterfactual replay of your own agent
+  sessions.** sqz can't observe sessions before its hook is installed,
+  but the transcripts already exist on disk. Replay parses Claude Code
+  (`~/.claude/projects`) and Kiro (`~/.kiro/sessions/cli`) transcript
+  JSONL, extracts every tool output, replays it through the current
+  engine (per-command formatters, dedup, slice refs all fire exactly
+  as they would have live), and reports the estimate per source.
+  Each session file replays against a fresh throwaway store so
+  references never pretend to span sessions, and the report calls
+  itself an estimate because that's what it is. Runs locally; nothing
+  is uploaded. `--transcripts PATH` points it anywhere.
+- **`SQZ_QUIET=1`** silences the informational per-compression stderr
+  lines (progress, dedup hits, verifier fallback). Errors still print.
+  Replay sets it for itself; available to anyone whose hook setup
+  surfaces stderr where it isn't wanted.
 - **`sqz stats --share`** renders a five-line share card (date range,
   totals, how much of the saving came from references, regret rate)
   sized for a paste into an issue or post.
@@ -19,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with mdBook from `docs/`, with the rustdoc API reference under
   `/api/`. Replaces the raw rustdoc tree that previously lived in
   `docs/` and the redirect `docs/index.html`.
+
+### Changed
+
+- Whitepaper (and arXiv source) refreshed to 1.8.0: documents
+  near-duplicate deltas, ranged (slice) references, and the MCP proxy
+  integration surface; the dedup-granularity limitation now reflects
+  what shipped in 1.5.0–1.8.0.
 
 ### Fixed
 

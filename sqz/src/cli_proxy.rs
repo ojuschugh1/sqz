@@ -143,6 +143,13 @@ impl InterceptOptions {
     }
 }
 
+/// Suppress informational stderr lines when `SQZ_QUIET=1`.
+/// Checked per print site rather than cached: replay flips the env var
+/// at runtime, and these paths are nowhere near hot enough to care.
+fn quiet() -> bool {
+    sqz_engine::SqzEngine::quiet_stderr()
+}
+
 pub struct CliProxy {
     engine: SqzEngine,
     /// In-memory L1 dedup cache (fast hash → seen).
@@ -229,7 +236,9 @@ impl CliProxy {
         if !opts.no_cache && self.l1_cache.borrow().contains(&fast_hash) {
             // L1 hit — check L2 persistent cache for the actual ref
             if let Ok(Some(hit)) = self.engine.cache_manager().check_dedup_with_meta(output.as_bytes()) {
-                eprintln!("[sqz] dedup hit: {} (L1+L2)", hit.inline_ref);
+                if !quiet() {
+                    eprintln!("[sqz] dedup hit: {} (L1+L2)", hit.inline_ref);
+                }
                 self.maybe_log_rerun_regret(cmd, &hit);
                 self.log_dedup_hit(cmd, output);
                 return hit.inline_ref;
@@ -241,7 +250,9 @@ impl CliProxy {
             if let Ok(Some(hit)) = self.engine.cache_manager().check_dedup_with_meta(output.as_bytes()) {
                 // Promote to L1 for faster future lookups
                 self.l1_cache.borrow_mut().insert(fast_hash);
-                eprintln!("[sqz] dedup hit: {} (L2)", hit.inline_ref);
+                if !quiet() {
+                    eprintln!("[sqz] dedup hit: {} (L2)", hit.inline_ref);
+                }
                 self.maybe_log_rerun_regret(cmd, &hit);
                 self.log_dedup_hit(cmd, output);
                 return hit.inline_ref;
@@ -252,10 +263,12 @@ impl CliProxy {
         // (`sed -n '40,80p' f`, `head -50 f` after `cat f`).
         if !opts.no_cache {
             if let Ok(Some(hit)) = self.engine.cache_manager().check_slice_with_meta(output.as_bytes()) {
-                eprintln!(
-                    "[sqz] slice ref: lines {}-{} of {} already in context",
-                    hit.start_line, hit.end_line, hit.total_lines
-                );
+                if !quiet() {
+                    eprintln!(
+                        "[sqz] slice ref: lines {}-{} of {} already in context",
+                        hit.start_line, hit.end_line, hit.total_lines
+                    );
+                }
                 self.log_slice_hit(output, &hit);
                 return hit.inline_ref;
             }
@@ -329,10 +342,12 @@ impl CliProxy {
                     abbr.observe(&compressed.data);
                     match abbr.abbreviate(&compressed.data) {
                         Ok(result) if result.total_tokens_saved > 0 => {
-                            eprintln!(
-                                "[sqz] n-gram abbreviation: {} tokens saved",
-                                result.total_tokens_saved
-                            );
+                            if !quiet() {
+                                eprintln!(
+                                    "[sqz] n-gram abbreviation: {} tokens saved",
+                                    result.total_tokens_saved
+                                );
+                            }
                             result.text
                         }
                         _ => compressed.data,
@@ -405,7 +420,9 @@ impl CliProxy {
     fn log_compression(&self, cmd: &str, original: u32, compressed: u32) {
         let saved = original.saturating_sub(compressed);
         let pct = if original > 0 { (saved as f64 / original as f64 * 100.0) as u32 } else { 0 };
-        eprintln!("[sqz] {}/{} tokens ({}% reduction) [{}]", compressed, original, pct, cmd);
+        if !quiet() {
+            eprintln!("[sqz] {}/{} tokens ({}% reduction) [{}]", compressed, original, pct, cmd);
+        }
         let project = std::env::current_dir().ok();
         let project_str = project.as_ref().map(|p| p.to_string_lossy().to_string());
         let _ = self.engine.session_store().log_compression_with_project(
@@ -472,7 +489,9 @@ impl CliProxy {
         // >80k tokens in 30min = high pressure → aggressive mode
         // >120k tokens in 30min = critical → aggressive mode
         if pressure > 80_000 {
-            eprintln!("[sqz] adaptive: high session pressure ({} tokens/30min), escalating compression", pressure);
+            if !quiet() {
+                eprintln!("[sqz] adaptive: high session pressure ({} tokens/30min), escalating compression", pressure);
+            }
             self.engine.compress_with_mode(output, sqz_engine::CompressionMode::Aggressive)
         } else {
             self.engine.compress(output)
@@ -587,7 +606,7 @@ impl CliProxy {
             }
         }
 
-        if precached > 0 {
+        if precached > 0 && !quiet() {
             eprintln!("[sqz] predictive pre-cache: {} dependencies of {} cached",
                 precached, file_path);
         }
