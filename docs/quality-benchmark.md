@@ -26,7 +26,7 @@ Facts are chosen for what an agent needs to act, not for what sqz happens to kee
 
 ## Results
 
-sqz `main` after 1.6.1, September 2026, default settings (dedup on, abbreviation on).
+sqz 1.7.0, September 2026, default settings (dedup on, abbreviation on).
 
 | Fixture | Command | Tokens in | Tokens out | Reduction | Facts kept | Noise dropped | Recovery |
 |---|---|---:|---:|---:|---:|---:|---|
