@@ -213,7 +213,13 @@ jobs:
           echo "Publishing sqz-cli@${VERSION} to npm"
 
       - name: Publish
-        run: npm publish --access public
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "sqz-cli@$VERSION" version >/dev/null 2>&1; then
+            echo "sqz-cli@$VERSION already on npm, skipping"
+            exit 0
+          fi
+          npm publish --access public
         working-directory: npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
