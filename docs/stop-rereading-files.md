@@ -8,14 +8,14 @@ Every one of those reads adds to the transcript that is re-sent on every followi
 
 The intuitive picture is "the same file read five times". Measured, that is not what happens.
 
-A user counted 92 Claude Code sessions from their own logs (14 days, 11,149 tool results over 200 characters, counters reset at each compaction, edit and write confirmations excluded). Byte-identical repeats were 81 of 11,149 results, about 0.3% of result characters. Among file reads specifically, 1 in 542 was an identical repeat. What did show up: 49 of 578 file reads (8.5%) were a line range of a file already read in full earlier in the same session.
+A user counted 92 Claude Code sessions from their own logs (14 days, 11,149 tool results over 200 characters, counters reset at each compaction boundary, edit and write confirmations excluded; the [measurement script is published](https://gist.github.com/harrison001/76250b61ad665bf9a377e7096dffdbe0)). Byte-identical repeats were 81 of 11,149 results, about 0.3% of result characters. Among file reads specifically, 1 in 542 was an identical repeat. What did show up: 8.4% of file reads were a line range contained in a range already read in full earlier in the same session.
 
 sqz's own database agrees. In the stats behind the numbers on the README, dedup hits were short repeated shell output (`git status` with nothing changed, a build re-run, a listing) averaging 57 to 180 tokens each. Across 29 MCP file reads there were zero exact-repeat hits.
 
 So identical re-reads of whole files are rare, and a tool that only catches those is solving a small problem. Three things do repeat:
 
 1. **Unchanged command output.** The agent re-runs `git status`, `ls`, a test suite, and gets byte-identical output. Common, small per hit, adds up.
-2. **Line ranges of a file it already has.** It read the file in full, then reads lines 40-80 to look at one function. 8.5% of reads in the measurement above. Exact-match dedup misses this, and so does similarity matching: a 40-line slice of a 500-line file has a Jaccard similarity around 0.1 against the whole file, so it never even becomes a candidate.
+2. **Line ranges of a file it already has.** It read the file in full, then reads lines 40-80 to look at one function. 8.4% of reads in the measurement above. Exact-match dedup misses this, and so does similarity matching: a 40-line slice of a 500-line file has a Jaccard similarity around 0.1 against the whole file, so it never even becomes a candidate.
 3. **The file after a small edit.** Most of the bytes are the same, a few lines differ.
 
 ## Why agents re-read
@@ -85,7 +85,7 @@ shows the saved tokens per day as a bar chart, so you can see the effect the day
 
 ## What this does not fix
 
-- Reads through a client's built-in Read tool, for the reason above. The instruction file steers the agent to `sqz_read_file`, including for ranged reads; it cannot force it. The 8.5% figure above was measured on built-in Read calls, which is exactly the path sqz never sees unless the agent is redirected.
+- Reads through a client's built-in Read tool, for the reason above. The instruction file steers the agent to `sqz_read_file`, including for ranged reads; it cannot force it. The 8.4% figure above was measured on built-in Read calls, which is exactly the path sqz never sees unless the agent is redirected.
 - The first read. sqz compresses command output where it safely can (see [how compression works](https://github.com/ojuschugh1/sqz/blob/main/README.md#how-compression-works)), but a source file read is served in full by design, because an agent that reads a file is usually about to edit it. The saving on files is the repeat, not the first read.
 - The transcript re-send. Every provider re-sends the full conversation each turn; sqz makes what enters the transcript smaller, it cannot change how the provider bills it. Prompt caching helps with the re-send and stacks with sqz: `sqz stats --cost` models the saving under a cached billing model, which is the conservative case.
 

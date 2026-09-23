@@ -131,7 +131,7 @@ Anything the model already has in its context comes back as a reference. Measure
 | Lines 41-80 of a 200-line file read earlier | 305 | 16 | **95%** |
 | Same `cargo test` output, nothing changed | 303 | 13 | **96%** |
 
-A word on what actually repeats. A user who counted 92 of their own Claude Code sessions found identical whole-file re-reads in 1 of 542 reads, and line-range re-reads in 8.5% of them. So sqz does not lead with "the same file read five times": the repeats that happen in practice are unchanged command output, line ranges of a file already read, and files re-read after a small edit, and each has its own reference type ([details](docs/stop-rereading-files.md)). Sessions with noisy command output and repeated commands see the biggest wins.
+A word on what actually repeats. A user who counted 92 of their own Claude Code sessions ([script](https://gist.github.com/harrison001/76250b61ad665bf9a377e7096dffdbe0)) found identical whole-file re-reads in 1 of 542 reads, and line-range re-reads in 8.4% of them. So sqz does not lead with "the same file read five times": the repeats that happen in practice are unchanged command output, line ranges of a file already read, and files re-read after a small edit, and each has its own reference type ([details](docs/stop-rereading-files.md)). Sessions with noisy command output and repeated commands see the biggest wins.
 
 ## Install
 
