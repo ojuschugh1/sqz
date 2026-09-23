@@ -1,6 +1,6 @@
 {
   "name": "sqz-cli",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Pre-injection context compression and session deduplication for AI coding agents: squeeze tool output, code, JSON and logs before they reach the LLM",
   "keywords": [
     "llm",

@@ -1,6 +1,6 @@
 [package]
 name = "sqz-cli"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 description = "Pre-injection context compression and session deduplication for AI coding agents: squeeze tool output, code, JSON and logs before they reach the LLM"
 license-file = "../LICENSE"
@@ -16,7 +16,7 @@ name = "sqz"
 path = "src/main.rs"
 
 [dependencies]
-sqz-engine = { path = "../sqz_engine", version = "1.8.0" }
+sqz-engine = { path = "../sqz_engine", version = "1.9.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

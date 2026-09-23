@@ -1,6 +1,6 @@
 [package]
 name = "sqz-engine"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 description = "Context compression engine behind sqz: per-command formatters, SHA-256 session dedup, AST structural summaries, token counting and budget tracking for AI coding agents"
 license-file = "../LICENSE"
