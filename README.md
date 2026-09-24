@@ -311,6 +311,7 @@ What doesn't get compressed:
 | Zed | AGENTS.md guidance + MCP server | `sqz init` |
 | Copilot CLI | preToolUse hook (transparent) | `sqz init` |
 | Copilot coding agent (CI) | Repo-level hook, self-bootstraps in the cloud sandbox | `sqz init --ci` + commit |
+| Any CI pipeline | [setup-sqz action](https://github.com/ojuschugh1/setup-sqz) — compress logs before an LLM step | `uses: ojuschugh1/setup-sqz@v1` |
 | Any MCP server | `sqz-mcp proxy` wraps it, compresses its tool results | see below |
 | VS Code | [Extension](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz) | Install from Marketplace |
 | JetBrains | [Plugin](https://plugins.jetbrains.com/plugin/31240-sqz--context-intelligence/) | Install from Marketplace |
@@ -607,6 +608,8 @@ cargo build --release
 - MCP Registry name: `mcp-name: io.github.ojuschugh1/sqz`
 
 ## Star History
+
+If sqz saved you tokens today, a star helps other people find it. `sqz stats --share` prints your own numbers if you want to show them.
 
 <a href="https://star-history.dera.page/#ojuschugh1/sqz&Date">
  <picture>
