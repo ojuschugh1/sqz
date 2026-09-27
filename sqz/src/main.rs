@@ -110,7 +110,14 @@ enum Command {
     ///
     /// Exit codes: 0 = healthy, 1 = actionable problems found,
     /// 2 = sqz itself is broken (database unreadable).
-    Doctor,
+    Doctor {
+        /// Repair what doctor can repair on its own: remove log rows
+        /// where a token-estimator bug recorded output larger than
+        /// input (sqz-mcp 1.6.x). The database is backed up to
+        /// `<db>.bak-<date>` first.
+        #[arg(long)]
+        fix: bool,
+    },
 
     /// Compress text from stdin or a positional argument.
     Compress {
@@ -498,7 +505,7 @@ fn main() {
         }
 
         Some(Command::Init { yes, global, only, skip, ci }) => cmd_init(yes, global, only, skip, ci),
-        Some(Command::Doctor) => std::process::exit(doctor::run()),
+        Some(Command::Doctor { fix }) => std::process::exit(doctor::run(fix)),
         Some(Command::Compress { text, mode, verify, no_cache, cmd, no_abbrev }) => {
             cmd_compress(text, &mode, verify, no_cache, cmd, no_abbrev)
         }

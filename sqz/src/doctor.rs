@@ -81,7 +81,19 @@ pub struct Activity {
     pub total_saved: u64,
     pub last7_compressions: u32,
     pub last7_saved: u64,
+    /// Aggregate output exceeds aggregate input: the log has bad rows.
+    pub net_negative: bool,
+    /// Rows where compressed > 1.5x original on inputs of 100+ tokens,
+    /// and the tokens they inflate the total by. Legit refs never do
+    /// this; a mismatched token estimator does.
+    pub inflated_rows: u32,
+    pub inflated_tokens: u64,
 }
+
+/// Ratio above which a row is considered estimator garbage rather than a
+/// legitimately-larger output. Refs on tiny outputs sit well below it
+/// because the 100-token floor excludes them.
+pub const INFLATION_RATIO: f64 = 1.5;
 
 /// Pure diagnosis over collected state. Separated from collection and
 /// rendering so the rules are unit-testable without a filesystem.
@@ -112,6 +124,18 @@ pub fn diagnose(tools: &[ToolStatus], shell_hooked: bool, activity: &Activity) -
         });
     }
 
+    if activity.inflated_rows > 0 {
+        problems.push(Problem {
+            message: format!(
+                "{} log row(s) record output larger than input by {}+ tokens — written by a token-estimator bug in sqz-mcp 1.6.x, they {}understate your savings",
+                activity.inflated_rows,
+                activity.inflated_tokens,
+                if activity.net_negative { "push the all-time total below zero and " } else { "" },
+            ),
+            fix: Some("sqz doctor --fix   (backs up the database, then removes those rows)".to_string()),
+        });
+    }
+
     let anything_configured = shell_hooked || tools.iter().any(|t| t.config.configured());
     if activity.total_compressions == 0 {
         if anything_configured {
@@ -133,6 +157,24 @@ pub fn diagnose(tools: &[ToolStatus], shell_hooked: bool, activity: &Activity) -
     }
 
     problems
+}
+
+/// Copy the live database to `<db>.bak-YYYYMMDD` before a repair.
+/// Resolves the path the same way the engine does (SQZ_DB_PATH, else
+/// ~/.sqz/sessions.db). Returns `Ok(None)` when no file exists to back up.
+fn backup_database() -> std::io::Result<Option<PathBuf>> {
+    let db = std::env::var_os("SQZ_DB_PATH")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home_dir().map(|h| h.join(".sqz").join("sessions.db")));
+    let Some(db) = db else { return Ok(None) };
+    if !db.exists() {
+        return Ok(None);
+    }
+    let stamp = chrono::Utc::now().format("%Y%m%d").to_string();
+    let backup = PathBuf::from(format!("{}.bak-{stamp}", db.display()));
+    std::fs::copy(&db, &backup)?;
+    Ok(Some(backup))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -290,7 +332,10 @@ pub fn collect_tool_statuses(project_dir: &Path) -> Vec<ToolStatus> {
 }
 
 /// Run the full check and print the report. Returns the process exit code.
-pub fn run() -> i32 {
+///
+/// With `fix`, repairs the one problem doctor can repair on its own:
+/// inflated log rows. The database is copied to `<db>.bak-<date>` first.
+pub fn run(fix: bool) -> i32 {
     let version = env!("CARGO_PKG_VERSION");
     println!("sqz doctor — {version}");
     println!();
@@ -308,17 +353,43 @@ pub fn run() -> i32 {
         }
     };
     let store = engine.session_store();
+    println!("  ok  database open and readable");
+
+    if fix {
+        let (count, _, _) = store.inflated_rows(INFLATION_RATIO).unwrap_or((0, 0, None));
+        if count == 0 {
+            println!("  ok  --fix: no inflated rows to remove");
+        } else {
+            match backup_database() {
+                Ok(Some(path)) => println!("  ok  --fix: database backed up to {}", path.display()),
+                Ok(None) => println!("  --  --fix: database path unknown, skipping backup"),
+                Err(e) => {
+                    println!("  ERR --fix: backup failed ({e}), not touching the database");
+                    return 2;
+                }
+            }
+            match store.delete_inflated_rows(INFLATION_RATIO) {
+                Ok(n) => println!("  ok  --fix: removed {n} inflated log row(s)"),
+                Err(e) => println!("  ERR --fix: delete failed: {e}"),
+            }
+        }
+    }
+
     let activity = {
         let stats = store.compression_stats().unwrap_or_default();
         let last7 = store.daily_gains(7).unwrap_or_default();
+        let (inflated_rows, inflated_tokens, _) =
+            store.inflated_rows(INFLATION_RATIO).unwrap_or((0, 0, None));
         Activity {
             total_compressions: stats.total_compressions,
             total_saved: stats.tokens_saved(),
             last7_compressions: last7.iter().map(|g| g.compressions).sum(),
             last7_saved: last7.iter().map(|g| g.tokens_saved).sum(),
+            net_negative: stats.is_net_negative(),
+            inflated_rows,
+            inflated_tokens,
         }
     };
-    println!("  ok  database open and readable");
 
     // ── Shell hook ──────────────────────────────────────────────────
     let hook = ShellHook::detect();
@@ -363,10 +434,17 @@ pub fn run() -> i32 {
     // ── Activity ────────────────────────────────────────────────────
     println!();
     println!("activity");
-    println!(
-        "  all-time: {} compressions, {} tokens saved",
-        activity.total_compressions, activity.total_saved
-    );
+    if activity.net_negative {
+        println!(
+            "  all-time: {} compressions, net NEGATIVE (log has inflated rows, see problems)",
+            activity.total_compressions
+        );
+    } else {
+        println!(
+            "  all-time: {} compressions, {} tokens saved",
+            activity.total_compressions, activity.total_saved
+        );
+    }
     println!(
         "  last 7d:  {} compressions, {} tokens saved",
         activity.last7_compressions, activity.last7_saved
@@ -460,6 +538,39 @@ mod tests {
         let tools = vec![tool("Cline", "cline", Detection::Unknown, ConfigScope::None)];
         let activity = Activity { total_compressions: 1, last7_compressions: 1, ..Default::default() };
         assert!(diagnose(&tools, true, &activity).is_empty());
+    }
+
+    #[test]
+    fn inflated_rows_are_flagged_with_fix_command() {
+        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Both)];
+        let activity = Activity {
+            total_compressions: 700,
+            last7_compressions: 100,
+            net_negative: true,
+            inflated_rows: 2,
+            inflated_tokens: 458_000,
+            ..Default::default()
+        };
+        let problems = diagnose(&tools, true, &activity);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("2 log row(s)"));
+        assert!(problems[0].message.contains("below zero"));
+        assert!(problems[0].fix.as_deref().unwrap().starts_with("sqz doctor --fix"));
+    }
+
+    #[test]
+    fn inflated_rows_without_negative_total_omit_the_below_zero_clause() {
+        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Both)];
+        let activity = Activity {
+            total_compressions: 700,
+            last7_compressions: 100,
+            inflated_rows: 1,
+            inflated_tokens: 900,
+            ..Default::default()
+        };
+        let problems = diagnose(&tools, true, &activity);
+        assert_eq!(problems.len(), 1);
+        assert!(!problems[0].message.contains("below zero"));
     }
 
     #[test]

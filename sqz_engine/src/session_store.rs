@@ -1057,6 +1057,51 @@ impl SessionStore {
         Ok(stats)
     }
 
+    /// Rows where the logged compressed size exceeds the original by more
+    /// than `ratio` (e.g. 1.5 = 50% larger). A 13-token ref replacing a
+    /// 5-token output is normal; a byte-faithful grep result logging as
+    /// 1.6x its input is a token-estimator bug writing garbage (sqz-mcp
+    /// 1.6.x mixed chars/4 with a BPE count). Returns (count, inflation
+    /// in tokens, the worst offending mode) so callers can flag it.
+    pub fn inflated_rows(&self, ratio: f64) -> Result<(u32, u64, Option<String>)> {
+        let mut stmt = self
+            .db
+            .prepare(
+                "SELECT COUNT(*), COALESCE(SUM(tokens_compressed - tokens_original), 0) \
+                 FROM compression_log \
+                 WHERE tokens_original >= 100 AND tokens_compressed > tokens_original * ?1",
+            )
+            .map_err(SqzError::SessionStore)?;
+        let (count, inflation): (u32, i64) = stmt
+            .query_row(params![ratio], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(SqzError::SessionStore)?;
+        if count == 0 {
+            return Ok((0, 0, None));
+        }
+        let worst: Option<String> = self
+            .db
+            .query_row(
+                "SELECT mode FROM compression_log \
+                 WHERE tokens_original >= 100 AND tokens_compressed > tokens_original * ?1 \
+                 GROUP BY mode ORDER BY SUM(tokens_compressed - tokens_original) DESC LIMIT 1",
+                params![ratio],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok((count, inflation.max(0) as u64, worst))
+    }
+
+    /// Delete the rows [`inflated_rows`] would return. Returns the count.
+    pub fn delete_inflated_rows(&self, ratio: f64) -> Result<usize> {
+        self.db
+            .execute(
+                "DELETE FROM compression_log \
+                 WHERE tokens_original >= 100 AND tokens_compressed > tokens_original * ?1",
+                params![ratio],
+            )
+            .map_err(SqzError::SessionStore)
+    }
+
     /// Get daily compression gains for the last N days.
     pub fn daily_gains(&self, days: u32) -> Result<Vec<DailyGain>> {
         let mut stmt = self.db.prepare(
@@ -1506,6 +1551,13 @@ impl CompressionStats {
         self.total_tokens_in.saturating_sub(self.total_tokens_out)
     }
 
+    /// True when the logged output exceeds the logged input in aggregate.
+    /// `tokens_saved` saturates to 0 in that case, which reads as "sqz did
+    /// nothing" when the real story is "the log has bad rows".
+    pub fn is_net_negative(&self) -> bool {
+        self.total_tokens_out > self.total_tokens_in
+    }
+
     pub fn reduction_pct(&self) -> f64 {
         if self.total_tokens_in == 0 {
             0.0
@@ -1641,6 +1693,38 @@ mod tests {
             provenance: crate::types::Provenance::default(),
             verify: None,
         }
+    }
+
+    #[test]
+    fn inflated_rows_finds_estimator_garbage_but_not_refs_on_tiny_output() {
+        let store = in_memory_store();
+        // Normal compression.
+        store.log_compression(1000, 400, &[], "auto").unwrap();
+        // A 13-token ref replacing a 5-token output: legitimately larger,
+        // but below the 100-token floor, so not garbage.
+        store.log_compression(5, 13, &[], "dedup").unwrap();
+        // Slightly larger on a real input: under the ratio, not flagged.
+        store.log_compression(200, 230, &[], "sqz_read_file").unwrap();
+        // The 1.6.x sqz_grep pattern: byte-faithful output logged at 1.66x.
+        store.log_compression(655_870, 1_091_993, &[], "sqz_grep").unwrap();
+        store.log_compression(38_382, 60_919, &[], "sqz_grep").unwrap();
+
+        let (count, inflation, worst) = store.inflated_rows(1.5).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(inflation, (1_091_993 - 655_870) + (60_919 - 38_382));
+        assert_eq!(worst.as_deref(), Some("sqz_grep"));
+
+        let stats = store.compression_stats().unwrap();
+        assert!(stats.is_net_negative(), "garbage rows push the total negative");
+        assert_eq!(stats.tokens_saved(), 0, "saturating_sub hides it as zero");
+
+        assert_eq!(store.delete_inflated_rows(1.5).unwrap(), 2);
+        let (count, _, _) = store.inflated_rows(1.5).unwrap();
+        assert_eq!(count, 0);
+        let stats = store.compression_stats().unwrap();
+        assert!(!stats.is_net_negative());
+        assert_eq!(stats.total_compressions, 3);
+        assert_eq!(stats.tokens_saved(), 1000 + 5 + 200 - 400 - 13 - 230);
     }
 
     #[test]

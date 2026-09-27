@@ -5,6 +5,21 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`sqz doctor` detects and repairs inflated log rows.** sqz-mcp 1.6.x
+  counted `tokens_original` with chars/4 and `tokens_compressed` with
+  the BPE tokenizer, so a byte-faithful `sqz_grep` result could log as
+  1.6x its input; two such rows on one machine pushed the all-time
+  total 250K tokens negative, which `sqz stats` and `doctor` then
+  rendered as "0 tokens saved". Doctor now flags rows where compressed
+  exceeds 1.5x original on inputs of 100+ tokens, says so instead of
+  printing zero, and `sqz doctor --fix` backs up the database to
+  `<db>.bak-<date>` and removes them. The estimator itself was fixed
+  in 1.8.0; this cleans up what it wrote.
+
 ## [1.9.0] — 2026-09-23
 
 ### Added
