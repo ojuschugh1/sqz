@@ -151,6 +151,17 @@ const SqzPluginFactory = async (ctx: any) => {{
     return "'" + s.replace(/'/g, "'\\''") + "'";
   }}
 
+  // A pipe exits with sqz's status, so the command's own status rides
+  // through as a trailer sqz strips and exits with. That form is POSIX;
+  // OpenCode uses a POSIX shell outside Windows (it refuses fish and nu).
+  const POSIX = process.platform !== "win32" &&
+    !/(^|\/)(fish|nu|csh|tcsh|xonsh|elvish)$/.test(process.env.SHELL ?? "");
+
+  function wrap(cmd: string, label: string): string {{
+    if (!POSIX) return `${{cmd}} 2>&1 | ${{SQZ_PATH}} compress --cmd ${{label}}`;
+    return `{{ ${{cmd}} 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' "$?"; }} | ${{SQZ_PATH}} compress --cmd ${{label}}`;
+  }}
+
   return {{
     "tool.execute.before": async (input: any, output: any) => {{
       const tool = input.tool ?? "";
@@ -170,8 +181,7 @@ const SqzPluginFactory = async (ctx: any) => {{
       // argument, shell-neutral, works in POSIX sh, zsh, fish, PowerShell,
       // and cmd.exe.
       const base = extractBaseCmd(cmd);
-      const label = shellEscapeLabel(base);
-      output.args.command = `${{cmd}} 2>&1 | ${{SQZ_PATH}} compress --cmd ${{label}}`;
+      output.args.command = wrap(cmd, shellEscapeLabel(base));
     }},
   }};
 }};
@@ -1904,6 +1914,42 @@ mod tests {
             "first token of the rewritten command must be the user's \
              command itself, not an env-var assignment; got: {cmd}"
         );
+    }
+
+    /// The plugin's rewrite must carry the command's exit status, or a
+    /// failing test run reports success. Runs the generated wrap() in node
+    /// when it's available and checks the result in a real shell.
+    #[test]
+    fn ts_plugin_carries_exit_status_on_posix() {
+        let content = generate_opencode_plugin("sqz");
+        assert!(content.contains("printf '\\\\n__SQZ_EXIT_%d__\\\\n' \"$?\""), "{content}");
+        assert!(content.contains("process.platform !== \"win32\""));
+        assert!(content.contains("output.args.command = wrap(cmd, shellEscapeLabel(base));"));
+
+        let Some(node) = which_node() else { return };
+        let start = content.find("  const POSIX").unwrap();
+        let end = content[start..].find("\n  }\n").unwrap() + start + 4;
+        // Strip the TypeScript annotations so plain node can run it.
+        let js = content[start..end]
+            .replace("(cmd: string, label: string): string", "(cmd, label)")
+            .replace("SQZ_PATH", "\"sqz\"");
+        let script = format!("{js}\nprocess.stdout.write(wrap(\"cargo test\", \"cargo\"));");
+        let out = std::process::Command::new(node)
+            .args(["-e", &script])
+            .env("SHELL", "/bin/zsh")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            crate::exit_marker::posix_rewrite("cargo test", "cargo"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn which_node() -> Option<&'static str> {
+        let out = std::process::Command::new("node").arg("--version").output().ok()?;
+        out.status.success().then_some("node")
     }
 
     /// Companion to the above: the TS plugin (which runs inside
