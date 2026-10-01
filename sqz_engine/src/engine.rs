@@ -287,6 +287,55 @@ impl SqzEngine {
         )
     }
 
+    /// What `sqz-mcp proxy` does to one text result from an upstream MCP
+    /// server. `None` keeps the original: too small to pay for the
+    /// markers, high-risk content (credentials, stack traces,
+    /// migrations), or a saving under the net-win gate. `sqz discover
+    /// --replay` uses it too, so its MCP estimate is what the proxy does.
+    pub fn compress_tool_result(&self, text: &str, use_cache: bool) -> Option<ToolResultCompression> {
+        use crate::cache_manager::CacheResult;
+        let tokens_original = chars_over_four(text);
+        if tokens_original < TOOL_RESULT_MIN_SAVING * 2 {
+            return None;
+        }
+        if self.route_compression_mode(text) == crate::confidence_router::CompressionMode::Safe {
+            return None;
+        }
+
+        let result = if use_cache {
+            self.compress_with_cache(text).ok()
+        } else {
+            self.compress(text).ok().map(|output| CacheResult::Fresh { output })
+        }?;
+
+        let (out, tokens_compressed, repeat) = match result {
+            CacheResult::Dedup { inline_ref, token_cost } => (inline_ref, token_cost, true),
+            CacheResult::Delta { delta_text, token_cost, .. } => (delta_text, token_cost, true),
+            CacheResult::Fresh { output } => {
+                // First pass is lossy, so point at the cached original.
+                let mut data = output.data;
+                if use_cache {
+                    let hash = crate::cache_manager::CacheManager::sha256_hex(text.as_bytes());
+                    data.push_str(&format!(
+                        "\n[full output: call sqz_expand with ref \"{}\"]",
+                        &hash[..16]
+                    ));
+                }
+                let t = chars_over_four(&data);
+                (data, t, false)
+            }
+        };
+        if tokens_original.saturating_sub(tokens_compressed) < TOOL_RESULT_MIN_SAVING {
+            return None;
+        }
+        Some(ToolResultCompression {
+            text: out,
+            tokens_original,
+            tokens_compressed,
+            repeat,
+        })
+    }
+
     /// Defensive compression: any input in, `CompressedContent` out, guaranteed.
     ///
     /// Unlike `compress()` which returns `Result`, this method never returns
@@ -552,6 +601,25 @@ impl SqzEngine {
     }
 }
 
+/// Smallest saving, in tokens, worth replacing an MCP tool result for: the
+/// markers and the agent's attention cost about this much.
+pub const TOOL_RESULT_MIN_SAVING: u32 = 16;
+
+/// A compressed MCP tool result from [`SqzEngine::compress_tool_result`].
+/// Token counts are chars/4 estimates, the counter the net-win gate uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultCompression {
+    pub text: String,
+    pub tokens_original: u32,
+    pub tokens_compressed: u32,
+    /// A ref or delta against content already sent: lossless. Otherwise a
+    /// first-pass compression, which is lossy.
+    pub repeat: bool,
+}
+
+fn chars_over_four(text: &str) -> u32 {
+    ((text.len() as f64) / 4.0).ceil() as u32
+}
 
 #[cfg(test)]
 mod tests {
@@ -634,6 +702,28 @@ mod tests {
         let engine = SqzEngine::new().unwrap();
         let result = engine.compress(r#"{"name":"Alice","age":30}"#).unwrap();
         assert!(result.data.starts_with("TOON:"), "JSON should be TOON-encoded");
+    }
+
+    #[test]
+    fn compress_tool_result_gates_like_the_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
+
+        assert_eq!(engine.compress_tool_result("ok, 3 rows updated", true), None, "too small to pay off");
+
+        let rows: String = (0..80)
+            .map(|i| format!("issue row {i} status open priority medium assignee nobody\n"))
+            .collect();
+        let first = engine.compress_tool_result(&rows, true).expect("compresses");
+        assert!(first.tokens_compressed + TOOL_RESULT_MIN_SAVING <= first.tokens_original);
+        assert!(!first.text.starts_with("§ref:") && !first.repeat);
+        // A lossy first pass always says how to get the original back.
+        let hash = CacheManager::sha256_hex(rows.as_bytes());
+        assert!(first.text.ends_with(&format!("[full output: call sqz_expand with ref \"{}\"]", &hash[..16])), "{}", first.text);
+        let second = engine.compress_tool_result(&rows, true).expect("repeat");
+        assert!(second.text.starts_with("§ref:") && second.repeat, "{}", second.text);
+        let uncached = engine.compress_tool_result(&rows, false).expect("no cache");
+        assert!(!uncached.text.starts_with("§ref:") && !uncached.text.contains("sqz_expand"));
     }
 
     #[test]

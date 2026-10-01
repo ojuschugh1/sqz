@@ -176,7 +176,7 @@ pub use zed_integration::{
 pub use kiro_integration::{
     install_kiro_mcp_config, install_kiro_steering, install_kiro_user_steering,
     kiro_legacy_hook_path, kiro_mcp_path, kiro_steering_path, kiro_steering_state,
-    kiro_user_steering_path, refresh_kiro_steering, remove_kiro_legacy_hook,
+    kiro_user_root, kiro_user_steering_path, refresh_kiro_steering, remove_kiro_legacy_hook,
     remove_kiro_mcp_config, remove_kiro_steering, KiroMcpInstall, KiroMcpRemove,
     SteeringState,
 };
@@ -220,7 +220,7 @@ pub use dashboard::{
     CommandBreakdown, DashboardConfig, DashboardHtml, DashboardMetrics, DashboardServer,
     SessionHistoryEntry, ToolBreakdown,
 };
-pub use engine::SqzEngine;
+pub use engine::{SqzEngine, ToolResultCompression, TOOL_RESULT_MIN_SAVING};
 pub use hook_manager::{
     generate_platform_config, known_platforms, Hook, HookAction, HookContext, HookManager, HookType,
 };

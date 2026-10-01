@@ -26,11 +26,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use sqz_engine::{CacheResult, Result, SqzEngine, SqzError};
+use sqz_engine::{Result, SqzEngine, SqzError};
 
 const EXPAND_TOOL_NAME: &str = "sqz_expand";
 const HELP_TOOL_NAME: &str = "sqz_tool_help";
-const NET_WIN_MIN_TOKENS: u32 = 16;
 const MAX_DESCRIPTION_CHARS: usize = 400;
 /// `--lazy-tools` cap: roughly one sentence per tool.
 const LAZY_DESCRIPTION_CHARS: usize = 160;
@@ -241,58 +240,18 @@ impl ProxyState {
     }
 
     /// Compress one text payload. Returns `None` to keep the original.
+    /// The gating (size, Safe routing, net win) lives in the engine so
+    /// `sqz discover --replay` estimates exactly what the proxy does.
     fn compress_text(&mut self, text: &str, tool_name: &str) -> Option<String> {
-        let tokens_original = estimate_tokens(text);
-        if tokens_original < NET_WIN_MIN_TOKENS * 2 {
-            return None;
-        }
-        // High-risk content (credentials, stack traces, migrations) stays
-        // verbatim, matching the engine's safety routing everywhere else.
-        if self.engine.route_compression_mode(text) == sqz_engine::CompressionMode::Safe {
-            return None;
-        }
-
-        let result = if self.no_cache {
-            self.engine.compress(text).ok().map(|c| CacheResult::Fresh { output: c })
-        } else {
-            self.engine.compress_with_cache(text).ok()
-        }?;
-
-        let (out, tokens_out) = match result {
-            CacheResult::Dedup { inline_ref, token_cost } => (inline_ref, token_cost),
-            CacheResult::Delta { delta_text, token_cost, .. } => (delta_text, token_cost),
-            CacheResult::Fresh { output } => {
-                // Spill ref: when entropy truncation dropped segments, the
-                // untruncated original is in the cache (we're on the cached
-                // path here) — point the agent at sqz_expand so truncation
-                // is recoverable rather than lost.
-                let truncated = output
-                    .stages_applied
-                    .iter()
-                    .any(|s| s == "entropy_truncate");
-                let mut data = output.data;
-                if truncated && !self.no_cache {
-                    let hash = sqz_engine::CacheManager::sha256_hex(text.as_bytes());
-                    data.push_str(&format!(
-                        "\n[full output: call sqz_expand with ref \"{}\"]",
-                        &hash[..16]
-                    ));
-                }
-                let t = estimate_tokens(&data);
-                (data, t)
-            }
-        };
-        if tokens_original.saturating_sub(tokens_out) < NET_WIN_MIN_TOKENS {
-            return None;
-        }
+        let c = self.engine.compress_tool_result(text, !self.no_cache)?;
         let _ = self.engine.session_store().log_compression_with_project(
-            tokens_original,
-            tokens_out,
+            c.tokens_original,
+            c.tokens_compressed,
             &[],
             &format!("mcp-proxy:{tool_name}"),
             None,
         );
-        Some(out)
+        Some(c.text)
     }
 
     fn answer_tool_help(&self, id: &serde_json::Value, msg: &serde_json::Value) -> String {
@@ -360,10 +319,6 @@ fn compact_description(desc: &str, max_chars: usize) -> String {
         Some(idx) if idx > max_chars / 2 => format!("{}.", &head[..idx]),
         _ => format!("{head}…"),
     }
-}
-
-fn estimate_tokens(text: &str) -> u32 {
-    ((text.len() as f64) / 4.0).ceil() as u32
 }
 
 /// Run the proxy: spawn `upstream_cmd` and relay stdio until EOF.
