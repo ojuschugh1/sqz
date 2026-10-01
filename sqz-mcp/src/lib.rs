@@ -307,9 +307,12 @@ impl McpServer {
     /// "92% saved on repeated reads" number lives in the cache, so
     /// every MCP tool that accepts arbitrary content should consult it.
     fn handle_compress(&mut self, request: ToolCallRequest) -> Result<ToolCallResponse> {
-        // Serialize the input JSON to a string for compression.
-        let raw_input = serde_json::to_string(&request.input)
-            .map_err(|e| SqzError::Other(format!("input serialization error: {e}")))?;
+        // The schema's `text` field; anything else is compressed serialized.
+        let raw_input = match request.input.get("text").and_then(|v| v.as_str()) {
+            Some(text) => text.to_string(),
+            None => serde_json::to_string(&request.input)
+                .map_err(|e| SqzError::Other(format!("input serialization error: {e}")))?,
+        };
 
         let tokens_original = self.engine.count_tokens(&raw_input);
         let (output, tokens_compressed) = self.compress_cached(&raw_input, false)?;
@@ -1868,6 +1871,25 @@ mod tests {
         };
         let resp = server.handle_tool_call(req).expect("handle_tool_call");
         assert_eq!(resp.tool_id, "compress");
+    }
+
+    #[test]
+    fn test_compress_tool_compresses_the_text_field() {
+        let (mut server, _dir) = make_server();
+        let mut text: String = (0..300)
+            .map(|i| format!("2026-10-01T12:00:{:02}Z INFO worker {i} finished job {i} in {} ms\n", i % 60, i % 97))
+            .collect();
+        text.push_str("ERROR worker 299 failed: disk full\n");
+        let resp = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "compress".to_string(),
+                input: serde_json::json!({ "text": text }),
+                intent: None,
+            })
+            .unwrap();
+        let head: String = resp.output.chars().take(200).collect();
+        assert!(!resp.output.starts_with("TOON:{text:"), "{head}");
+        assert!(resp.output.contains("disk full"), "{head}");
     }
 
     /// Test list_tools returns all tools when no intent is provided.
