@@ -123,7 +123,7 @@ impl EntropyTruncator {
         let total = scored.len();
 
         for seg in &mut scored {
-            if seg.text.len() < self.config.min_segment_length {
+            if seg.text.len() < self.config.min_segment_length || has_error_marker(&seg.text) {
                 seg.kept = true;
                 kept_count += 1;
             } else if seg.entropy >= threshold {
@@ -279,7 +279,16 @@ pub struct EntropyTruncArrayResult {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Compute Shannon entropy of a string in bits.
+/// Segments mentioning an error are kept whatever their entropy. Same
+/// markers the pipeline uses to decide content is not benign.
+fn has_error_marker(text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "error", "panic", "traceback", "failed", "failure", "exception", "fatal",
+    ];
+    let lower = text.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m))
+}
+
 /// Extract exact identifiers from `dropped` that do not also appear in
 /// `kept`: hex ids/SHAs (7+ chars containing a digit), UUIDs, ticket codes
 /// (ABC-123), and semantic versions. Capped at 16 entries / 256 chars total
@@ -335,6 +344,7 @@ fn extract_identifiers(dropped: &str, kept: &str) -> Vec<String> {
     out
 }
 
+/// Compute Shannon entropy of a string in bits.
 fn shannon_entropy(text: &str) -> f64 {
     if text.is_empty() {
         return 0.0;
@@ -424,6 +434,23 @@ mod tests {
         for id in ["deadbeef42", "PROJ-1482", "550e8400-e29b-41d4-a716-446655440000", "v1.4.0"] {
             assert!(result.text.contains(id), "lost id {id}: {}", result.text);
         }
+    }
+
+    #[test]
+    fn error_lines_are_never_dropped() {
+        // No blank lines, so the log is scored in 10-line windows.
+        let truncator = EntropyTruncator::new();
+        let mut log: String = (0..300)
+            .map(|i| format!("2026-10-01T12:00:{:02}Z INFO worker {i} finished job {i} in {} ms\n", i % 60, i % 97))
+            .collect();
+        log.push_str("ERROR worker 299 failed: disk full\n");
+        let result = truncator.truncate_string(&log).unwrap();
+        assert!(result.segments_dropped > 0, "the routine lines still truncate");
+        assert!(result.text.contains("ERROR worker 299 failed: disk full"), "{}", result.text);
+
+        let panic = format!("{}\n\nthread 'main' panicked at src/lib.rs:9:5", "ok line\n".repeat(40));
+        let result = truncator.truncate_string(&panic).unwrap();
+        assert!(result.text.contains("panicked at src/lib.rs:9:5"), "{}", result.text);
     }
 
     #[test]
