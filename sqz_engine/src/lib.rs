@@ -110,6 +110,7 @@ pub mod regret_tracker;
 pub mod sandbox_executor;
 pub mod session_continuity;
 pub mod session_store;
+pub mod shell_scan;
 pub mod kiro_integration;
 pub mod stages;
 pub mod structural_summary;
@@ -194,7 +195,10 @@ pub use cost_calculator::{
 };
 pub use ctx_format::{CtxEnvelope, CtxFormat, CtxMetadata};
 pub use error::{Result, SqzError, SourceLocation};
-pub use exit_marker::{posix_rewrite, powershell_rewrite, strip_exit_marker};
+pub use exit_marker::{
+    posix_rewrite, posix_rewrite_list, powershell_rewrite, strip_exit_marker,
+    strip_exit_marker_bytes,
+};
 pub use model_router::{ModelRouter, RoutingDecision, TaskContext};
 pub use pipeline::{CompressionPipeline, SessionContext};
 pub use pin_manager::PinManager;

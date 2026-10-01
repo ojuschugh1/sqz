@@ -126,20 +126,16 @@ The built-in `Read`, `Grep`, `Glob` tools remain available. Use them for:
 ### Bash commands (hooked automatically)
 
 When you run a shell command through the `Bash` tool, a PreToolUse hook
-rewrites it to pipe output through `sqz compress`. This is transparent:
-you don't need to remember to add anything, but it's useful to know
-that these commands get compressed automatically:
+rewrites it to pipe output through `sqz compress`, keeping its exit
+status. This is transparent: you don't need to add anything. Pipes,
+`&&`/`;` chains, loops and heredocs are piped as a whole, and a leading
+`cd dir &&` runs outside the pipe so the directory change sticks.
 
-```bash
-git status           # → git status 2>&1 | sqz compress --cmd git
-cargo test           # → cargo test 2>&1 | sqz compress --cmd cargo
-docker ps            # → docker ps 2>&1 | sqz compress --cmd docker
-kubectl get pods     # → kubectl get pods 2>&1 | sqz compress --cmd kubectl
-```
-
-The rewrite is skipped for interactive commands (`vim`, `ssh`,
-`python`), compound commands (`a && b`, `a > file.txt`), and anything
-already going through sqz.
+The rewrite is skipped for commands that change shell state (`export`,
+`source`, `set`, a `cd` after the first command), background jobs and
+`run_in_background` calls, followers and servers (`tail -f`,
+`npm run dev`), editors and REPLs, and anything already going through
+sqz.
 
 ### Escape hatch — when you see a `§ref:HASH§` token
 

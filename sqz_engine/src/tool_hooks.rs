@@ -239,27 +239,13 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         });
     }
 
-    // Don't intercept interactive or long-running commands
-    if is_interactive_command(command) {
-        return Ok(match platform {
-            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
-            _ => input.to_string(),
-        });
-    }
-
-    // Don't intercept commands with shell operators that would break piping.
-    // Compound commands (&&, ||, ;), redirects (>, <, >>), background (&),
-    // heredocs (<<), and process substitution would misbehave when we append
-    // `2>&1 | sqz compress` — the pipe only captures the last command.
-    if has_shell_operators(command) {
-        return Ok(match platform {
-            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
-            _ => input.to_string(),
-        });
+    // A background call streams its output to the agent while it runs;
+    // through sqz nothing would show until the command exits.
+    if runs_in_background(&parsed) {
+        return Ok(passthrough(platform, input));
     }
 
     // Rewrite: pipe the command's output through sqz compress.
-    // The command is a simple command (no operators), so direct piping is safe.
     //
     // Issue #10: use `--cmd NAME` instead of a `SQZ_CMD=NAME` prefix so
     // the rewrite works in every shell. The sh-style inline env-var
@@ -267,19 +253,18 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // Windows) or cmd.exe — both treat `SQZ_CMD=cmd` as a literal
     // command name and raise `CommandNotFoundException`. `--cmd NAME`
     // is a normal CLI argument and all three shells parse it fine.
-    //
-    // Pass the *full* command (not just the base name): every subcommand-routed
-    // formatter — `git status`, `cargo test`, `rake test`, `go test` — needs the
-    // subcommand to dispatch. `format_command` splits and strips the path itself,
-    // so a base-name-only label silently skipped those formatters in the live
-    // hook (they only fired in unit tests / the MCP path). The command is a
-    // simple command here (compound commands bailed out above via
-    // `has_shell_operators`), so quoting it as one arg is safe.
     let is_powershell = matches!(tool_name, "PowerShell" | "powershell" | "pwsh");
     let rewritten = if is_powershell {
+        // PowerShell pipes objects, so only plain commands are rewritten.
+        if is_interactive_command(command) || has_shell_operators(command) {
+            return Ok(passthrough(platform, input));
+        }
         crate::exit_marker::powershell_rewrite(command, &shell_escape(command))
     } else {
-        crate::exit_marker::posix_rewrite(command, &shell_escape(command))
+        match crate::shell_scan::plan(command) {
+            Ok(plan) => posix_rewrite_plan(&plan),
+            Err(_) => return Ok(passthrough(platform, input)),
+        }
     };
 
     // Claude Code's updatedInput REPLACES the whole input object (per
@@ -1883,6 +1868,61 @@ fn shell_escape(s: &str) -> String {
     }
 }
 
+/// What a hook returns when it leaves the tool call alone. Cursor and
+/// Copilot need a JSON object on every path.
+fn passthrough(platform: HookPlatform, input: &str) -> String {
+    match platform {
+        HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
+        _ => input.to_string(),
+    }
+}
+
+/// Background, async or detached shell calls, under each client's name
+/// for the flag.
+fn runs_in_background(parsed: &serde_json::Value) -> bool {
+    let Some(args) = parsed
+        .get("tool_input")
+        .or_else(|| parsed.get("toolArgs"))
+        .or_else(|| parsed.get("args"))
+    else {
+        return false;
+    };
+    ["run_in_background", "is_background", "background", "async", "detach"]
+        .iter()
+        .any(|k| args.get(k).and_then(|v| v.as_bool()) == Some(true))
+        || args.get("mode").and_then(|v| v.as_str()) == Some("async")
+}
+
+/// The POSIX rewrite for a command `shell_scan` accepted.
+fn posix_rewrite_plan(plan: &crate::shell_scan::Plan<'_>) -> String {
+    let grouped = if plan.simple {
+        // The full command is the label so subcommand formatters
+        // (`git status`, `cargo test`) dispatch.
+        let cmd = plan.body.trim();
+        let label = cmd.strip_suffix(" 2>&1").map_or(cmd, str::trim_end);
+        crate::exit_marker::posix_rewrite(cmd, &shell_escape(label))
+    } else {
+        crate::exit_marker::posix_rewrite_list(plan.body, &shell_escape(&list_label(plan.body)))
+    };
+    if plan.prefix.is_empty() {
+        grouped
+    } else {
+        format!("{} {grouped}", plan.prefix)
+    }
+}
+
+/// Label for a list or pipeline. The `sh:` prefix keeps per-command
+/// formatters off output that is partial or comes from several commands.
+fn list_label(body: &str) -> String {
+    let first = body.trim().lines().next().unwrap_or("");
+    let label = format!("sh: {}", first.split_whitespace().collect::<Vec<_>>().join(" "));
+    if label.chars().count() > 100 {
+        format!("{}…", label.chars().take(99).collect::<String>())
+    } else {
+        label
+    }
+}
+
 /// Check if a command contains shell operators that would break piping.
 /// Commands with these operators are passed through uncompressed rather
 /// than risk incorrect behavior.
@@ -1943,23 +1983,76 @@ mod tests {
 
     #[test]
     fn test_copilot_hook_skips_risky_shell_operators() {
-        let input = r#"{"toolName":"bash","toolArgs":{"command":"make && make install"}}"#;
-        let result = process_hook_copilot(input).unwrap();
-        assert_eq!(result, "{}", "compound commands must not be rewritten");
+        // Copilot keeps one shell per session, so state changes must not
+        // move into a subshell.
+        for command in ["source .venv/bin/activate && pytest", "npm run build &"] {
+            let input = serde_json::json!({"toolName": "bash", "toolArgs": {"command": command}}).to_string();
+            assert_eq!(process_hook_copilot(&input).unwrap(), "{}", "{command}");
+        }
     }
 
     #[test]
     fn test_claude_updated_input_preserves_sibling_fields() {
         // Claude Code's updatedInput replaces the whole input object, so
         // run_in_background / timeout / description must survive the rewrite.
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":"cargo test","run_in_background":true,"timeout":120000,"description":"Run tests"}}"#;
+        let input = r#"{"tool_name":"Bash","tool_input":{"command":"cargo test","run_in_background":false,"timeout":120000,"description":"Run tests"}}"#;
         let result = process_hook(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let updated = &parsed["hookSpecificOutput"]["updatedInput"];
         assert!(updated["command"].as_str().unwrap().contains("sqz compress"));
-        assert_eq!(updated["run_in_background"], true);
+        assert_eq!(updated["run_in_background"], false);
         assert_eq!(updated["timeout"], 120000);
         assert_eq!(updated["description"], "Run tests");
+    }
+
+    fn rewritten(input: &str) -> Option<String> {
+        let out: serde_json::Value = serde_json::from_str(&process_hook(input).unwrap()).unwrap();
+        out.pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .map(str::to_string)
+    }
+
+    fn bash(command: &str) -> String {
+        serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}}).to_string()
+    }
+
+    #[test]
+    fn background_calls_pass_through() {
+        for input in [
+            r#"{"tool_name":"Bash","tool_input":{"command":"cargo build","run_in_background":true}}"#,
+            r#"{"tool_name":"run_shell_command","tool_input":{"command":"cargo build","is_background":true}}"#,
+            r#"{"toolName":"bash","toolArgs":{"command":"cargo build","mode":"async"}}"#,
+        ] {
+            assert_eq!(rewritten(input), None, "{input}");
+        }
+    }
+
+    #[test]
+    fn lists_and_pipelines_are_grouped_with_a_generic_label() {
+        let cmd = rewritten(&bash("cargo test 2>&1 | tail -30")).unwrap();
+        assert_eq!(
+            cmd,
+            "{ cargo test 2>&1 | tail -30\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: cargo test 2>&1 | tail -30'"
+        );
+        // A trailing comment no longer swallows the closing brace.
+        let cmd = rewritten(&bash("ls # list")).unwrap();
+        assert!(cmd.starts_with("{ ls # list\nprintf"), "{cmd}");
+    }
+
+    #[test]
+    fn leading_cd_runs_outside_the_group() {
+        let cmd = rewritten(&bash("cd sqz_engine && cargo test 2>&1")).unwrap();
+        assert_eq!(
+            cmd,
+            "cd sqz_engine && { cargo test 2>&1 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } | sqz compress --cmd 'cargo test'"
+        );
+    }
+
+    #[test]
+    fn state_changes_and_followers_pass_through() {
+        for command in ["export X=1 && make", "make && cd build", "tail -f app.log", "make &", "git log | sqz compress"] {
+            assert_eq!(rewritten(&bash(command)), None, "{command}");
+        }
     }
 
     #[test]
@@ -2467,7 +2560,13 @@ mod tests {
             }
             let configs = generate_hook_configs("sqz");
             let config = configs.iter().find(|c| &c.tool_name == name).unwrap();
-            let path = dir.path().join(&config.config_path);
+            // With user-level Kiro steering on this machine, project scope
+            // writes only the MCP config.
+            let path = if name == "Kiro" && crate::kiro_integration::user_steering_installed() {
+                dir.path().join(".kiro/settings/mcp.json")
+            } else {
+                dir.path().join(&config.config_path)
+            };
             assert!(path.exists(), "hook config should exist: {}", path.display());
         }
     }

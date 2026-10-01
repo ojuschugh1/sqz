@@ -1158,9 +1158,12 @@ mod tests {
     #[test]
     fn classifies_by_client() {
         let out = |tool: &str, label: &str| ToolOutput { tool: tool.into(), label: label.into(), text: "x".into() };
-        // Claude Code's hook rewrites simple commands, not pipes.
+        // Claude Code's hook rewrites commands and pipelines, not ones that
+        // change shell state or follow a log.
         assert_eq!(classify(Client::ClaudeCode, &out("Bash", "git status")), Reach::ShellHooked);
-        assert_eq!(classify(Client::ClaudeCode, &out("Bash", "git log | head")), Reach::Shell);
+        assert_eq!(classify(Client::ClaudeCode, &out("Bash", "git log | head")), Reach::ShellHooked);
+        assert_eq!(classify(Client::ClaudeCode, &out("Bash", "export X=1 && make")), Reach::Shell);
+        assert_eq!(classify(Client::ClaudeCode, &out("Bash", "tail -f app.log")), Reach::Shell);
         // Kiro has no rewrite hook at all.
         assert_eq!(classify(Client::KiroIde, &out("execute_bash", "git status")), Reach::Shell);
         assert_eq!(classify(Client::KiroIde, &out("execute_bash", "git diff 2>&1 | sqz compress")), Reach::AlreadySqz);

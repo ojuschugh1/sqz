@@ -24,6 +24,15 @@ pub fn posix_rewrite(command: &str, escaped_label: &str) -> String {
     )
 }
 
+/// The form for a list or pipeline. The newline before `printf` ends a
+/// trailing comment or heredoc, and the group's `2>&1` covers every
+/// command in it.
+pub fn posix_rewrite_list(body: &str, escaped_label: &str) -> String {
+    format!(
+        "{{ {body}\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; }} 2>&1 | sqz compress --cmd {escaped_label}"
+    )
+}
+
 /// Build the PowerShell form. Native commands set `$LASTEXITCODE`;
 /// cmdlets set only `$?`, so fall back to that. The `$(...)`
 /// subexpression keeps the trailing `__` out of the variable name.
@@ -44,33 +53,44 @@ pub fn powershell_rewrite(command: &str, escaped_label: &str) -> String {
 /// digits, and sit at the very end of the stream. A command whose real
 /// output happens to contain the string mid-stream is left alone.
 pub fn strip_exit_marker(input: &str) -> (String, Option<i32>) {
-    const PREFIX: &str = "__SQZ_EXIT_";
-    const SUFFIX: &str = "__";
+    let (head, code) = strip_exit_marker_bytes(input.as_bytes());
+    // `head` is a prefix of `input` that ends before an ASCII newline.
+    (input[..head.len()].to_string(), code)
+}
+
+/// [`strip_exit_marker`] for output that isn't valid UTF-8.
+pub fn strip_exit_marker_bytes(input: &[u8]) -> (&[u8], Option<i32>) {
+    const PREFIX: &[u8] = b"__SQZ_EXIT_";
+    const SUFFIX: &[u8] = b"__";
 
     // Peel trailing newlines (the producer emits a trailing \n; PowerShell
     // may emit \r\n) to expose the marker line.
-    let trimmed = input.trim_end_matches(['\n', '\r']);
-    let line_start = trimmed.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let last_line = trimmed[line_start..].trim_end_matches('\r');
-
-    let Some(rest) = last_line.strip_prefix(PREFIX) else {
-        return (input.to_string(), None);
-    };
-    let Some(digits) = rest.strip_suffix(SUFFIX) else {
-        return (input.to_string(), None);
-    };
-    if digits.is_empty() || digits.len() > 10 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return (input.to_string(), None);
+    let mut end = input.len();
+    while end > 0 && matches!(input[end - 1], b'\n' | b'\r') {
+        end -= 1;
     }
-    let Ok(code) = digits.parse::<i32>() else {
-        return (input.to_string(), None);
+    let trimmed = &input[..end];
+    let line_start = trimmed.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let last_line = &trimmed[line_start..];
+
+    let Some(digits) = last_line.strip_prefix(PREFIX).and_then(|r| r.strip_suffix(SUFFIX)) else {
+        return (input, None);
+    };
+    if digits.is_empty() || digits.len() > 10 || !digits.iter().all(u8::is_ascii_digit) {
+        return (input, None);
+    }
+    let Some(code) = std::str::from_utf8(digits).ok().and_then(|d| d.parse::<i32>().ok()) else {
+        return (input, None);
     };
 
     // Drop the marker line plus the single separator newline the producer
     // prepended (`printf '\n…'`), restoring the original bytes exactly.
     let mut head = &trimmed[..line_start];
-    head = head.strip_suffix("\r\n").or_else(|| head.strip_suffix('\n')).unwrap_or(head);
-    (head.to_string(), Some(code))
+    head = head
+        .strip_suffix(b"\r\n")
+        .or_else(|| head.strip_suffix(b"\n"))
+        .unwrap_or(head);
+    (head, Some(code))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -144,6 +164,22 @@ mod tests {
         assert_eq!(
             r,
             "{ git status 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } | sqz compress --cmd 'git status'"
+        );
+    }
+
+    #[test]
+    fn strips_marker_from_binary_output() {
+        let input = b"\xff\xfe\x00raw\n\n__SQZ_EXIT_3__\n";
+        assert_eq!(strip_exit_marker_bytes(input), (&b"\xff\xfe\x00raw\n"[..], Some(3)));
+        let plain = b"\xff no marker";
+        assert_eq!(strip_exit_marker_bytes(plain), (&plain[..], None));
+    }
+
+    #[test]
+    fn list_rewrite_shape() {
+        assert_eq!(
+            posix_rewrite_list("ls # all", "'sh: ls # all'"),
+            "{ ls # all\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: ls # all'"
         );
     }
 

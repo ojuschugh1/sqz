@@ -1152,25 +1152,31 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
 /// wins if both are set.
 fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: bool, cmd: Option<String>, no_abbrev: bool) {
     let is_stdin = text.is_none();
-    let input = match text {
-        Some(t) => t,
+    // Hook rewrites append the command's exit status as a trailer;
+    // strip it and re-raise it as our own exit code on every path out.
+    let (input, marker_exit) = match text {
+        Some(t) => (t, None),
         None => {
             use std::io::Read;
-            let mut buf = String::new();
-            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+            let mut raw = Vec::new();
+            if let Err(e) = std::io::stdin().read_to_end(&mut raw) {
                 eprintln!("[sqz] stdin read error: {e}");
                 std::process::exit(1);
             }
-            buf
+            match String::from_utf8(raw) {
+                Ok(text) => sqz_engine::strip_exit_marker(&text),
+                // Not text: hand the bytes back as they came.
+                Err(e) => {
+                    use std::io::Write;
+                    let raw = e.into_bytes();
+                    let (bytes, code) = sqz_engine::strip_exit_marker_bytes(&raw);
+                    let mut out = std::io::stdout().lock();
+                    let _ = out.write_all(bytes);
+                    let _ = out.flush();
+                    std::process::exit(code.unwrap_or(0));
+                }
+            }
         }
-    };
-
-    // Hook rewrites append the command's exit status as a trailer;
-    // strip it and re-raise it as our own exit code on every path out.
-    let (input, marker_exit) = if is_stdin {
-        sqz_engine::strip_exit_marker(&input)
-    } else {
-        (input, None)
     };
     let finish = |code: Option<i32>| {
         if let Some(c) = code {

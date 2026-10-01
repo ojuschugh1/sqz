@@ -51,8 +51,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   included) are new, and Kiro CLI shell and MCP results, which the 1.9.0
   parser skipped because they are JSON items, are read.
 
+- **The shell hook rewrites pipes, lists, loops and heredocs.** It
+  skipped any command containing `|`, `&&`, `;`, `>` or `<<`, which left
+  71% of one machine's 11,203 real agent commands uncompressed. A
+  quote-aware scanner now pipes the whole command through sqz as one
+  group, keeps a leading `cd dir &&` outside it so the directory change
+  sticks, and leaves alone anything that changes shell state (`export`,
+  `source`, `set`, a later `cd`), backgrounds a job, follows output
+  (`tail -f`, `docker logs -f`, `kubectl get -w`) or runs a server
+  (`npm run dev`, `rails s`, `docker compose up` without `-d`). On
+  those commands the share rewritten went from 28.7% to 96.2%, and every
+  rewrite parses in bash and zsh wherever the original did. Lists and
+  pipelines skip the per-command formatters, since their output is
+  partial or comes from several commands. `python` and `node` running a
+  script, `-c` code or `-m` module are rewritten too; bare REPLs, `-i`
+  and dev servers still aren't.
+
 ### Fixed
 
+- **A trailing `# comment` broke the rewritten command.** The comment
+  ran on over the closing `}` of the group, so the shell hit end of
+  file instead of running the command.
+- **Background tool calls are no longer piped through sqz.** Claude
+  Code's `run_in_background`, Gemini's `is_background` and async calls
+  stream their output while they run; through sqz nothing showed until
+  the command exited, so a server started in the background looked
+  dead.
+- **`sqz compress` passes binary output through.** Input that wasn't
+  UTF-8 made it print a read error and exit 1, losing the output. It now
+  writes the bytes back unchanged and exits with the command's status.
+- **The OpenCode plugin keeps the command's exit status.** Its rewrite,
+  `cmd 2>&1 | sqz compress`, exits with sqz's status, so a failing
+  command reported success. Outside Windows it now uses the exit-status
+  trailer the other hooks use; Windows keeps the old form because
+  PowerShell and cmd.exe can't run it.
 - **`sqz_list_dir` listed two levels by default.** Its schema says
   `max_depth` 1 means the immediate children; it now does.
 - **The `compress` MCP tool cut its input to 500 characters.** It
