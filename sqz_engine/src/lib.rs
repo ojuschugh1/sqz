@@ -148,7 +148,7 @@ pub use simhash::{simhash, SimHashFingerprint};
 pub use structural_summary::{summarize as structural_summarize, summarize_multi, SummaryConfig, StructuralSummaryResult};
 pub use textrank::{textrank_compress, TextRankConfig, TextRankResult};
 pub use mdl_selector::{select_stages, profile_content, ContentProfile, MdlSelection};
-pub use tool_hooks::{process_hook, process_hook_cursor, process_hook_gemini, process_hook_kiro, process_hook_windsurf, process_hook_copilot, generate_hook_configs, install_tool_hooks, install_tool_hooks_scoped, install_tool_hooks_scoped_filtered, claude_user_settings_path, claude_project_settings_needs_update, remove_claude_global_hook, copilot_hooks_path, install_copilot_hook, remove_copilot_hook, ci_hooks_path, ci_hook_content, install_ci_hook, remove_ci_hook, canonicalize_tool_name, parse_tool_list, InstallScope, ToolFilter, ToolHookConfig, HookScope, HookPlatform, SUPPORTED_TOOL_NAMES};
+pub use tool_hooks::{process_hook, process_hook_cursor, process_hook_gemini, process_hook_kiro, process_hook_windsurf, process_hook_copilot, generate_hook_configs, install_tool_hooks, install_tool_hooks_scoped, install_tool_hooks_scoped_filtered, claude_user_settings_path, claude_project_settings_needs_update, remove_claude_global_hook, copilot_hooks_path, install_copilot_hook, remove_copilot_hook, ci_hooks_path, ci_hook_content, install_ci_hook, remove_ci_hook, canonicalize_tool_name, parse_tool_list, integration_tier, InstallScope, IntegrationTier, ToolFilter, ToolHookConfig, HookScope, HookPlatform, SUPPORTED_TOOL_NAMES};
 pub use opencode_plugin::{
     generate_opencode_plugin, install_opencode_plugin, update_opencode_config,
     update_opencode_config_detailed, find_opencode_config,
@@ -174,9 +174,11 @@ pub use zed_integration::{
     zed_mcp_snippet, zed_settings_path, ZedMcpInstall, ZedMcpRemove,
 };
 pub use kiro_integration::{
-    install_kiro_mcp_config, install_kiro_steering, kiro_legacy_hook_path,
-    kiro_mcp_path, kiro_steering_path, remove_kiro_legacy_hook,
+    install_kiro_mcp_config, install_kiro_steering, install_kiro_user_steering,
+    kiro_legacy_hook_path, kiro_mcp_path, kiro_steering_path, kiro_steering_state,
+    kiro_user_steering_path, refresh_kiro_steering, remove_kiro_legacy_hook,
     remove_kiro_mcp_config, remove_kiro_steering, KiroMcpInstall, KiroMcpRemove,
+    SteeringState,
 };
 pub use token_pruner::{TokenPruner, PrunerConfig, PruneResult};
 pub use tool_selector::{ToolDefinition, ToolSelector};

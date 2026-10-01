@@ -631,6 +631,12 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             if rc_exists { "append shell hook".to_string() } else { "create with shell hook".to_string() },
             !rc_exists,
         ));
+    } else if hook.needs_refresh() {
+        plan.push((
+            rc_path.display().to_string(),
+            "refresh sqz shell helpers (block between sqz markers only)".to_string(),
+            false,
+        ));
     }
 
     // Default preset
@@ -822,7 +828,9 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
                 && std::fs::read_to_string(&steering)
                     .map(|s| s == expected_content)
                     .unwrap_or(false);
-            if !steering_current {
+            let covered_by_user_level = scope != sqz_engine::InstallScope::Global
+                && sqz_engine::kiro_integration::user_steering_installed();
+            if !steering_current && !covered_by_user_level {
                 let user_owned = steering.exists()
                     && std::fs::read_to_string(&steering)
                         .map(|s| !s.contains("sqz-kiro-steering"))
@@ -1048,7 +1056,11 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             }
         }
     } else {
-        println!("[sqz] ✓ shell hook already present in {}", rc_path.display());
+        match hook.refresh() {
+            Ok(true) => println!("[sqz] ✓ shell helpers refreshed in {}", rc_path.display()),
+            Ok(false) => println!("[sqz] ✓ shell hook already present in {}", rc_path.display()),
+            Err(e) => eprintln!("[sqz] ✗ warning: could not refresh shell helpers: {e}"),
+        }
     }
 
     // Shell completions (silent, non-critical)

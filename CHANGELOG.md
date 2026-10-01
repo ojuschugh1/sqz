@@ -7,18 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`sqz doctor` shows the integration tier of every client.**
+  Transparent clients (Claude Code, Copilot CLI, Gemini CLI, OpenCode)
+  have a hook that routes shell commands through sqz on its own.
+  Advisory clients (Kiro, Cursor, Windsurf, Cline, Codex, Zed) can't let
+  sqz rewrite tool calls, so sqz saves tokens there only when the agent
+  chooses to pipe output through `sqz compress` or call the sqz MCP
+  tools; their built-in shell and file tools bypass it. Before this,
+  doctor showed both as "configured", which is how "sqz saves nothing in
+  my Kiro sessions" looked like a bug instead of a limit.
+- **Doctor reports what sqz adds to every model request**: the size of
+  the installed sqz-mcp tool definitions and every copy of sqz guidance
+  Kiro loads (user and project steering, AGENTS.md blocks).
+- **`sqz init` no longer writes project-level Kiro steering when the
+  user-level copy exists.** Kiro applies `~/.kiro/steering` to every
+  workspace, so the project copy was the same guidance sent twice.
+
 ### Fixed
 
-- **`sqz doctor` detects and repairs inflated log rows.** sqz-mcp 1.6.x
-  counted `tokens_original` with chars/4 and `tokens_compressed` with
-  the BPE tokenizer, so a byte-faithful `sqz_grep` result could log as
-  1.6x its input; two such rows on one machine pushed the all-time
-  total 250K tokens negative, which `sqz stats` and `doctor` then
-  rendered as "0 tokens saved". Doctor now flags rows where compressed
-  exceeds 1.5x original on inputs of 100+ tokens, says so instead of
-  printing zero, and `sqz doctor --fix` backs up the database to
-  `<db>.bak-<date>` and removes them. The estimator itself was fixed
-  in 1.8.0; this cleans up what it wrote.
+- **`sqz doctor --fix` repairs log rows written by the pre-1.8.0
+  token estimator.** sqz-mcp before 1.8.0 counted a read tool's input
+  with chars/4 and its output with the BPE tokenizer, so verbatim
+  `sqz_read_file` / `sqz_grep` / `sqz_list_dir` results logged as larger
+  than their input; on one machine this pushed the all-time total
+  negative, which `sqz stats` rendered as "0 tokens saved". `--fix` now
+  raises the input count to the real output count, recording those calls
+  as saving nothing, instead of deleting them (the version of this fix
+  that never shipped deleted the rows, which also dropped their real
+  volume from the totals). The database is backed up first with
+  `VACUUM INTO`, which includes writes still in the WAL.
+- **Doctor and `--fix` handle stale and duplicate Kiro steering.**
+  Steering written by an older sqz is refreshed in place, keeping the
+  binary path it points at; a project copy next to the user-level one is
+  removed. Files without the sqz marker are never touched.
+- **The shell block no longer overrides your own `preexec` or DEBUG
+  trap.** The zsh block defined a `preexec()` function and the bash block
+  installed `trap … DEBUG`; both only exported a variable nothing read,
+  and both replaced any hook of the same kind defined earlier in the rc
+  file. `sqz init` and `sqz doctor --fix` rewrite the sqz block in place,
+  touching only the lines between its markers.
+- **Doctor no longer reports a missing shell block as lost savings.** The
+  block only defines the optional `sqz_run` helper and compresses
+  nothing on its own.
+- **`test_init_exits_zero` ran `sqz init` against the real HOME and this
+  repository**, which rewrote the developer's shell rc during `cargo
+  test`. It now runs in a throwaway HOME and project.
 
 ## [1.9.0] — 2026-09-23
 

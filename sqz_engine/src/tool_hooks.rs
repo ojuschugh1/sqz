@@ -838,6 +838,26 @@ pub const SUPPORTED_TOOL_NAMES: &[&str] = &[
     "Copilot CLI",
 ];
 
+/// How sqz reaches a client's tool output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrationTier {
+    /// A hook rewrites shell tool calls before they run, so output is
+    /// compressed without the agent's help.
+    Transparent,
+    /// sqz can only ask: guidance files plus MCP tools the agent has to
+    /// choose to call. The client's built-in shell and read tools bypass it.
+    Advisory,
+}
+
+/// Which tier sqz's integration for `tool_name` falls in. Keep in step
+/// with what [`generate_hook_configs`] actually installs.
+pub fn integration_tier(tool_name: &str) -> IntegrationTier {
+    match canonicalize_tool_name(tool_name).as_str() {
+        "claudecode" | "copilot" | "gemini" | "opencode" => IntegrationTier::Transparent,
+        _ => IntegrationTier::Advisory,
+    }
+}
+
 /// Path of the user-level Copilot CLI hooks file sqz manages.
 /// Honors `COPILOT_HOME` the same way the CLI does.
 pub fn copilot_hooks_path() -> PathBuf {
@@ -1253,8 +1273,9 @@ pub fn install_tool_hooks_scoped_filtered(
                 );
                 (steering, mcp)
             } else {
-                let steering =
-                    crate::kiro_integration::install_kiro_steering(project_dir, sqz_path)
+                // The user-level copy already reaches this workspace.
+                let steering = !crate::kiro_integration::user_steering_installed()
+                    && crate::kiro_integration::install_kiro_steering(project_dir, sqz_path)
                         .unwrap_or(false);
                 let mcp = matches!(
                     crate::kiro_integration::install_kiro_mcp_config(project_dir),

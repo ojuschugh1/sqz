@@ -421,11 +421,38 @@ fn test_toon_output_is_ascii_safe() {
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
+/// Run `sqz init` with HOME, every client config root, the database and the
+/// project directory pointed at throwaway dirs, so the test can't touch the
+/// developer's real shell rc, agent configs or this repo.
+fn run_init_sandboxed(home: &std::path::Path, project: &std::path::Path) -> Output {
+    Command::new(sqz_bin())
+        .args(["init", "--yes"])
+        .current_dir(project)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("SHELL", "/bin/zsh")
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("APPDATA", home.join("AppData"))
+        .env("KIRO_HOME", home.join(".kiro"))
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("COPILOT_HOME", home.join(".copilot"))
+        .env("SQZ_DB_PATH", home.join("sessions.db"))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to run sqz init")
+}
+
 #[test]
 fn test_init_exits_zero() {
-    // init may already be done; it should be idempotent
-    let o = run(&["init"]);
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let o = run_init_sandboxed(home.path(), project.path());
     assert!(o.status.success(), "sqz init should exit 0: {}", stderr(&o));
+    // Idempotent: a second run succeeds and leaves one shell block.
+    let o = run_init_sandboxed(home.path(), project.path());
+    assert!(o.status.success(), "second sqz init should exit 0: {}", stderr(&o));
+    let rc = std::fs::read_to_string(home.path().join(".zshrc")).unwrap();
+    assert_eq!(rc.matches("# sqz — context intelligence layer").count(), 1);
 }
 
 // ── dashboard ─────────────────────────────────────────────────────────────────

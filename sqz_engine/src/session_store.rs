@@ -38,6 +38,11 @@ pub struct SessionStore {
     db: Connection,
 }
 
+/// Log rows written by the verbatim MCP read tools whose output count
+/// exceeds their input count. See [`SessionStore::inflated_rows`].
+const INFLATED_ROW_FILTER: &str = "mode IN ('sqz_read_file', 'sqz_grep', 'sqz_list_dir') \
+     AND tokens_compressed > tokens_original";
+
 // ── Schema ────────────────────────────────────────────────────────────────────
 
 const SCHEMA: &str = r#"
@@ -1057,49 +1062,43 @@ impl SessionStore {
         Ok(stats)
     }
 
-    /// Rows where the logged compressed size exceeds the original by more
-    /// than `ratio` (e.g. 1.5 = 50% larger). A 13-token ref replacing a
-    /// 5-token output is normal; a byte-faithful grep result logging as
-    /// 1.6x its input is a token-estimator bug writing garbage (sqz-mcp
-    /// 1.6.x mixed chars/4 with a BPE count). Returns (count, inflation
-    /// in tokens, the worst offending mode) so callers can flag it.
-    pub fn inflated_rows(&self, ratio: f64) -> Result<(u32, u64, Option<String>)> {
-        let mut stmt = self
+    /// Rows from the MCP read tools that record their output as larger
+    /// than their input. Those tools serve content verbatim, so this can't
+    /// be real: sqz-mcp before 1.8.0 counted the input with chars/4 and the
+    /// output with the BPE tokenizer. The output count is the accurate one.
+    /// Returns (rows, tokens by which they understate the saved total).
+    pub fn inflated_rows(&self) -> Result<(u32, u64)> {
+        let sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(tokens_compressed - tokens_original), 0) \
+             FROM compression_log WHERE {INFLATED_ROW_FILTER}"
+        );
+        let (count, inflation): (u32, i64) = self
             .db
-            .prepare(
-                "SELECT COUNT(*), COALESCE(SUM(tokens_compressed - tokens_original), 0) \
-                 FROM compression_log \
-                 WHERE tokens_original >= 100 AND tokens_compressed > tokens_original * ?1",
-            )
+            .query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(SqzError::SessionStore)?;
-        let (count, inflation): (u32, i64) = stmt
-            .query_row(params![ratio], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(SqzError::SessionStore)?;
-        if count == 0 {
-            return Ok((0, 0, None));
-        }
-        let worst: Option<String> = self
-            .db
-            .query_row(
-                "SELECT mode FROM compression_log \
-                 WHERE tokens_original >= 100 AND tokens_compressed > tokens_original * ?1 \
-                 GROUP BY mode ORDER BY SUM(tokens_compressed - tokens_original) DESC LIMIT 1",
-                params![ratio],
-                |row| row.get(0),
-            )
-            .ok();
-        Ok((count, inflation.max(0) as u64, worst))
+        Ok((count, inflation.max(0) as u64))
     }
 
-    /// Delete the rows [`inflated_rows`] would return. Returns the count.
-    pub fn delete_inflated_rows(&self, ratio: f64) -> Result<usize> {
+    /// Write a consistent copy of the database to `dest`. Unlike copying the
+    /// file, this includes transactions still sitting in the WAL. Fails if
+    /// `dest` already exists.
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
         self.db
-            .execute(
-                "DELETE FROM compression_log \
-                 WHERE tokens_original >= 100 AND tokens_compressed > tokens_original * ?1",
-                params![ratio],
-            )
-            .map_err(SqzError::SessionStore)
+            .execute("VACUUM INTO ?1", params![dest.to_string_lossy()])
+            .map_err(SqzError::SessionStore)?;
+        Ok(())
+    }
+
+    /// Correct the rows [`inflated_rows`] reports, in place: raise the
+    /// input count to the output count. The call keeps its real volume and
+    /// is recorded as saving nothing, which is what a verbatim read saves.
+    /// Returns the number of rows changed.
+    pub fn clamp_inflated_rows(&self) -> Result<usize> {
+        let sql = format!(
+            "UPDATE compression_log SET tokens_original = tokens_compressed \
+             WHERE {INFLATED_ROW_FILTER}"
+        );
+        self.db.execute(&sql, []).map_err(SqzError::SessionStore)
     }
 
     /// Get daily compression gains for the last N days.
@@ -1696,35 +1695,56 @@ mod tests {
     }
 
     #[test]
-    fn inflated_rows_finds_estimator_garbage_but_not_refs_on_tiny_output() {
+    fn backup_to_captures_wal_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("live.db");
+        let store = SessionStore::open_or_create(&db).unwrap();
+        store.log_compression(900, 100, &[], "auto").unwrap();
+        // The row may still be in the WAL; a plain file copy can miss it.
+        let backup = dir.path().join("live.db.bak");
+        store.backup_to(&backup).unwrap();
+        let restored = SessionStore::open_or_create(&backup).unwrap();
+        assert_eq!(restored.compression_stats().unwrap().total_tokens_in, 900);
+        assert!(store.backup_to(&backup).is_err(), "never overwrites an existing file");
+    }
+
+    #[test]
+    fn inflated_rows_are_clamped_not_deleted() {
         let store = in_memory_store();
         // Normal compression.
         store.log_compression(1000, 400, &[], "auto").unwrap();
-        // A 13-token ref replacing a 5-token output: legitimately larger,
-        // but below the 100-token floor, so not garbage.
+        // A 13-token ref replacing a 5-token output really is larger, and
+        // comes from a mode that compresses, so it stays as recorded.
         store.log_compression(5, 13, &[], "dedup").unwrap();
-        // Slightly larger on a real input: under the ratio, not flagged.
+        store.log_compression(300, 340, &[], "auto").unwrap();
+        // The pre-1.8 MCP read-tool pattern: verbatim output logged larger.
         store.log_compression(200, 230, &[], "sqz_read_file").unwrap();
-        // The 1.6.x sqz_grep pattern: byte-faithful output logged at 1.66x.
         store.log_compression(655_870, 1_091_993, &[], "sqz_grep").unwrap();
         store.log_compression(38_382, 60_919, &[], "sqz_grep").unwrap();
+        // A verbatim read logged correctly is left alone.
+        store.log_compression(500, 500, &[], "sqz_list_dir").unwrap();
 
-        let (count, inflation, worst) = store.inflated_rows(1.5).unwrap();
-        assert_eq!(count, 2);
-        assert_eq!(inflation, (1_091_993 - 655_870) + (60_919 - 38_382));
-        assert_eq!(worst.as_deref(), Some("sqz_grep"));
+        let (count, inflation) = store.inflated_rows().unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(inflation, 30 + (1_091_993 - 655_870) + (60_919 - 38_382));
 
         let stats = store.compression_stats().unwrap();
         assert!(stats.is_net_negative(), "garbage rows push the total negative");
         assert_eq!(stats.tokens_saved(), 0, "saturating_sub hides it as zero");
 
-        assert_eq!(store.delete_inflated_rows(1.5).unwrap(), 2);
-        let (count, _, _) = store.inflated_rows(1.5).unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(store.clamp_inflated_rows().unwrap(), 3);
+        assert_eq!(store.inflated_rows().unwrap(), (0, 0));
+        assert_eq!(store.clamp_inflated_rows().unwrap(), 0, "idempotent");
+
         let stats = store.compression_stats().unwrap();
         assert!(!stats.is_net_negative());
-        assert_eq!(stats.total_compressions, 3);
-        assert_eq!(stats.tokens_saved(), 1000 + 5 + 200 - 400 - 13 - 230);
+        assert_eq!(stats.total_compressions, 7, "no row is deleted");
+        // The real volume of the big grep stays in the totals.
+        assert_eq!(
+            stats.total_tokens_in,
+            1000 + 5 + 300 + 230 + 1_091_993 + 60_919 + 500
+        );
+        assert_eq!(stats.tokens_saved(), (1000 - 400) + (300 + 5) - (340 + 13));
     }
 
     #[test]

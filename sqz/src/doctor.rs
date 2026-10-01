@@ -1,24 +1,29 @@
 //! `sqz doctor` — deployment validator.
 //!
 //! `sqz init` writes configs; doctor answers the question that comes a
-//! week later: "is sqz actually doing anything?" It checks three layers
+//! week later: "is sqz actually doing anything?" It checks four layers
 //! and reports the gaps between them:
 //!
-//! 1. **Installation** — binary version, database path, writability.
-//! 2. **Wiring** — shell hook in the rc file, per-client sqz configs
-//!    (project and, where sqz manages one, user-level).
-//! 3. **Activity** — compressions logged recently. Installed-but-idle is
-//!    the failure mode users actually hit (hook not firing, AI tool not
-//!    restarted), and a binary-exists check can't see it.
+//! 1. **Installation** — binary version, database, shell helpers.
+//! 2. **Wiring** — per-client sqz configs (project and user level), and
+//!    which tier each integration is in. A transparent client routes shell
+//!    output through sqz on its own; an advisory one only saves tokens
+//!    when the agent chooses to call sqz.
+//! 3. **Overhead** — what sqz itself adds to every model request (MCP tool
+//!    definitions, guidance files), including duplicate and stale copies.
+//! 4. **Activity** — compressions logged recently, and log rows a past
+//!    bug wrote wrongly.
 //!
 //! Client detection is best-effort by footprint (config dir or binary on
-//! PATH) and says so; Cline has no reliable machine-level footprint and
-//! reports "unknown" unless a project config exists.
+//! PATH); Cline has no reliable machine-level footprint.
 //!
 //! Exit codes: 0 = healthy, 1 = actionable problems found, 2 = sqz itself
 //! is broken (database unreadable).
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use sqz_engine::{IntegrationTier, SteeringState};
 
 use crate::shell_hook::ShellHook;
 
@@ -65,6 +70,7 @@ pub struct ToolStatus {
     pub only_flag: &'static str,
     pub client: Detection,
     pub config: ConfigScope,
+    pub tier: IntegrationTier,
 }
 
 /// A diagnosed problem plus the command that fixes it, when one exists.
@@ -83,29 +89,36 @@ pub struct Activity {
     pub last7_saved: u64,
     /// Aggregate output exceeds aggregate input: the log has bad rows.
     pub net_negative: bool,
-    /// Rows where compressed > 1.5x original on inputs of 100+ tokens,
-    /// and the tokens they inflate the total by. Legit refs never do
-    /// this; a mismatched token estimator does.
+    /// MCP read-tool rows logged as larger than their input (pre-1.8
+    /// estimator bug), and the tokens they hide from the saved total.
     pub inflated_rows: u32,
     pub inflated_tokens: u64,
 }
 
-/// Ratio above which a row is considered estimator garbage rather than a
-/// legitimately-larger output. Refs on tiny outputs sit well below it
-/// because the 100-token floor excludes them.
-pub const INFLATION_RATIO: f64 = 1.5;
+/// State of the sqz-managed guidance and shell files doctor can repair.
+#[derive(Debug, Clone, Copy)]
+pub struct Managed {
+    pub kiro_global: SteeringState,
+    pub kiro_project: SteeringState,
+    pub shell_block_stale: bool,
+}
+
+impl Managed {
+    fn kiro_duplicate(&self) -> bool {
+        is_managed(self.kiro_global) && is_managed(self.kiro_project)
+    }
+}
+
+fn is_managed(state: SteeringState) -> bool {
+    matches!(state, SteeringState::Current | SteeringState::Stale)
+}
+
+const FIX_CMD: &str = "sqz doctor --fix";
 
 /// Pure diagnosis over collected state. Separated from collection and
 /// rendering so the rules are unit-testable without a filesystem.
-pub fn diagnose(tools: &[ToolStatus], shell_hooked: bool, activity: &Activity) -> Vec<Problem> {
+pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) -> Vec<Problem> {
     let mut problems = Vec::new();
-
-    if !shell_hooked {
-        problems.push(Problem {
-            message: "shell hook not installed — commands run outside AI tools are not compressed".to_string(),
-            fix: Some("sqz init".to_string()),
-        });
-    }
 
     let unconfigured: Vec<&ToolStatus> = tools
         .iter()
@@ -124,29 +137,61 @@ pub fn diagnose(tools: &[ToolStatus], shell_hooked: bool, activity: &Activity) -
         });
     }
 
-    if activity.inflated_rows > 0 {
+    if managed.kiro_global == SteeringState::Stale || managed.kiro_project == SteeringState::Stale {
         problems.push(Problem {
-            message: format!(
-                "{} log row(s) record output larger than input by {}+ tokens — written by a token-estimator bug in sqz-mcp 1.6.x, they {}understate your savings",
-                activity.inflated_rows,
-                activity.inflated_tokens,
-                if activity.net_negative { "push the all-time total below zero and " } else { "" },
-            ),
-            fix: Some("sqz doctor --fix   (backs up the database, then removes those rows)".to_string()),
+            message: "Kiro steering was written by an older sqz, so the agent is reading outdated guidance".to_string(),
+            fix: Some(FIX_CMD.to_string()),
+        });
+    }
+    if managed.kiro_duplicate() {
+        problems.push(Problem {
+            message: "Kiro loads sqz steering twice (user-level and this project), on every request".to_string(),
+            fix: Some(format!("{FIX_CMD}   (removes the project copy; the user-level one covers every workspace)")),
+        });
+    }
+    if managed.shell_block_stale {
+        problems.push(Problem {
+            message: "the sqz block in your shell rc is outdated (older versions also defined a preexec function or DEBUG trap that can override your own)".to_string(),
+            fix: Some(FIX_CMD.to_string()),
         });
     }
 
-    let anything_configured = shell_hooked || tools.iter().any(|t| t.config.configured());
-    if activity.total_compressions == 0 {
-        if anything_configured {
-            problems.push(Problem {
+    if activity.inflated_rows > 0 {
+        problems.push(Problem {
+            message: format!(
+                "{} log row(s) from sqz-mcp before 1.8.0 record verbatim output as larger than its input, hiding {} tokens{}",
+                activity.inflated_rows,
+                activity.inflated_tokens,
+                if activity.net_negative { " and pushing the all-time total below zero" } else { "" },
+            ),
+            fix: Some(format!("{FIX_CMD}   (backs up the database, then corrects those rows)")),
+        });
+    }
+
+    let configured: Vec<&ToolStatus> = tools.iter().filter(|t| t.config.configured()).collect();
+    let any_transparent = configured.iter().any(|t| t.tier == IntegrationTier::Transparent);
+    let advisory_names = configured
+        .iter()
+        .filter(|t| t.tier == IntegrationTier::Advisory)
+        .map(|t| t.name)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if activity.total_compressions == 0 && !configured.is_empty() {
+        problems.push(if any_transparent {
+            Problem {
                 message: "hooks are installed but nothing has been compressed yet — restart your AI tool so it picks up the hook".to_string(),
                 fix: None,
-            });
-        }
-        // Nothing configured AND nothing logged is fully covered by the
-        // unconfigured-clients / shell-hook problems above.
-    } else if activity.last7_compressions == 0 {
+            }
+        } else {
+            Problem {
+                message: format!(
+                    "nothing has been compressed yet. Only advisory integrations are configured ({advisory_names}), which save tokens only when the agent calls sqz"
+                ),
+                fix: Some("sqz discover --replay   (shows how much of your agent's tool output sqz could reach)".to_string()),
+            }
+        });
+    } else if activity.total_compressions > 0 && activity.last7_compressions == 0 && any_transparent {
         problems.push(Problem {
             message: format!(
                 "sqz has compressed {} outputs all-time but none in the last 7 days — a hook may have stopped firing (tool update, changed settings)",
@@ -159,10 +204,10 @@ pub fn diagnose(tools: &[ToolStatus], shell_hooked: bool, activity: &Activity) -
     problems
 }
 
-/// Copy the live database to `<db>.bak-YYYYMMDD` before a repair.
-/// Resolves the path the same way the engine does (SQZ_DB_PATH, else
-/// ~/.sqz/sessions.db). Returns `Ok(None)` when no file exists to back up.
-fn backup_database() -> std::io::Result<Option<PathBuf>> {
+/// Back the live database up to `<db>.bak-YYYYMMDD-HHMMSS` before a
+/// repair. Resolves the path the same way the engine does (SQZ_DB_PATH,
+/// else ~/.sqz/sessions.db). Returns `Ok(None)` when no file exists.
+fn backup_database(store: &sqz_engine::SessionStore) -> Result<Option<PathBuf>, String> {
     let db = std::env::var_os("SQZ_DB_PATH")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
@@ -171,9 +216,9 @@ fn backup_database() -> std::io::Result<Option<PathBuf>> {
     if !db.exists() {
         return Ok(None);
     }
-    let stamp = chrono::Utc::now().format("%Y%m%d").to_string();
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let backup = PathBuf::from(format!("{}.bak-{stamp}", db.display()));
-    std::fs::copy(&db, &backup)?;
+    store.backup_to(&backup).map_err(|e| e.to_string())?;
     Ok(Some(backup))
 }
 
@@ -274,7 +319,7 @@ fn detect_config(name: &str, project_config: &Path, project_dir: &Path, home: Op
             .unwrap_or(false),
         "Gemini CLI" => h(".gemini/settings.json").map(|p| file_contains(&p, "sqz")).unwrap_or(false),
         "Kiro" => {
-            let steering = h(".kiro/steering/sqz.md").map(|p| p.exists()).unwrap_or(false);
+            let steering = sqz_engine::kiro_user_steering_path().exists();
             let mcp = h(".kiro/settings/mcp.json").map(|p| file_contains(&p, "sqz")).unwrap_or(false);
             steering || mcp
         }
@@ -326,15 +371,153 @@ pub fn collect_tool_statuses(project_dir: &Path) -> Vec<ToolStatus> {
                 .unwrap_or_else(|| project_dir.join("(none)"));
             let client = detect_client(name, home.as_deref());
             let config = detect_config(name, &project_config, project_dir, home.as_deref());
-            ToolStatus { name, only_flag: only_flag(name), client, config }
+            let tier = sqz_engine::integration_tier(name);
+            ToolStatus { name, only_flag: only_flag(name), client, config, tier }
         })
         .collect()
 }
 
+/// Number and size of the tool definitions the installed `sqz-mcp`
+/// advertises. Clients send these to the model with every request.
+/// `None` when sqz-mcp isn't on PATH or doesn't answer within 5 seconds.
+fn measure_mcp_tool_definitions() -> Option<(usize, usize)> {
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("sqz-mcp")
+        .args(["--transport", "stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let requests = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"sqz-doctor","version":"0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ];
+        for request in requests {
+            if writeln!(stdin, "{request}").is_err() {
+                break;
+            }
+        }
+        // Dropping stdin sends EOF so the server exits after answering.
+    }
+    let stdout = child.stdout.take();
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(stdout) = stdout {
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                if msg.get("id") == Some(&serde_json::json!(2)) {
+                    let _ = tx.send(msg);
+                    return;
+                }
+            }
+        });
+    }
+    let response = rx.recv_timeout(Duration::from_secs(5)).ok();
+    let _ = child.kill();
+    let _ = child.wait();
+    let tools = response?.get("result")?.get("tools")?.as_array()?.clone();
+    let bytes = tools.iter().map(|t| t.to_string().len()).sum();
+    Some((tools.len(), bytes))
+}
+
+/// sqz guidance Kiro loads into every request for this project: user and
+/// project steering, plus every sqz block in AGENTS.md (Kiro includes the
+/// workspace AGENTS.md automatically). Returns (label, bytes) pairs.
+fn kiro_guidance(project_dir: &Path) -> Vec<(String, usize)> {
+    let mut found = Vec::new();
+    for (label, path, global) in [
+        ("~/.kiro/steering/sqz.md".to_string(), sqz_engine::kiro_user_steering_path(), true),
+        (".kiro/steering/sqz.md".to_string(), sqz_engine::kiro_steering_path(project_dir), false),
+    ] {
+        if is_managed(sqz_engine::kiro_steering_state(&path, global)) {
+            let bytes = std::fs::metadata(&path).map(|m| m.len() as usize).unwrap_or(0);
+            found.push((label, bytes));
+        }
+    }
+    if let Ok(agents) = std::fs::read_to_string(project_dir.join("AGENTS.md")) {
+        for block in agents.split("<!-- BEGIN sqz-").skip(1) {
+            let bytes = block.find("<!-- END sqz-").unwrap_or(block.len());
+            found.push(("AGENTS.md block".to_string(), bytes));
+        }
+    }
+    found
+}
+
+fn approx_tokens(bytes: usize) -> usize {
+    bytes.div_ceil(4)
+}
+
+/// Repair the sqz-managed state doctor knows how to repair. Every change
+/// is to something sqz wrote; user-authored files are never touched.
+fn apply_fixes(store: &sqz_engine::SessionStore, managed: &Managed, project_dir: &Path) -> Result<(), ()> {
+    let (rows, _) = store.inflated_rows().unwrap_or((0, 0));
+    if rows > 0 {
+        match backup_database(store) {
+            Ok(Some(path)) => println!("  ok  --fix: database backed up to {}", path.display()),
+            Ok(None) => println!("  --  --fix: database file not found, skipping backup"),
+            Err(e) => {
+                println!("  ERR --fix: backup failed ({e}), not touching the database");
+                return Err(());
+            }
+        }
+        match store.clamp_inflated_rows() {
+            Ok(n) => println!("  ok  --fix: corrected {n} log row(s) (input count raised to the real output size, saving 0)"),
+            Err(e) => println!("  ERR --fix: update failed: {e}"),
+        }
+    }
+
+    // Refreshes keep the binary path each file already uses; current_exe
+    // is only the fallback when that binary no longer exists.
+    let fallback = std::env::current_exe()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| "sqz".to_string());
+    if managed.kiro_global == SteeringState::Stale {
+        match sqz_engine::refresh_kiro_steering(&sqz_engine::kiro_user_steering_path(), true, &fallback) {
+            Ok(_) => println!("  ok  --fix: refreshed ~/.kiro/steering/sqz.md"),
+            Err(e) => println!("  ERR --fix: could not refresh Kiro steering: {e}"),
+        }
+    }
+    if managed.kiro_duplicate() {
+        match sqz_engine::remove_kiro_steering(project_dir) {
+            Ok(true) => println!("  ok  --fix: removed duplicate .kiro/steering/sqz.md (user-level copy covers this workspace)"),
+            Ok(false) => {}
+            Err(e) => println!("  ERR --fix: could not remove project steering: {e}"),
+        }
+    } else if managed.kiro_project == SteeringState::Stale {
+        match sqz_engine::refresh_kiro_steering(&sqz_engine::kiro_steering_path(project_dir), false, &fallback) {
+            Ok(_) => println!("  ok  --fix: refreshed .kiro/steering/sqz.md"),
+            Err(e) => println!("  ERR --fix: could not refresh project steering: {e}"),
+        }
+    }
+
+    if managed.shell_block_stale {
+        match ShellHook::detect().refresh() {
+            Ok(true) => println!("  ok  --fix: refreshed the sqz block in your shell rc (open a new shell to pick it up)"),
+            Ok(false) => {}
+            Err(e) => println!("  ERR --fix: {e}"),
+        }
+    }
+    Ok(())
+}
+
+fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
+    Managed {
+        kiro_global: sqz_engine::kiro_steering_state(&sqz_engine::kiro_user_steering_path(), true),
+        kiro_project: sqz_engine::kiro_steering_state(&sqz_engine::kiro_steering_path(project_dir), false),
+        shell_block_stale: hook.needs_refresh(),
+    }
+}
+
 /// Run the full check and print the report. Returns the process exit code.
 ///
-/// With `fix`, repairs the one problem doctor can repair on its own:
-/// inflated log rows. The database is copied to `<db>.bak-<date>` first.
+/// With `fix`, repairs what doctor can repair on its own: log rows a past
+/// bug wrote wrongly (after backing up the database), stale or duplicate
+/// sqz-managed Kiro steering, and an outdated sqz shell block.
 pub fn run(fix: bool) -> i32 {
     let version = env!("CARGO_PKG_VERSION");
     println!("sqz doctor — {version}");
@@ -355,59 +538,25 @@ pub fn run(fix: bool) -> i32 {
     let store = engine.session_store();
     println!("  ok  database open and readable");
 
-    if fix {
-        let (count, _, _) = store.inflated_rows(INFLATION_RATIO).unwrap_or((0, 0, None));
-        if count == 0 {
-            println!("  ok  --fix: no inflated rows to remove");
-        } else {
-            match backup_database() {
-                Ok(Some(path)) => println!("  ok  --fix: database backed up to {}", path.display()),
-                Ok(None) => println!("  --  --fix: database path unknown, skipping backup"),
-                Err(e) => {
-                    println!("  ERR --fix: backup failed ({e}), not touching the database");
-                    return 2;
-                }
-            }
-            match store.delete_inflated_rows(INFLATION_RATIO) {
-                Ok(n) => println!("  ok  --fix: removed {n} inflated log row(s)"),
-                Err(e) => println!("  ERR --fix: delete failed: {e}"),
-            }
-        }
-    }
-
-    let activity = {
-        let stats = store.compression_stats().unwrap_or_default();
-        let last7 = store.daily_gains(7).unwrap_or_default();
-        let (inflated_rows, inflated_tokens, _) =
-            store.inflated_rows(INFLATION_RATIO).unwrap_or((0, 0, None));
-        Activity {
-            total_compressions: stats.total_compressions,
-            total_saved: stats.tokens_saved(),
-            last7_compressions: last7.iter().map(|g| g.compressions).sum(),
-            last7_saved: last7.iter().map(|g| g.tokens_saved).sum(),
-            net_negative: stats.is_net_negative(),
-            inflated_rows,
-            inflated_tokens,
-        }
-    };
-
-    // ── Shell hook ──────────────────────────────────────────────────
     let hook = ShellHook::detect();
     let rc_path = hook.rc_path();
-    let shell_hooked = rc_path.exists()
-        && std::fs::read_to_string(&rc_path)
-            .map(|s| s.contains(hook.sentinel()))
-            .unwrap_or(false);
-    println!();
-    println!("shell");
-    if shell_hooked {
-        println!("  ok  hook installed in {}", rc_path.display());
+    let shell_installed = file_contains(&rc_path, hook.sentinel());
+    if shell_installed {
+        println!("  ok  shell helpers (sqz_run) in {}", rc_path.display());
     } else {
-        println!("  --  no hook in {}", rc_path.display());
+        println!("  --  no shell helpers in {} (optional: they only add sqz_run)", rc_path.display());
     }
 
-    // ── Clients ─────────────────────────────────────────────────────
     let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if fix {
+        let managed = collect_managed(&project_dir, &hook);
+        if apply_fixes(store, &managed, &project_dir).is_err() {
+            return 2;
+        }
+    }
+    let managed = collect_managed(&project_dir, &hook);
+
+    // ── Clients ─────────────────────────────────────────────────────
     let tools = collect_tool_statuses(&project_dir);
     println!();
     println!("clients (project: {})", project_dir.display());
@@ -428,10 +577,67 @@ pub fn run(fix: bool) -> i32 {
                 Detection::Unknown => "no machine-level footprint to check",
             },
         };
-        println!("  {mark} {:<12} {state}", t.name);
+        let tier = if t.config.configured() {
+            match t.tier {
+                IntegrationTier::Transparent => "transparent",
+                IntegrationTier::Advisory => "advisory",
+            }
+        } else {
+            ""
+        };
+        println!("  {mark} {:<12} {state:<31} {tier}", t.name);
+    }
+    let configured_tiers: Vec<IntegrationTier> =
+        tools.iter().filter(|t| t.config.configured()).map(|t| t.tier).collect();
+    if configured_tiers.contains(&IntegrationTier::Transparent) {
+        println!("      transparent: a hook routes shell commands through sqz, no agent cooperation needed");
+    }
+    if configured_tiers.contains(&IntegrationTier::Advisory) {
+        println!("      advisory: the client can't let sqz rewrite tool calls. sqz saves tokens only when");
+        println!("      the agent pipes output through `sqz compress` or calls the sqz MCP tools; the");
+        println!("      client's built-in shell and file tools bypass it");
+    }
+
+    // ── Overhead ────────────────────────────────────────────────────
+    println!();
+    println!("context overhead (sent with every model request)");
+    match measure_mcp_tool_definitions() {
+        Some((count, bytes)) => println!(
+            "  sqz-mcp tools   {count} definitions, ~{} tokens",
+            approx_tokens(bytes)
+        ),
+        None => println!("  sqz-mcp tools   not measured (sqz-mcp not on PATH or not answering)"),
+    }
+    let kiro_configured = tools.iter().any(|t| t.name == "Kiro" && t.config.configured());
+    if kiro_configured {
+        let guidance = kiro_guidance(&project_dir);
+        let bytes: usize = guidance.iter().map(|(_, b)| b).sum();
+        let labels: Vec<&str> = guidance.iter().map(|(l, _)| l.as_str()).collect();
+        println!(
+            "  Kiro guidance   {} cop{}, ~{} tokens{}{}",
+            guidance.len(),
+            if guidance.len() == 1 { "y" } else { "ies" },
+            approx_tokens(bytes),
+            if labels.is_empty() { "" } else { ": " },
+            labels.join(", ")
+        );
     }
 
     // ── Activity ────────────────────────────────────────────────────
+    let activity = {
+        let stats = store.compression_stats().unwrap_or_default();
+        let last7 = store.daily_gains(7).unwrap_or_default();
+        let (inflated_rows, inflated_tokens) = store.inflated_rows().unwrap_or((0, 0));
+        Activity {
+            total_compressions: stats.total_compressions,
+            total_saved: stats.tokens_saved(),
+            last7_compressions: last7.iter().map(|g| g.compressions).sum(),
+            last7_saved: last7.iter().map(|g| g.tokens_saved).sum(),
+            net_negative: stats.is_net_negative(),
+            inflated_rows,
+            inflated_tokens,
+        }
+    };
     println!();
     println!("activity");
     if activity.net_negative {
@@ -451,7 +657,7 @@ pub fn run(fix: bool) -> i32 {
     );
 
     // ── Diagnosis ───────────────────────────────────────────────────
-    let problems = diagnose(&tools, shell_hooked, &activity);
+    let problems = diagnose(&tools, &activity, &managed);
     println!();
     if problems.is_empty() {
         println!("no problems found");
@@ -473,7 +679,19 @@ mod tests {
     use super::*;
 
     fn tool(name: &'static str, flag: &'static str, client: Detection, config: ConfigScope) -> ToolStatus {
-        ToolStatus { name, only_flag: flag, client, config }
+        ToolStatus { name, only_flag: flag, client, config, tier: sqz_engine::integration_tier(name) }
+    }
+
+    fn clean() -> Managed {
+        Managed {
+            kiro_global: SteeringState::Current,
+            kiro_project: SteeringState::Missing,
+            shell_block_stale: false,
+        }
+    }
+
+    fn active() -> Activity {
+        Activity { total_compressions: 100, last7_compressions: 5, ..Default::default() }
     }
 
     #[test]
@@ -484,8 +702,7 @@ mod tests {
             tool("Kiro", "kiro", Detection::Detected, ConfigScope::Global),
             tool("Zed", "zed", Detection::NotDetected, ConfigScope::None),
         ];
-        let activity = Activity { total_compressions: 100, last7_compressions: 5, ..Default::default() };
-        let problems = diagnose(&tools, true, &activity);
+        let problems = diagnose(&tools, &active(), &clean());
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("Claude Code, Cursor"));
         assert!(!problems[0].message.contains("Kiro"), "configured client must not be flagged");
@@ -494,31 +711,81 @@ mod tests {
     }
 
     #[test]
-    fn installed_but_idle_last_week_is_flagged() {
-        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Both)];
+    fn transparent_hook_idle_last_week_is_flagged() {
+        let tools = vec![tool("Claude Code", "claude", Detection::Detected, ConfigScope::Both)];
         let activity = Activity { total_compressions: 412, last7_compressions: 0, ..Default::default() };
-        let problems = diagnose(&tools, true, &activity);
+        let problems = diagnose(&tools, &activity, &clean());
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("none in the last 7 days"));
     }
 
     #[test]
-    fn configured_but_never_ran_suggests_restart() {
-        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Project)];
-        let activity = Activity::default();
-        let problems = diagnose(&tools, true, &activity);
+    fn advisory_only_idle_week_is_not_a_hook_failure() {
+        // Kiro can't fire a hook, so "a hook stopped firing" would be wrong.
+        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Both)];
+        let activity = Activity { total_compressions: 412, last7_compressions: 0, ..Default::default() };
+        assert!(diagnose(&tools, &activity, &clean()).is_empty());
+    }
+
+    #[test]
+    fn transparent_hook_never_ran_suggests_restart() {
+        let tools = vec![tool("Claude Code", "claude", Detection::Detected, ConfigScope::Project)];
+        let problems = diagnose(&tools, &Activity::default(), &clean());
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("restart your AI tool"));
     }
 
     #[test]
-    fn missing_shell_hook_is_flagged_even_when_active() {
-        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Both)];
-        let activity = Activity { total_compressions: 10, last7_compressions: 10, ..Default::default() };
-        let problems = diagnose(&tools, false, &activity);
+    fn advisory_only_never_ran_explains_why_and_points_at_replay() {
+        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Project)];
+        let problems = diagnose(&tools, &Activity::default(), &clean());
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].message.contains("shell hook"));
-        assert_eq!(problems[0].fix.as_deref(), Some("sqz init"));
+        assert!(problems[0].message.contains("advisory"));
+        assert!(problems[0].message.contains("Kiro"));
+        assert!(problems[0].fix.as_deref().unwrap().contains("discover --replay"));
+    }
+
+    #[test]
+    fn missing_shell_helpers_are_not_a_problem() {
+        // The shell block only defines sqz_run; it compresses nothing on
+        // its own, so its absence must not be reported as lost savings.
+        let tools = vec![tool("Claude Code", "claude", Detection::Detected, ConfigScope::Both)];
+        assert!(diagnose(&tools, &active(), &clean()).is_empty());
+    }
+
+    #[test]
+    fn stale_and_duplicate_kiro_steering_are_flagged() {
+        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Both)];
+        let managed = Managed {
+            kiro_global: SteeringState::Stale,
+            kiro_project: SteeringState::Current,
+            shell_block_stale: false,
+        };
+        let problems = diagnose(&tools, &active(), &managed);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].message.contains("older sqz"));
+        assert!(problems[1].message.contains("twice"));
+        assert!(problems.iter().all(|p| p.fix.as_deref().unwrap().starts_with(FIX_CMD)));
+    }
+
+    #[test]
+    fn user_authored_steering_is_never_flagged() {
+        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Both)];
+        let managed = Managed {
+            kiro_global: SteeringState::UserAuthored,
+            kiro_project: SteeringState::UserAuthored,
+            shell_block_stale: false,
+        };
+        assert!(diagnose(&tools, &active(), &managed).is_empty());
+    }
+
+    #[test]
+    fn stale_shell_block_is_flagged() {
+        let tools = vec![tool("Claude Code", "claude", Detection::Detected, ConfigScope::Both)];
+        let managed = Managed { shell_block_stale: true, ..clean() };
+        let problems = diagnose(&tools, &active(), &managed);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("shell rc"));
     }
 
     #[test]
@@ -528,16 +795,14 @@ mod tests {
             tool("Zed", "zed", Detection::NotDetected, ConfigScope::None),
             tool("Cline", "cline", Detection::Unknown, ConfigScope::None),
         ];
-        let activity = Activity { total_compressions: 10, last7_compressions: 3, ..Default::default() };
-        assert!(diagnose(&tools, true, &activity).is_empty());
+        assert!(diagnose(&tools, &active(), &clean()).is_empty());
     }
 
     #[test]
     fn unknown_footprint_without_config_is_not_a_problem() {
         // Cline can't be detected machine-wide; silence is correct.
         let tools = vec![tool("Cline", "cline", Detection::Unknown, ConfigScope::None)];
-        let activity = Activity { total_compressions: 1, last7_compressions: 1, ..Default::default() };
-        assert!(diagnose(&tools, true, &activity).is_empty());
+        assert!(diagnose(&tools, &active(), &clean()).is_empty());
     }
 
     #[test]
@@ -551,11 +816,11 @@ mod tests {
             inflated_tokens: 458_000,
             ..Default::default()
         };
-        let problems = diagnose(&tools, true, &activity);
+        let problems = diagnose(&tools, &activity, &clean());
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("2 log row(s)"));
         assert!(problems[0].message.contains("below zero"));
-        assert!(problems[0].fix.as_deref().unwrap().starts_with("sqz doctor --fix"));
+        assert!(problems[0].fix.as_deref().unwrap().starts_with(FIX_CMD));
     }
 
     #[test]
@@ -568,7 +833,7 @@ mod tests {
             inflated_tokens: 900,
             ..Default::default()
         };
-        let problems = diagnose(&tools, true, &activity);
+        let problems = diagnose(&tools, &activity, &clean());
         assert_eq!(problems.len(), 1);
         assert!(!problems[0].message.contains("below zero"));
     }
@@ -592,6 +857,23 @@ mod tests {
                 sqz_engine::parse_tool_list(only_flag(name)).is_ok(),
                 "flag for {name} rejected by parse_tool_list"
             );
+        }
+    }
+
+    #[test]
+    fn tiers_match_what_init_installs() {
+        use IntegrationTier::*;
+        for (name, tier) in [
+            ("Claude Code", Transparent),
+            ("Copilot CLI", Transparent),
+            ("Gemini CLI", Transparent),
+            ("OpenCode", Transparent),
+            ("Kiro", Advisory),
+            ("Windsurf", Advisory),
+            ("Cline", Advisory),
+            ("Zed", Advisory),
+        ] {
+            assert_eq!(sqz_engine::integration_tier(name), tier, "{name}");
         }
     }
 }

@@ -9,15 +9,6 @@ use std::path::{Path, PathBuf};
 
 const BASH_HOOK: &str = r#"
 # sqz — context intelligence layer (auto-installed)
-__sqz_preexec() {
-    export __SQZ_CMD="$BASH_COMMAND"
-}
-trap '__sqz_preexec' DEBUG
-__sqz_postexec() {
-    local exit_code=$?
-    return $exit_code
-}
-PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__sqz_postexec"
 sqz_run() {
     { "$@" 2>&1; printf '\n__SQZ_EXIT_%d__\n' "$?"; } | SQZ_CMD="$*" sqz compress
 }
@@ -35,9 +26,6 @@ sqz_run() {
 }
 sqz_sudo() {
     { sudo "$@" 2>&1; printf '\n__SQZ_EXIT_%d__\n' "$?"; } | SQZ_CMD="sudo $*" sqz compress
-}
-preexec() {
-    export __SQZ_CMD="$1"
 }
 # sqz — end of auto-installed block
 "#;
@@ -168,6 +156,57 @@ impl ShellHook {
         let rc = self.rc_path();
         uninstall_hook_from_file(&rc, self.sentinel())
     }
+
+    /// Whether an installed block differs from this version's template.
+    pub fn needs_refresh(&self) -> bool {
+        std::fs::read_to_string(self.rc_path())
+            .map(|content| refreshed_content(&content, self.hook_script(), self.sentinel()).is_some())
+            .unwrap_or(false)
+    }
+
+    /// Replace an installed block with this version's template, in place.
+    pub fn refresh(&self) -> Result<bool, HookError> {
+        refresh_hook_in_file(&self.rc_path(), self.hook_script(), self.sentinel())
+    }
+}
+
+const END_SENTINEL: &str = "# sqz — end of auto-installed block";
+
+/// The file content with sqz's block swapped for `script`, or `None` when
+/// nothing would change. Only blocks with both markers are touched: an old
+/// block without an end marker has no reliable extent.
+fn refreshed_content(content: &str, script: &str, sentinel: &str) -> Option<String> {
+    let start_marker = content.find(sentinel)?;
+    let start = content[..start_marker].rfind('\n').map_or(0, |i| i + 1);
+    let end_marker = start_marker + content[start_marker..].find(END_SENTINEL)?;
+    let end = content[end_marker..]
+        .find('\n')
+        .map_or(content.len(), |i| end_marker + i + 1);
+    let new_block = script.trim_start_matches('\n');
+    if &content[start..end] == new_block {
+        return None;
+    }
+    Some(format!("{}{}{}", &content[..start], new_block, &content[end..]))
+}
+
+/// Rewrite the sqz block in `path` to match `script`. Returns `Ok(true)`
+/// when the file changed. Everything outside the block is kept byte-exact.
+pub fn refresh_hook_in_file(path: &Path, script: &str, sentinel: &str) -> Result<bool, HookError> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| HookError {
+        path: path.to_owned(),
+        message: format!("read error: {e}"),
+    })?;
+    let Some(updated) = refreshed_content(&content, script, sentinel) else {
+        return Ok(false);
+    };
+    std::fs::write(path, updated).map_err(|e| HookError {
+        path: path.to_owned(),
+        message: format!("write error: {e}"),
+    })?;
+    Ok(true)
 }
 
 // ── Error type ────────────────────────────────────────────────────────────
@@ -525,6 +564,72 @@ mod tests {
         // User content directly after end marker must be preserved
         assert!(after.contains("export PATH"), "content after end marker must survive: {after}");
         assert!(after.contains("export EDITOR"), "content before hook must survive: {after}");
+    }
+
+    #[test]
+    fn hooks_do_not_override_user_preexec_or_debug_traps() {
+        assert!(!ZSH_HOOK.contains("preexec"), "zsh block must not define preexec");
+        assert!(!BASH_HOOK.contains("trap "), "bash block must not install a trap");
+        assert!(!BASH_HOOK.contains("PROMPT_COMMAND"));
+        for hook in [ZSH_HOOK, BASH_HOOK] {
+            assert!(hook.contains("sqz_run()") && hook.contains("sqz_sudo()"));
+        }
+    }
+
+    #[test]
+    fn refresh_replaces_old_block_and_keeps_everything_else() {
+        let dir = TempDir::new().unwrap();
+        let rc = tmp_rc(&dir, ".zshrc");
+        let sentinel = "# sqz — context intelligence layer (auto-installed)";
+        let old_block = concat!(
+            "# sqz — context intelligence layer (auto-installed)\n",
+            "sqz_run() {\n",
+            "    { \"$@\" 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } | SQZ_CMD=\"$*\" sqz compress\n",
+            "}\n",
+            "preexec() {\n",
+            "    export __SQZ_CMD=\"$1\"\n",
+            "}\n",
+            "# sqz — end of auto-installed block\n",
+        );
+        let before = "export EDITOR=vim\nalias ll='ls -la'\n\n";
+        let after = "\n# user content after\nexport PATH=$PATH:/opt/bin\n";
+        fs::write(&rc, format!("{before}{old_block}{after}")).unwrap();
+
+        assert!(refresh_hook_in_file(&rc, ZSH_HOOK, sentinel).unwrap());
+        let content = fs::read_to_string(&rc).unwrap();
+        assert_eq!(
+            content,
+            format!("{before}{}{after}", ZSH_HOOK.trim_start_matches('\n'))
+        );
+        assert!(!content.contains("preexec"));
+        // Second refresh is a no-op.
+        assert!(!refresh_hook_in_file(&rc, ZSH_HOOK, sentinel).unwrap());
+        // The refreshed block still uninstalls cleanly.
+        assert!(uninstall_hook_from_file(&rc, sentinel).unwrap());
+        let content = fs::read_to_string(&rc).unwrap();
+        assert!(content.contains("alias ll") && content.contains("/opt/bin"));
+        assert!(!content.contains("sqz_run"));
+    }
+
+    #[test]
+    fn refresh_leaves_old_format_without_end_marker_alone() {
+        let dir = TempDir::new().unwrap();
+        let rc = tmp_rc(&dir, ".zshrc");
+        let sentinel = "# sqz — context intelligence layer (auto-installed)";
+        let original = "# sqz — context intelligence layer (auto-installed)\nsqz_run() {\n}\n\nexport X=1\n";
+        fs::write(&rc, original).unwrap();
+        assert!(!refresh_hook_in_file(&rc, ZSH_HOOK, sentinel).unwrap());
+        assert_eq!(fs::read_to_string(&rc).unwrap(), original);
+    }
+
+    #[test]
+    fn refresh_on_fresh_install_is_a_no_op() {
+        let dir = TempDir::new().unwrap();
+        let rc = tmp_rc(&dir, ".bashrc");
+        let sentinel = "# sqz — context intelligence layer (auto-installed)";
+        fs::write(&rc, "export A=1\n").unwrap();
+        install_hook_to_file(&rc, BASH_HOOK, sentinel).unwrap();
+        assert!(!refresh_hook_in_file(&rc, BASH_HOOK, sentinel).unwrap());
     }
 
     #[test]

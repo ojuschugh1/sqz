@@ -111,6 +111,84 @@ If a `«A1»` symbol replaced a value you need verbatim, re-run with
     )
 }
 
+/// State of a steering file sqz may manage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteeringState {
+    Missing,
+    /// No sqz sentinel: the user wrote it, sqz never touches it.
+    UserAuthored,
+    /// Matches what this version of sqz writes.
+    Current,
+    /// sqz-managed but written by an older version (or a different
+    /// template), so the agent is reading outdated guidance.
+    Stale,
+}
+
+/// The sqz binary path a managed steering file was written for, read back
+/// from its first example line.
+fn embedded_sqz_path(content: &str) -> Option<&str> {
+    content.lines().find_map(|line| {
+        line.strip_prefix("git status 2>&1 | ")
+            .and_then(|rest| rest.strip_suffix(" compress"))
+    })
+}
+
+/// Compare a steering file against what this version would write for the
+/// same sqz path. `global` selects the user-level template.
+pub fn kiro_steering_state(path: &Path, global: bool) -> SteeringState {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return SteeringState::Missing;
+    };
+    if !content.contains(KIRO_STEERING_SENTINEL) {
+        return SteeringState::UserAuthored;
+    }
+    let Some(sqz_path) = embedded_sqz_path(&content) else {
+        return SteeringState::Stale;
+    };
+    let expected = if global {
+        kiro_user_steering_content(sqz_path)
+    } else {
+        kiro_steering_content(sqz_path)
+    };
+    if content == expected {
+        SteeringState::Current
+    } else {
+        SteeringState::Stale
+    }
+}
+
+/// Whether sqz's user-level steering is installed. Kiro applies
+/// `~/.kiro/steering` to every workspace, so a project copy next to it is
+/// the same guidance sent twice on every request.
+pub fn user_steering_installed() -> bool {
+    matches!(
+        kiro_steering_state(&kiro_user_steering_path(), true),
+        SteeringState::Current | SteeringState::Stale
+    )
+}
+
+/// Rewrite a stale sqz-managed steering file with this version's template,
+/// keeping the sqz binary path it already points at when that binary still
+/// exists (else `fallback_sqz_path`). Returns `Ok(false)` for missing,
+/// current, or user-authored files.
+pub fn refresh_kiro_steering(path: &Path, global: bool, fallback_sqz_path: &str) -> Result<bool> {
+    if kiro_steering_state(path, global) != SteeringState::Stale {
+        return Ok(false);
+    }
+    let existing = std::fs::read_to_string(path)
+        .map_err(|e| SqzError::Other(format!("read {}: {e}", path.display())))?;
+    let sqz_path = embedded_sqz_path(&existing)
+        .filter(|p| Path::new(p).is_file())
+        .unwrap_or(fallback_sqz_path)
+        .to_string();
+    let content = if global {
+        kiro_user_steering_content(&sqz_path)
+    } else {
+        kiro_steering_content(&sqz_path)
+    };
+    install_kiro_steering_at(path, &content)
+}
+
 /// Write the steering file. Refreshes sqz-managed files in place, leaves
 /// a user-authored `.kiro/steering/sqz.md` alone.
 pub fn install_kiro_steering(project_dir: &Path, sqz_path: &str) -> Result<bool> {
@@ -488,6 +566,66 @@ mod tests {
         std::fs::write(&path, "my own steering\n").unwrap();
         assert!(!remove_kiro_steering_at(&path).unwrap());
         assert!(path.exists());
+    }
+
+    #[test]
+    fn steering_state_tracks_current_stale_and_user_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sqz.md");
+        assert_eq!(kiro_steering_state(&path, true), SteeringState::Missing);
+
+        std::fs::write(&path, kiro_user_steering_content("/opt/bin/sqz")).unwrap();
+        assert_eq!(kiro_steering_state(&path, true), SteeringState::Current);
+        // The project template differs from the user-level one.
+        assert_eq!(kiro_steering_state(&path, false), SteeringState::Stale);
+
+        // An older template: sentinel present, content no longer matches.
+        let old = kiro_user_steering_content("/opt/bin/sqz").replace("sqz_recall", "recall");
+        std::fs::write(&path, old).unwrap();
+        assert_eq!(kiro_steering_state(&path, true), SteeringState::Stale);
+
+        std::fs::write(&path, "my own notes about sqz\n").unwrap();
+        assert_eq!(kiro_steering_state(&path, true), SteeringState::UserAuthored);
+    }
+
+    #[test]
+    fn refresh_keeps_the_existing_binary_path_when_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("sqz");
+        std::fs::write(&bin, "").unwrap();
+        let bin = bin.to_string_lossy().to_string();
+        let path = dir.path().join("steering.md");
+        let stale = kiro_user_steering_content(&bin).replace("sqz_recall", "recall");
+        std::fs::write(&path, stale).unwrap();
+
+        assert!(refresh_kiro_steering(&path, true, "/fallback/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), kiro_user_steering_content(&bin));
+        assert!(!refresh_kiro_steering(&path, true, "/fallback/sqz").unwrap(), "now current");
+    }
+
+    #[test]
+    fn refresh_falls_back_when_the_old_binary_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steering.md");
+        let stale = kiro_steering_content("/deleted/target/debug/sqz").replace("sqz_recall", "recall");
+        std::fs::write(&path, stale).unwrap();
+        assert!(refresh_kiro_steering(&path, false, "/fallback/sqz").unwrap());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("/fallback/sqz compress"));
+    }
+
+    #[test]
+    fn refresh_never_touches_user_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steering.md");
+        std::fs::write(&path, "mine\n").unwrap();
+        assert!(!refresh_kiro_steering(&path, true, "/fallback/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine\n");
+    }
+
+    #[test]
+    fn embedded_path_round_trips_through_template() {
+        let content = kiro_steering_content("/Users/me/.cargo/bin/sqz");
+        assert_eq!(embedded_sqz_path(&content), Some("/Users/me/.cargo/bin/sqz"));
     }
 
     #[test]
