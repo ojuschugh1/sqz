@@ -24,8 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`sqz init` no longer writes project-level Kiro steering when the
   user-level copy exists.** Kiro applies `~/.kiro/steering` to every
   workspace, so the project copy was the same guidance sent twice.
+- **The MCP read tools cap what they return.** `sqz_read_file` returned
+  up to 4 MB (about a million tokens) by default; it now stops at
+  256 KB, cuts on a line boundary, and puts `continue_with_offset` in
+  the header. The cap applies after `offset`/`limit`, so a ranged read
+  deep into a big file still works, and files over 64 MB are refused
+  instead of loaded. `sqz_grep` clips a match line over 400 chars to a
+  window around the hit (one minified bundle used to return its whole
+  line) and stops at 100 KB of output. `sqz_list_dir` stops at 1000
+  entries. Every cap is a tool parameter (`max_bytes`,
+  `max_line_chars`, `max_entries`; 0 lifts it) and the header says when
+  one cut the output.
 
 ### Fixed
+
+- **`sqz_list_dir` listed two levels by default.** Its schema says
+  `max_depth` 1 means the immediate children; it now does.
 
 - **`sqz doctor --fix` repairs log rows written by the pre-1.8.0
   token estimator.** sqz-mcp before 1.8.0 counted a read tool's input

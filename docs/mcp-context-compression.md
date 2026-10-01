@@ -19,15 +19,15 @@ Agents burn most of their context on three operations: reading files, grepping, 
 
 | Tool | What it does | Why it saves tokens |
 |---|---|---|
-| `sqz_read_file` | Read a file. Content is returned faithfully (every line, identifier and line number; only ANSI codes stripped). | A repeat read of unchanged content returns a 13-token `§ref:HASH§` reference instead of the file. Agents re-read the same file after every edit; this is where the savings are. |
-| `sqz_grep` | Literal or regex search under a path, `path:lineno:text` output, capped at `max_matches` (default 200). | The cap stops one popular term from flooding the context. Repeat searches dedupe. |
-| `sqz_list_dir` | Directory listing that skips `.git`, `node_modules`, `target`, `dist`, `build`, `vendor`, `__pycache__`. | No permission/owner/date columns, no bulk directories, repeat listings dedupe. |
+| `sqz_read_file` | Read a file. Content is returned faithfully (every line, identifier and line number; only ANSI codes stripped). Output stops at 256 KB on a line boundary and the header gives `continue_with_offset` (`max_bytes` changes it, 0 lifts it). | A repeat read of unchanged content returns a 13-token `§ref:HASH§` reference instead of the file. Agents re-read the same file after every edit; this is where the savings are. |
+| `sqz_grep` | Literal or regex search under a path, `path:lineno:text` output, capped at `max_matches` (default 200) and 100 KB (`max_bytes`). A match line over 400 chars is clipped to a window around the hit (`max_line_chars`). | The caps stop one popular term or one minified bundle from flooding the context. Repeat searches dedupe. |
+| `sqz_list_dir` | Directory listing that skips `.git`, `node_modules`, `target`, `dist`, `build`, `vendor`, `__pycache__`. `max_depth` 1 (the default) is the immediate children; stops at 1000 entries (`max_entries`). | No permission/owner/date columns, no bulk directories, repeat listings dedupe. |
 | `compress` | Run arbitrary text through the full pipeline (per-command formatters, log folding, JSON compaction, dedup). | For output the agent already holds and wants to shrink before re-sending. |
 | `passthrough` | Return text unchanged. | Escape hatch for models that cannot parse `§ref§` tokens. |
 | `expand` | Resolve a `§ref:HASH§` token (or bare hex prefix) to the original bytes. | Makes every compression reversible. |
 | `sqz_recall` | Full-text search (SQLite FTS5) over everything sqz has compressed in past sessions. | Recovers context lost to compaction without re-running commands. |
 
-The read, grep and list tools are lossless by design ([issue #32](https://github.com/ojuschugh1/sqz/issues/32)): a file read that silently dropped lines would break edits. Their token savings come from dedup and from not fetching what the agent does not need, not from summarising.
+The read, grep and list tools are lossless by design ([issue #32](https://github.com/ojuschugh1/sqz/issues/32)): a file read that silently dropped lines would break edits. Their token savings come from dedup and from not fetching what the agent does not need, not from summarising. When a size cap cuts output, the header says what was cut.
 
 The tool descriptions themselves are kept short and tell the agent when to prefer the built-in tool instead (tiny config files, byte-exact lockfile reads).
 

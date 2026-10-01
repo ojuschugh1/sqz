@@ -14,16 +14,17 @@
 //!
 //! | Tool | Purpose |
 //! |---|---|
-//! | `sqz_read_file` | Read a file faithfully; a repeat read of unchanged content returns a ~13-token `§ref:HASH§`, a re-read after a small edit returns a line-level delta |
-//! | `sqz_grep` | Literal or regex search, `path:lineno:text` output, capped at `max_matches` |
-//! | `sqz_list_dir` | Directory listing that skips `.git`, `node_modules`, `target`, `dist`, `build`, `vendor` |
+//! | `sqz_read_file` | Read a file faithfully; a repeat read of unchanged content returns a ~13-token `§ref:HASH§`, a re-read after a small edit returns a line-level delta. Output is capped at 256 KB, cut on a line boundary, with `continue_with_offset` in the header |
+//! | `sqz_grep` | Literal or regex search, `path:lineno:text` output, capped at `max_matches` hits and 100 KB; lines over 400 chars are clipped around the hit |
+//! | `sqz_list_dir` | Directory listing that skips `.git`, `node_modules`, `target`, `dist`, `build`, `vendor`; capped at 1000 entries |
 //! | `compress` | Run arbitrary text through the full sqz pipeline (per-command formatters, log folding, JSON compaction, session dedup) |
 //! | `passthrough` | Return text unchanged (escape hatch for models that cannot parse `§ref§` tokens) |
 //! | `expand` | Resolve a `§ref:HASH§` token or hex prefix to the original bytes |
 //! | `sqz_recall` | Full-text search over everything sqz has compressed in past sessions |
 //!
 //! The read, grep and list tools are lossless: their savings come from the
-//! dedup cache, not from dropping content.
+//! dedup cache, not from dropping content. When a size cap cuts output the
+//! header says so.
 //!
 //! ## Proxy: compress any other MCP server
 //!
@@ -551,16 +552,21 @@ impl McpServer {
                 )
             })?;
 
-        // Cap default at 4 MB — reading huge files through MCP is
-        // rarely what the agent wants (the host's native file tool
-        // would stream instead). Agents can raise the cap explicitly.
-        let max_bytes = request
-            .input
-            .get("max_bytes")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(4 * 1024 * 1024) as usize;
+        // Cap on the bytes returned, applied after any line range so a
+        // ranged read deep into a large file still works. The default is
+        // roughly what hosts' own read tools allow; agents can raise it.
+        let max_bytes = cap_from(&request.input, "max_bytes", READ_DEFAULT_MAX_BYTES);
 
         let path = std::path::PathBuf::from(path_str);
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > READ_HARD_LIMIT_BYTES {
+                return Err(SqzError::Other(format!(
+                    "sqz_read_file: '{}' is {} MB, too large to load; use head/sed/tail through the shell for files this size",
+                    path.display(),
+                    meta.len() / (1024 * 1024)
+                )));
+            }
+        }
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
@@ -571,17 +577,10 @@ impl McpServer {
             }
         };
 
-        let was_truncated = bytes.len() > max_bytes;
-        let truncated_slice = if was_truncated {
-            &bytes[..max_bytes]
-        } else {
-            &bytes[..]
-        };
-
         // UTF-8 with lossy fallback for non-text files — JSON-RPC
         // requires strings, so there's no byte-exact path here. Hosts
         // that care about binary safety should use their native tool.
-        let full_text = String::from_utf8_lossy(truncated_slice).into_owned();
+        let full_text = String::from_utf8_lossy(&bytes).into_owned();
 
         // Optional line range, 1-based like the host's Read tool. The slice
         // is cut from the full text by byte offset so it is a verbatim
@@ -608,6 +607,21 @@ impl McpServer {
             }
         };
 
+        // Truncate on a line boundary so the returned text is whole lines
+        // the next ranged read can continue from.
+        let first_line = range.map(|(a, _)| a).unwrap_or(1);
+        let mut shown = range;
+        let mut cut = None;
+        let raw_text = match truncate_to_lines(&raw_text, max_bytes) {
+            Some(kept) => {
+                let last = first_line + kept.lines().count().max(1) - 1;
+                shown = Some((first_line, last));
+                cut = Some((last, !kept.ends_with('\n')));
+                kept.to_string()
+            }
+            None => raw_text,
+        };
+
         let tokens_original = self.engine.count_tokens(&raw_text);
         let (compressed_data, tokens_compressed) = self.compress_cached(&raw_text, true)?;
 
@@ -615,11 +629,17 @@ impl McpServer {
         // came from and whether it was truncated. The header lives
         // outside the compressed body so it's not lost to any stage.
         let mut header = format!("[sqz_read_file path={} size={}", path.display(), bytes.len());
-        if let Some((a, b)) = range {
+        if let Some((a, b)) = shown {
             header.push_str(&format!(" lines={a}-{b} of {total_lines}"));
         }
-        if was_truncated {
+        if let Some((last, mid_line)) = cut {
             header.push_str(&format!(" truncated_to={max_bytes}"));
+            if mid_line {
+                header.push_str(&format!(" line_cut={last}"));
+            }
+            if last < total_lines {
+                header.push_str(&format!(" continue_with_offset={}", last + 1));
+            }
         }
         let output = format!("{header}]\n{compressed_data}");
 
@@ -652,27 +672,38 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or(".");
 
+        // 1 = immediate children only, as the schema says. Values below 1
+        // still list the immediate children.
         let max_depth = request
             .input
             .get("max_depth")
             .and_then(|v| v.as_u64())
-            .unwrap_or(1) as usize;
+            .unwrap_or(1)
+            .max(1) as usize;
 
         let root = std::path::PathBuf::from(path_str);
-        let mut lines = Vec::new();
-        list_dir_recursive(&root, &root, 0, max_depth, &mut lines)?;
+        let mut listing = Listing {
+            lines: Vec::new(),
+            max_depth,
+            max_entries: cap_from(&request.input, "max_entries", LIST_DEFAULT_MAX_ENTRIES),
+            capped: false,
+        };
+        list_dir_recursive(&root, &root, 1, &mut listing)?;
 
-        let raw = lines.join("\n");
+        let raw = listing.lines.join("\n");
         let tokens_original = self.engine.count_tokens(&raw);
         let (compressed_data, tokens_compressed) = self.compress_cached(&raw, true)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
-        let output = format!(
-            "[sqz_list_dir path={} entries={}]\n{}",
+        let mut header = format!(
+            "[sqz_list_dir path={} entries={}",
             root.display(),
-            lines.len(),
-            compressed_data
+            listing.lines.len()
         );
+        if listing.capped {
+            header.push_str(&format!(" stopped_at_max_entries={}", listing.max_entries));
+        }
+        let output = format!("{header}]\n{compressed_data}");
 
         Ok(ToolCallResponse {
             tool_id: request.tool_id,
@@ -716,11 +747,15 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .unwrap_or(".");
 
-        let max_matches = request
-            .input
-            .get("max_matches")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(200) as usize;
+        let limits = GrepLimits {
+            max_matches: request
+                .input
+                .get("max_matches")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(200) as usize,
+            max_line_chars: cap_from(&request.input, "max_line_chars", GREP_DEFAULT_MAX_LINE_CHARS),
+            max_bytes: cap_from(&request.input, "max_bytes", GREP_DEFAULT_MAX_BYTES),
+        };
 
         let use_regex = request
             .input
@@ -745,21 +780,33 @@ impl McpServer {
             None
         };
 
-        let mut matches = Vec::new();
-        grep_walk(&root, pattern, regex.as_ref(), max_matches, &mut matches)?;
+        let mut found = GrepResults::default();
+        grep_walk(&root, pattern, regex.as_ref(), &limits, &mut found)?;
 
-        let raw = matches.join("\n");
+        let raw = found.lines.join("\n");
         let tokens_original = self.engine.count_tokens(&raw);
         let (compressed_data, tokens_compressed) = self.compress_cached(&raw, true)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
-        let output = format!(
-            "[sqz_grep pattern={:?} root={} matches={}]\n{}",
+        let mut header = format!(
+            "[sqz_grep pattern={:?} root={} matches={}",
             pattern,
             root.display(),
-            matches.len(),
-            compressed_data
+            found.lines.len(),
         );
+        if found.lines.len() >= limits.max_matches {
+            header.push_str(&format!(" max_matches_reached={}", limits.max_matches));
+        }
+        if found.byte_capped {
+            header.push_str(&format!(" stopped_at_max_bytes={}", limits.max_bytes));
+        }
+        if found.clipped > 0 {
+            header.push_str(&format!(
+                " long_lines_clipped={} (max_line_chars={})",
+                found.clipped, limits.max_line_chars
+            ));
+        }
+        let output = format!("{header}]\n{compressed_data}");
 
         Ok(ToolCallResponse {
             tool_id: request.tool_id,
@@ -1270,8 +1317,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "max_bytes": {
                         "type": "integer",
-                        "description": "Optional cap on bytes read. Default 4 MB. Truncation is reported in the header.",
-                        "default": 4194304
+                        "description": "Cap on bytes returned, cut at a line boundary. Default 262144 (256 KB); 0 = no cap. The header gives continue_with_offset when cut.",
+                        "default": 262144
                     }
                 },
                 "required": ["path"]
@@ -1281,7 +1328,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 "slice_ref: a line range of content already read in full returns §ref:HASH:L<a>-<b>§".to_string(),
                 "delta: a re-read after a small edit returns only the changed lines".to_string(),
                 "ansi_strip: removes color/formatting codes".to_string(),
-                "lossless: no lines are dropped, folded, or summarized".to_string(),
+                "max_bytes: output past the cap is cut at a line boundary and the header says where to continue".to_string(),
+                "lossless: no lines are folded or summarized".to_string(),
             ],
             ..Default::default()
         },
@@ -1311,11 +1359,17 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "integer",
                         "description": "Recursion depth. 1 = immediate children only. Default 1.",
                         "default": 1
+                    },
+                    "max_entries": {
+                        "type": "integer",
+                        "description": "Stop after this many entries. Default 1000; 0 = no cap.",
+                        "default": 1000
                     }
                 }
             }),
             compression_transforms: vec![
                 "skip_bulk_dirs: .git, node_modules, target, dist, build, vendor, __pycache__ omitted".to_string(),
+                "max_entries: listing stops at the cap (default 1000); the header says so".to_string(),
                 "sha256_cache: repeat listings dedupe via §ref§".to_string(),
                 "lossless: every listed entry survives verbatim".to_string(),
             ],
@@ -1331,10 +1385,10 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 so a popular term doesn't flood the context. \
                 \
                 PREFER this over the built-in `Grep` for any search that \
-                might return more than a handful of lines: the match cap \
-                keeps one search from flooding the context, every match \
-                line survives verbatim, and repeat searches for the same \
-                pattern dedupe to a 13-token reference."
+                might return more than a handful of lines: the match and \
+                size caps keep one search from flooding the context, and \
+                repeat searches for the same pattern dedupe to a 13-token \
+                reference."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1357,14 +1411,26 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                         "type": "integer",
                         "description": "Stop after this many hits. Default 200.",
                         "default": 200
+                    },
+                    "max_line_chars": {
+                        "type": "integer",
+                        "description": "Longer match lines are clipped to a window around the hit. Default 400; 0 = no cap.",
+                        "default": 400
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "Stop once the output reaches this size. Default 100000; 0 = no cap.",
+                        "default": 100000
                     }
                 },
                 "required": ["pattern"]
             }),
             compression_transforms: vec![
                 "max_matches: search stops after the cap (default 200); the header reports the match count".to_string(),
+                "max_line_chars: a match line over 400 chars is clipped around the hit and marked".to_string(),
+                "max_bytes: search stops at 100000 bytes of output; the header says so".to_string(),
                 "sha256_cache: repeat searches dedupe via §ref§".to_string(),
-                "lossless: every match line survives verbatim".to_string(),
+                "lossless: match lines under the caps survive verbatim".to_string(),
             ],
             ..Default::default()
         },
@@ -1376,6 +1442,75 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
 /// Rough token estimate: ~4 characters per token (GPT-style approximation).
 fn estimate_tokens(text: &str) -> u32 {
     ((text.len() as f64) / 4.0).ceil() as u32
+}
+
+/// Default cap on the text `sqz_read_file` returns. In line with hosts'
+/// own read tools; a whole 1 MB file is ~250K tokens, more than most
+/// context windows.
+const READ_DEFAULT_MAX_BYTES: usize = 256 * 1024;
+/// Files above this are refused rather than loaded into memory.
+const READ_HARD_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+/// Default cap on the total text `sqz_grep` returns.
+const GREP_DEFAULT_MAX_BYTES: usize = 100_000;
+/// Default cap on one `sqz_grep` match line. Minified bundles and data
+/// files put whole megabytes on one line.
+const GREP_DEFAULT_MAX_LINE_CHARS: usize = 400;
+/// Default cap on `sqz_list_dir` entries.
+const LIST_DEFAULT_MAX_ENTRIES: usize = 1000;
+
+/// An optional size cap from the tool input: `default` when absent, no
+/// cap when 0.
+fn cap_from(input: &serde_json::Value, key: &str, default: usize) -> usize {
+    match input.get(key).and_then(|v| v.as_u64()) {
+        Some(0) => usize::MAX,
+        Some(v) => usize::try_from(v).unwrap_or(usize::MAX),
+        None => default,
+    }
+}
+
+/// The longest prefix of `text` that ends on a line boundary and fits in
+/// `max_bytes`, or `None` when `text` already fits. A first line longer
+/// than the cap is cut at a char boundary instead, so something is
+/// always returned.
+fn truncate_to_lines(text: &str, max_bytes: usize) -> Option<&str> {
+    if text.len() <= max_bytes {
+        return None;
+    }
+    let mut cut = max_bytes;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    match text[..cut].rfind('\n') {
+        Some(nl) => Some(&text[..=nl]),
+        None => Some(&text[..cut]),
+    }
+}
+
+/// Clip a long match line to a window of `max_chars` around the first hit
+/// so one result can't flood the context. `hit` is the byte range of the
+/// match. `None` when the line already fits.
+fn clip_line(line: &str, hit: (usize, usize), max_chars: usize) -> Option<String> {
+    if line.len() <= max_chars {
+        return None;
+    }
+    let total = line.chars().count();
+    if total <= max_chars {
+        return None;
+    }
+    let (hit_start, hit_end) = hit;
+    let hit_start_char = line[..hit_start].chars().count();
+    let hit_chars = line[hit_start..hit_end].chars().count();
+    let lead = max_chars.saturating_sub(hit_chars) / 2;
+    let mut from = hit_start_char.saturating_sub(lead);
+    let to = (from + max_chars).min(total);
+    from = to.saturating_sub(max_chars);
+    let window: String = line.chars().skip(from).take(to - from).collect();
+    Some(format!(
+        "{}{}{} [line clipped: {total} chars]",
+        if from > 0 { "…" } else { "" },
+        window,
+        if to < total { "…" } else { "" },
+    ))
 }
 
 /// Lines `start..=end` (1-based) of `text` as a verbatim substring,
@@ -1413,10 +1548,9 @@ fn list_dir_recursive(
     root: &std::path::Path,
     current: &std::path::Path,
     depth: usize,
-    max_depth: usize,
-    lines: &mut Vec<String>,
+    out: &mut Listing,
 ) -> Result<()> {
-    if depth > max_depth {
+    if depth > out.max_depth || out.capped {
         return Ok(());
     }
 
@@ -1438,6 +1572,9 @@ fn list_dir_recursive(
     sorted.sort_by_key(|e| e.file_name());
 
     for entry in sorted {
+        if out.capped {
+            break;
+        }
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
@@ -1463,30 +1600,44 @@ fn list_dir_recursive(
             Err(_) => "?",
         };
 
-        lines.push(format!("{type_char} {}", rel.display()));
+        if out.lines.len() >= out.max_entries {
+            out.capped = true;
+            break;
+        }
+        out.lines.push(format!("{type_char} {}", rel.display()));
 
-        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) && depth < max_depth {
-            let _ = list_dir_recursive(root, &path, depth + 1, max_depth, lines);
+        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) && depth < out.max_depth {
+            let _ = list_dir_recursive(root, &path, depth + 1, out);
         }
     }
 
     Ok(())
 }
 
+/// Entries collected by `list_dir_recursive`. `capped` is set only when
+/// an entry was actually left out.
+struct Listing {
+    lines: Vec<String>,
+    max_depth: usize,
+    max_entries: usize,
+    capped: bool,
+}
+
 /// Walk `root` looking for files containing `pattern`. Appends one line
 /// per match to `out` in `path:lineno:text` format (ripgrep-style).
 ///
-/// Stops after `max_matches` — there's no point flooding the agent with
-/// thousands of hits, and if they really need that many they should use
-/// the native ripgrep via Bash (which gets hooked and compressed anyway).
+/// Stops after `max_matches` hits or `max_bytes` of output — there's no
+/// point flooding the agent with thousands of hits, and if they really need
+/// that many they should use the native ripgrep via Bash (which gets hooked
+/// and compressed anyway).
 fn grep_walk(
     root: &std::path::Path,
     needle: &str,
     regex: Option<&regex::Regex>,
-    max_matches: usize,
-    out: &mut Vec<String>,
+    limits: &GrepLimits,
+    out: &mut GrepResults,
 ) -> Result<()> {
-    if out.len() >= max_matches {
+    if out.full(limits) {
         return Ok(());
     }
 
@@ -1499,7 +1650,7 @@ fn grep_walk(
 
     // Single-file case: search the one file.
     if root.is_file() {
-        grep_one_file(root, needle, regex, max_matches, out)?;
+        grep_one_file(root, needle, regex, limits, out)?;
         return Ok(());
     }
 
@@ -1519,7 +1670,7 @@ fn grep_walk(
     sorted.sort_by_key(|e| e.file_name());
 
     for entry in sorted {
-        if out.len() >= max_matches {
+        if out.full(limits) {
             break;
         }
         let name = entry.file_name();
@@ -1538,16 +1689,54 @@ fn grep_walk(
         let path = entry.path();
         match entry.file_type() {
             Ok(ft) if ft.is_dir() => {
-                grep_walk(&path, needle, regex, max_matches, out)?;
+                grep_walk(&path, needle, regex, limits, out)?;
             }
             Ok(_) => {
-                grep_one_file(&path, needle, regex, max_matches, out)?;
+                grep_one_file(&path, needle, regex, limits, out)?;
             }
             Err(_) => continue,
         }
     }
 
     Ok(())
+}
+
+/// Caps for one `sqz_grep` call.
+struct GrepLimits {
+    max_matches: usize,
+    max_line_chars: usize,
+    max_bytes: usize,
+}
+
+/// Matches collected so far, with what the caps cut.
+#[derive(Default)]
+struct GrepResults {
+    lines: Vec<String>,
+    bytes: usize,
+    clipped: usize,
+    byte_capped: bool,
+}
+
+impl GrepResults {
+    fn full(&self, limits: &GrepLimits) -> bool {
+        self.byte_capped || self.lines.len() >= limits.max_matches
+    }
+
+    /// Add one match line unless it would push the output past the byte
+    /// cap. The first match is always kept so a capped search says what
+    /// it found.
+    fn push(&mut self, line: String, clipped: bool, limits: &GrepLimits) {
+        let cost = line.len() + 1;
+        if !self.lines.is_empty() && self.bytes.saturating_add(cost) > limits.max_bytes {
+            self.byte_capped = true;
+            return;
+        }
+        self.bytes += cost;
+        self.lines.push(line);
+        if clipped {
+            self.clipped += 1;
+        }
+    }
 }
 
 /// Search a single file line-by-line, appending matches to `out`.
@@ -1557,8 +1746,8 @@ fn grep_one_file(
     file: &std::path::Path,
     needle: &str,
     regex: Option<&regex::Regex>,
-    max_matches: usize,
-    out: &mut Vec<String>,
+    limits: &GrepLimits,
+    out: &mut GrepResults,
 ) -> Result<()> {
     // Size cap: don't try to grep a 1 GB log file — that's what native
     // ripgrep is for.
@@ -1578,15 +1767,22 @@ fn grep_one_file(
     };
 
     for (lineno, line) in text.lines().enumerate() {
-        if out.len() >= max_matches {
+        if out.full(limits) {
             break;
         }
-        let is_match = match regex {
-            Some(r) => r.is_match(line),
-            None => line.contains(needle),
+        let hit = match regex {
+            Some(r) => r.find(line).map(|m| (m.start(), m.end())),
+            None => line.find(needle).map(|i| (i, i + needle.len())),
         };
-        if is_match {
-            out.push(format!("{}:{}:{}", file.display(), lineno + 1, line));
+        if let Some(hit) = hit {
+            let clipped = clip_line(line, hit, limits.max_line_chars);
+            let was_clipped = clipped.is_some();
+            let shown = clipped.unwrap_or_else(|| line.to_string());
+            out.push(
+                format!("{}:{}:{}", file.display(), lineno + 1, shown),
+                was_clipped,
+                limits,
+            );
         }
     }
 
@@ -2393,30 +2589,99 @@ complexity_threshold = 0.4
         assert!(err.contains("xyz.txt"), "error should name the path: {err}");
     }
 
+    fn numbered_lines(n: usize) -> String {
+        (1..=n).map(|i| format!("line {i:06} of the big file\n")).collect()
+    }
+
+    fn read(server: &mut McpServer, input: serde_json::Value) -> String {
+        server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_read_file".to_string(),
+                input,
+                intent: None,
+            })
+            .expect("read should succeed")
+            .output
+    }
+
     #[test]
     fn test_sqz_read_file_respects_max_bytes() {
-        // Huge files get truncated at max_bytes. The header must
-        // report the truncation so the agent knows to fetch more
-        // if it needs the tail.
+        // Truncation lands on a line boundary and the header says where
+        // to continue, so the agent can page through the rest.
         let (mut server, dir) = make_server();
         let file_path = dir.path().join("big.txt");
-        let content = "x".repeat(100_000);
+        let content = numbered_lines(100);
         std::fs::write(&file_path, &content).expect("write big file");
+        let line_len = "line 000001 of the big file\n".len();
 
-        let req = ToolCallRequest {
-            tool_id: "sqz_read_file".to_string(),
-            input: serde_json::json!({
-                "path": file_path.to_string_lossy(),
-                "max_bytes": 1024
-            }),
-            intent: None,
-        };
-        let resp = server.handle_tool_call(req).expect("read should succeed");
+        let out = read(&mut server, serde_json::json!({ "path": file_path.to_string_lossy(), "max_bytes": line_len * 3 + 5 }));
+        let (header, body) = out.split_once('\n').unwrap();
         assert!(
-            resp.output.contains("truncated_to=1024"),
-            "truncation must be reported in header; got: {}",
-            resp.output
+            header.contains(&format!(" lines=1-3 of 100 truncated_to={} continue_with_offset=4]", line_len * 3 + 5)),
+            "{header}"
         );
+        assert_eq!(body, line_range(&content, 1, 3));
+
+        let next = read(&mut server, serde_json::json!({ "path": file_path.to_string_lossy(), "offset": 4, "limit": 2 }));
+        assert!(next.ends_with("line 000004 of the big file\nline 000005 of the big file\n"), "{next}");
+    }
+
+    #[test]
+    fn test_sqz_read_file_default_cap_and_ranged_read_past_it() {
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("huge.log");
+        let content = numbered_lines(20_000);
+        assert!(content.len() > READ_DEFAULT_MAX_BYTES);
+        std::fs::write(&file_path, &content).unwrap();
+
+        let out = read(&mut server, serde_json::json!({ "path": file_path.to_string_lossy() }));
+        let (header, body) = out.split_once('\n').unwrap();
+        assert!(header.contains(&format!("truncated_to={READ_DEFAULT_MAX_BYTES}")), "{header}");
+        assert!(body.len() <= READ_DEFAULT_MAX_BYTES && body.ends_with('\n'));
+        let shown = body.lines().count();
+        assert!(header.contains(&format!(" lines=1-{shown} of 20000 ")), "{header}");
+        assert!(header.contains(&format!("continue_with_offset={}", shown + 1)), "{header}");
+
+        // The cap applies after the range, so a read deep into the file works.
+        let deep = read(&mut server, serde_json::json!({ "path": file_path.to_string_lossy(), "offset": 19_999 }));
+        assert!(deep.contains(" lines=19999-20000 of 20000]"), "{deep}");
+        assert!(!deep.contains("truncated_to"), "{deep}");
+        assert!(deep.ends_with("line 019999 of the big file\nline 020000 of the big file\n"));
+
+        // 0 lifts the cap.
+        let all = read(&mut server, serde_json::json!({ "path": file_path.to_string_lossy(), "max_bytes": 0 }));
+        assert!(!all.contains("truncated_to"));
+    }
+
+    #[test]
+    fn test_sqz_read_file_reports_a_cut_line() {
+        // A single line longer than the cap is cut mid-line; the header
+        // says which line so the agent doesn't loop on the same offset.
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("min.js");
+        std::fs::write(&file_path, format!("{}\nsecond line\n", "é".repeat(1000))).unwrap();
+
+        let out = read(&mut server, serde_json::json!({ "path": file_path.to_string_lossy(), "max_bytes": 101 }));
+        let (header, body) = out.split_once('\n').unwrap();
+        assert!(header.contains(" lines=1-1 of 2 truncated_to=101 line_cut=1 continue_with_offset=2]"), "{header}");
+        assert_eq!(body, "é".repeat(50), "cut on a char boundary");
+    }
+
+    #[test]
+    fn test_sqz_read_file_refuses_files_over_the_hard_limit() {
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("sparse.bin");
+        let f = std::fs::File::create(&file_path).unwrap();
+        f.set_len(READ_HARD_LIMIT_BYTES + 1).unwrap();
+        let err = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_read_file".to_string(),
+                input: serde_json::json!({ "path": file_path.to_string_lossy() }),
+                intent: None,
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too large") && err.contains("sparse.bin"), "{err}");
     }
 
     /// Regression for issue #12 follow-up (@JCKodel): MCP file tools
@@ -2638,6 +2903,72 @@ complexity_threshold = 0.4
         );
     }
 
+    fn list(server: &mut McpServer, input: serde_json::Value) -> String {
+        server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_list_dir".to_string(),
+                input,
+                intent: None,
+            })
+            .expect("list should succeed")
+            .output
+    }
+
+    /// A project dir next to the test store, so listings and searches
+    /// don't see `sessions.db`.
+    fn project_dir(dir: &TempDir) -> std::path::PathBuf {
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn test_sqz_list_dir_depth_one_is_immediate_children() {
+        let (mut server, dir) = make_server();
+        let root = project_dir(&dir);
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        std::fs::write(root.join("src/nested/deep.rs"), "").unwrap();
+        std::fs::write(root.join("README.md"), "").unwrap();
+        let path = root.to_string_lossy().to_string();
+
+        let one = list(&mut server, serde_json::json!({ "path": path }));
+        assert!(one.contains("entries=2]"), "{one}");
+        assert!(one.contains("d src") && one.contains("f README.md"), "{one}");
+        assert!(!one.contains("lib.rs"), "default depth lists immediate children only: {one}");
+
+        let two = list(&mut server, serde_json::json!({ "path": path, "max_depth": 2 }));
+        assert!(two.contains("entries=4]"), "{two}");
+        assert!(two.contains("lib.rs") && two.contains("d src/nested"), "{two}");
+        assert!(!two.contains("deep.rs"), "{two}");
+
+        let zero = list(&mut server, serde_json::json!({ "path": path, "max_depth": 0 }));
+        assert!(zero.contains("entries=2]"), "{zero}");
+    }
+
+    #[test]
+    fn test_sqz_list_dir_max_entries() {
+        let (mut server, dir) = make_server();
+        let root = project_dir(&dir);
+        for i in 0..12 {
+            std::fs::write(root.join(format!("f{i:02}.txt")), "").unwrap();
+        }
+        let path = root.to_string_lossy().to_string();
+
+        let capped = list(&mut server, serde_json::json!({ "path": path, "max_entries": 5 }));
+        assert!(capped.contains("entries=5 stopped_at_max_entries=5]"), "{capped}");
+        assert!(capped.contains("f04.txt") && !capped.contains("f05.txt"), "{capped}");
+
+        // Exactly at the cap is not a cut.
+        let exact = list(&mut server, serde_json::json!({ "path": path, "max_entries": 12 }));
+        assert!(exact.contains("entries=12]"), "{exact}");
+
+        // Skipped entries after the last listed one don't trip the cap.
+        std::fs::create_dir(root.join("vendor")).unwrap();
+        let skipped = list(&mut server, serde_json::json!({ "path": path, "max_entries": 12 }));
+        assert!(skipped.contains("entries=12]"), "{skipped}");
+    }
+
     #[test]
     fn test_sqz_grep_finds_literal_matches() {
         // Default mode is literal substring — that's what most agent
@@ -2742,7 +3073,84 @@ complexity_threshold = 0.4
             intent: None,
         };
         let resp = server.handle_tool_call(req).expect("grep should succeed");
-        assert!(resp.output.contains("matches=10"),
+        assert!(resp.output.contains("matches=10 max_matches_reached=10]"),
             "should stop at max_matches; got: {}", resp.output);
+    }
+
+    fn grep(server: &mut McpServer, input: serde_json::Value) -> String {
+        server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "sqz_grep".to_string(),
+                input,
+                intent: None,
+            })
+            .expect("grep should succeed")
+            .output
+    }
+
+    #[test]
+    fn test_sqz_grep_clips_long_lines_around_the_hit() {
+        // One minified line can be megabytes; the match must still show.
+        let (mut server, dir) = make_server();
+        let root = project_dir(&dir);
+        let line = format!("{}needle_here{}", "é".repeat(3000), "ü".repeat(3000));
+        std::fs::write(root.join("bundle.min.js"), format!("{line}\nshort needle_here line\n")).unwrap();
+        let input = serde_json::json!({ "pattern": "needle_here", "path": root.to_string_lossy() });
+
+        let out = grep(&mut server, input.clone());
+        let (header, body) = out.split_once('\n').unwrap();
+        assert!(header.contains("matches=2 long_lines_clipped=1 (max_line_chars=400)]"), "{header}");
+        let first = body.lines().next().unwrap();
+        let shown = first.split_once("bundle.min.js:1:").map(|(_, s)| s).unwrap();
+        assert_eq!(
+            shown,
+            format!("…{}needle_here{}… [line clipped: 6011 chars]", "é".repeat(194), "ü".repeat(195))
+        );
+        assert!(body.contains("bundle.min.js:2:short needle_here line"), "{body}");
+
+        // 0 lifts both caps. A fresh store so the reply isn't a delta
+        // against the clipped result.
+        let (mut fresh, _store) = make_server();
+        let mut uncapped = input;
+        uncapped["max_line_chars"] = 0.into();
+        uncapped["max_bytes"] = 0.into();
+        let whole = grep(&mut fresh, uncapped);
+        assert!(!whole.contains("clipped"), "{}", whole.chars().take(200).collect::<String>());
+        assert!(whole.contains(&line));
+    }
+
+    #[test]
+    fn test_clip_line_windows() {
+        let line: String = ('a'..='z').cycle().take(1000).collect();
+        // Hit at the start: no leading ellipsis.
+        let start = clip_line(&line, (0, 3), 100).unwrap();
+        assert!(start.starts_with("abc") && start.contains("… [line clipped: 1000 chars]"), "{start}");
+        // Hit at the end: window ends at the end of the line.
+        let end = clip_line(&line, (997, 1000), 100).unwrap();
+        assert!(end.starts_with('…') && end.ends_with(&format!("{} [line clipped: 1000 chars]", &line[900..])), "{end}");
+        // Hit longer than the window: the window starts at the hit.
+        let long = clip_line(&line, (500, 800), 100).unwrap();
+        assert!(long.starts_with(&format!("…{}", &line[500..600])), "{long}");
+        // Short lines are left alone.
+        assert!(clip_line("short", (0, 1), 100).is_none());
+    }
+
+    #[test]
+    fn test_sqz_grep_caps_total_bytes() {
+        let (mut server, dir) = make_server();
+        let root = project_dir(&dir);
+        let content: String = (0..2000).map(|i| format!("{i:05} match {}\n", "x".repeat(200))).collect();
+        std::fs::write(root.join("wide.txt"), content).unwrap();
+
+        let out = grep(&mut server, serde_json::json!({
+            "pattern": "match",
+            "path": root.to_string_lossy(),
+            "max_matches": 10_000
+        }));
+        let (header, body) = out.split_once('\n').unwrap();
+        assert!(header.contains(&format!("stopped_at_max_bytes={GREP_DEFAULT_MAX_BYTES}")), "{header}");
+        assert!(!header.contains("max_matches_reached"), "{header}");
+        assert!(body.len() <= GREP_DEFAULT_MAX_BYTES, "{}", body.len());
+        assert!(body.lines().count() > 100, "{}", body.lines().count());
     }
 }
