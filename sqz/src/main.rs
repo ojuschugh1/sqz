@@ -342,7 +342,8 @@ enum Command {
 
         /// Replay agent transcripts through the current engine instead of
         /// reading sqz's own history. Scans ~/.claude/projects and
-        /// ~/.kiro/sessions/cli for .jsonl files modified in the window.
+        /// ~/.kiro/sessions (CLI and IDE) for .jsonl files modified in the
+        /// window.
         #[arg(long)]
         replay: bool,
 

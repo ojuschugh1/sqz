@@ -185,6 +185,11 @@ impl CliProxy {
         }
     }
 
+    /// The engine behind this proxy, sharing its dedup cache.
+    pub fn engine(&self) -> &SqzEngine {
+        &self.engine
+    }
+
     /// Intercept `output` produced by `cmd`, compress it, and return the
     /// compressed text.
     ///

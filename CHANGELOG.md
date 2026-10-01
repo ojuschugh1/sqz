@@ -35,12 +35,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entries. Every cap is a tool parameter (`max_bytes`,
   `max_line_chars`, `max_entries`; 0 lifts it) and the header says when
   one cut the output.
+- **`sqz discover --replay` estimates what sqz can actually reach.**
+  1.9.0 ran every tool output through the full lossy pipeline, so web
+  fetches (which sqz can't intercept) and built-in file reads (which the
+  sqz read tools return losslessly) made up almost all of its estimate,
+  including the README example. Replay now handles each output the way
+  sqz could have reached it on that client: shell output through the hook
+  path (on Claude Code, split into commands the hook rewrites and ones it
+  skips), file reads dedup-only, other MCP servers exactly what
+  `sqz-mcp proxy` does, and web fetches, edits and sub-agent results
+  counted as out of reach. The report gives two totals, saved with no
+  help from the agent and saved if the agent uses every route, and says
+  how much of the second is the proxy's lossy first pass. Kiro IDE
+  sessions (`~/.kiro/sessions/<workspace>/<session>/`, sub-agent runs
+  included) are new, and Kiro CLI shell and MCP results, which the 1.9.0
+  parser skipped because they are JSON items, are read.
 
 ### Fixed
 
 - **`sqz_list_dir` listed two levels by default.** Its schema says
   `max_depth` 1 means the immediate children; it now does.
-
+- **The `compress` MCP tool cut its input to 500 characters.** It
+  compressed the serialized `{"text": …}` request instead of the text,
+  so the pipeline saw one long JSON string and returned its first 500
+  characters as `TOON:{text:"…"}`. It now compresses the `text` field.
+- **Entropy truncation no longer drops error lines.** A log without blank
+  lines is scored in 10-line windows, and a window holding an `ERROR`
+  line could fall below the median entropy and be dropped with the
+  routine ones. A segment that mentions an error, panic, traceback,
+  failure or exception is now always kept.
+- **`sqz-mcp proxy` says how to recover every lossy result.** On first
+  pass the pipeline cuts long JSON strings, summarizes deep objects and
+  shortens long arrays, but only entropy-truncated results carried the
+  `sqz_expand` hint, so an agent shown `... and 5 more items` had no ref
+  to ask for. Every first-pass compression now ends with the hint, and
+  the net-win gate counts it.
 - **`sqz doctor --fix` repairs log rows written by the pre-1.8.0
   token estimator.** sqz-mcp before 1.8.0 counted a read tool's input
   with chars/4 and its output with the BPE tokenizer, so verbatim

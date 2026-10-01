@@ -193,32 +193,43 @@ it finds.
 
 If you already use Claude Code or Kiro, your transcripts are on disk. Replay
 them through the sqz engine and get a counterfactual estimate on your own
-sessions — computed locally, nothing uploaded:
+sessions, computed locally with nothing uploaded. From the author's last
+week of Kiro IDE work, trimmed to the summary:
 
 ```sh
 $ sqz discover --replay
 sqz discover — counterfactual replay (last 7 days)
 ────────────────────────────────────────────────────────
 
-  Sessions replayed:   24
-  Tool outputs:        43
-  Tokens (original):   116,598
-  Tokens (compressed):  92,560
+  Kiro IDE: 35 sessions, 155 sub-agent runs, advisory
 
-  Estimated avoidable: 24,038 tokens (20.6%)
+                            outputs    tokens in    avoidable
+    shell                     6,297    1,917,662      454,028  23.7%
+    file reads                4,880    7,854,071      188,239   2.4%
+    other MCP servers         1,547    6,717,440    4,234,128  63.0%
+    already through sqz         260    1,393,517            -
+    out of reach              4,172    1,282,285            -
 
-  Largest opportunities:
-
-    source                tokens in    avoidable
-    web_fetch                 58,102       12,288
-    read                      37,085       10,486
+  Avoidable with no help from the agent:   0 tokens
+  Avoidable if the agent uses every route: 4,876,395 tokens, 25.4% of all tool output
+  Of that, 3,816,588 is the MCP proxy's lossy first pass.
 ```
 
-It scans `~/.claude/projects` and `~/.kiro/sessions/cli`, or point it
-anywhere with `--transcripts PATH`. Each session replays against a fresh
-throwaway cache, so dedup references never pretend to span sessions, and the
-report says "estimate" because that's what it is: these outputs were not
-compressed at the time.
+Each output is replayed the way sqz could actually have reached it on that
+client. Kiro can't let sqz rewrite a tool call, so the first total is zero
+there; on Claude Code the shell rows split into commands the hook rewrites
+on its own and ones it skips. The second total assumes the agent pipes shell
+output through `sqz compress`, reads files with the sqz MCP tools (lossless,
+so only repeats count) and runs MCP servers behind `sqz-mcp proxy`, and the
+report says how much of that is the proxy cutting long strings and arrays on
+first pass. Web fetches, edits and sub-agent results are out of reach on every
+client and are counted, not replayed.
+
+It scans `~/.claude/projects` and `~/.kiro/sessions` (Kiro CLI and IDE), or
+point it anywhere with `--transcripts PATH`. Each transcript replays against a
+fresh throwaway cache, so dedup references never pretend to span sessions,
+and the report says "estimate" because that's what it is: these outputs were
+not compressed at the time.
 
 **Only using one agent?** Pass `--only` (or `--skip`) to limit which
 configs are written:
