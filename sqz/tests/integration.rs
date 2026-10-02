@@ -402,19 +402,17 @@ fn test_compress_multiline_cli_output() {
 // ── TOON round-trip via compress ──────────────────────────────────────────────
 
 #[test]
-fn test_toon_output_is_ascii_safe() {
-    let json = r#"{"message":"héllo wörld","status":"ok"}"#;
+fn test_toon_output_keeps_text_and_escapes_controls() {
+    let json = r#"{"message":"héllo wörld","note":"bell\u0007here","status":"ok"}"#;
     let o = run(&["compress", json]);
     assert!(o.status.success());
     let out = stdout(&o);
-    // TOON output should only contain printable ASCII + standard whitespace
+    // Non-ASCII text costs fewer tokens as-is than as \u escapes.
+    assert!(out.contains("héllo wörld"), "text kept as-is: {out}");
     for ch in out.chars() {
-        if ch == '\n' || ch == '\r' || ch == '\t' {
-            continue;
-        }
         assert!(
-            ch.is_ascii() && (ch as u8) >= 0x20,
-            "non-ASCII char in output: {:?} (U+{:04X})", ch, ch as u32
+            !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'),
+            "raw control char in output: U+{:04X}", ch as u32
         );
     }
 }

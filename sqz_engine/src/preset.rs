@@ -232,12 +232,20 @@ pub struct CollapseArraysConfig {
     pub enabled: bool,
     #[serde(default = "default_max_items")]
     pub max_items: u32,
+    /// Arrays at or under this many characters of compact JSON are never
+    /// cut. 0 cuts on `max_items` alone.
+    #[serde(default = "default_collapse_max_chars")]
+    pub max_chars: u32,
     #[serde(default)]
     pub summary_template: String,
 }
 
 fn default_max_items() -> u32 {
     5
+}
+
+fn default_collapse_max_chars() -> u32 {
+    crate::stages::DEFAULT_COLLAPSE_MAX_CHARS as u32
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,6 +404,7 @@ impl Default for Preset {
                 collapse_arrays: Some(CollapseArraysConfig {
                     enabled: true,
                     max_items: 5,
+                    max_chars: default_collapse_max_chars(),
                     summary_template: "... and {remaining} more items".to_string(),
                 }),
                 custom_transforms: Some(CustomTransformsConfig { enabled: true }),

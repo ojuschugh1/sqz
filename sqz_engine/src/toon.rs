@@ -1,14 +1,17 @@
 /// TOON (Token-Optimized Object Notation) encoder/decoder.
 ///
-/// Produces lossless, ASCII-safe, compact representations of JSON values
-/// that use 30-60% fewer tokens than standard JSON formatting.
+/// Produces lossless, compact representations of JSON values that use
+/// 30-60% fewer tokens than standard JSON formatting.
 ///
 /// Format: `TOON:<encoded>`
 ///
 /// Encoding rules:
 /// - Objects: `{k:v,k:v}` — quotes dropped on simple keys, minimal separators
 /// - Arrays:  `[v,v,v]`   — no spaces
-/// - Strings: `"..."` with minimal escaping (only what JSON requires)
+/// - Arrays of objects: `[#k1,k2\nv,v\nv,v]` when shorter: a header row of
+///   keys, then one line per object. An empty cell means the key is absent.
+/// - Strings: `"..."` with minimal escaping; control characters are escaped,
+///   other text stays as-is
 /// - Numbers, booleans, null: compact as-is
 use crate::error::{Result, SqzError};
 
@@ -56,6 +59,11 @@ impl ToonEncoder {
 // ---------------------------------------------------------------------------
 
 fn encode_value(v: &serde_json::Value, buf: &mut String) {
+    encode_value_in(v, buf, true);
+}
+
+/// `tables` is off inside table cells so every row stays on one line.
+fn encode_value_in(v: &serde_json::Value, buf: &mut String, tables: bool) {
     match v {
         serde_json::Value::Null => buf.push_str("null"),
         serde_json::Value::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),
@@ -67,12 +75,15 @@ fn encode_value(v: &serde_json::Value, buf: &mut String) {
         }
         serde_json::Value::String(s) => encode_string(s, buf),
         serde_json::Value::Array(arr) => {
+            if tables && encode_table(arr, buf) {
+                return;
+            }
             buf.push('[');
             for (i, item) in arr.iter().enumerate() {
                 if i > 0 {
                     buf.push(',');
                 }
-                encode_value(item, buf);
+                encode_value_in(item, buf, tables);
             }
             buf.push(']');
         }
@@ -82,20 +93,88 @@ fn encode_value(v: &serde_json::Value, buf: &mut String) {
                 if i > 0 {
                     buf.push(',');
                 }
-                if is_simple_key(k) {
-                    buf.push_str(k);
-                } else {
-                    encode_string(k, buf);
-                }
+                encode_key(k, buf);
                 buf.push(':');
-                encode_value(val, buf);
+                encode_value_in(val, buf, tables);
             }
             buf.push('}');
         }
     }
 }
 
+fn encode_key(k: &str, buf: &mut String) {
+    if is_simple_key(k) {
+        buf.push_str(k);
+    } else {
+        encode_string(k, buf);
+    }
+}
+
+/// Write `arr` as a table when every element is an object, at least half
+/// the cells are filled, and the table is shorter than the plain form.
+/// Returns false, writing nothing, otherwise.
+fn encode_table(arr: &[serde_json::Value], buf: &mut String) -> bool {
+    if arr.len() < 2 {
+        return false;
+    }
+    let mut keys: Vec<&str> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut filled = 0usize;
+    for item in arr {
+        let serde_json::Value::Object(map) = item else {
+            return false;
+        };
+        filled += map.len();
+        for k in map.keys() {
+            if seen.insert(k.as_str()) {
+                keys.push(k);
+            }
+        }
+    }
+    if keys.is_empty() || filled * 2 < arr.len() * keys.len() {
+        return false;
+    }
+
+    let mut table = String::from("[#");
+    for (i, k) in keys.iter().enumerate() {
+        if i > 0 {
+            table.push(',');
+        }
+        encode_key(k, &mut table);
+    }
+    for item in arr {
+        table.push('\n');
+        for (i, k) in keys.iter().enumerate() {
+            if i > 0 {
+                table.push(',');
+            }
+            if let Some(val) = item.get(*k) {
+                encode_value_in(val, &mut table, false);
+            }
+        }
+    }
+    table.push(']');
+
+    let mut plain = String::from("[");
+    for (i, item) in arr.iter().enumerate() {
+        if i > 0 {
+            plain.push(',');
+        }
+        encode_value_in(item, &mut plain, false);
+    }
+    plain.push(']');
+
+    if table.len() < plain.len() {
+        buf.push_str(&table);
+        true
+    } else {
+        false
+    }
+}
+
 /// Encode a string with minimal escaping, wrapped in double quotes.
+/// Control characters and line separators are escaped; everything else,
+/// non-ASCII text included, is written as-is.
 fn encode_string(s: &str, buf: &mut String) {
     buf.push('"');
     for ch in s.chars() {
@@ -105,21 +184,8 @@ fn encode_string(s: &str, buf: &mut String) {
             '\n' => buf.push_str("\\n"),
             '\r' => buf.push_str("\\r"),
             '\t' => buf.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
+            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
                 buf.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c if (c as u32) > 0x7E => {
-                // Encode non-ASCII characters as \uXXXX (BMP) or surrogate pairs (supplementary)
-                let cp = c as u32;
-                if cp <= 0xFFFF {
-                    buf.push_str(&format!("\\u{:04x}", cp));
-                } else {
-                    // Encode as a UTF-16 surrogate pair
-                    let cp = cp - 0x10000;
-                    let high = 0xD800 + (cp >> 10);
-                    let low = 0xDC00 + (cp & 0x3FF);
-                    buf.push_str(&format!("\\u{:04x}\\u{:04x}", high, low));
-                }
             }
             c => buf.push(c),
         }
@@ -309,6 +375,9 @@ impl<'a> Parser<'a> {
 
     fn parse_array(&mut self) -> std::result::Result<serde_json::Value, String> {
         self.expect_byte(b'[')?;
+        if self.peek() == Some(b'#') {
+            return self.parse_table();
+        }
         let mut arr = Vec::new();
 
         if self.peek() == Some(b']') {
@@ -336,6 +405,34 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(serde_json::Value::Array(arr))
+    }
+
+    /// Parse the rest of a table after `[`: `#k1,k2` then one `\n`-led row
+    /// per object. Each row has one cell per key; an empty cell is a key the
+    /// object doesn't have.
+    fn parse_table(&mut self) -> std::result::Result<serde_json::Value, String> {
+        self.expect_byte(b'#')?;
+        let mut keys = vec![self.parse_key()?];
+        while self.peek() == Some(b',') {
+            self.advance();
+            keys.push(self.parse_key()?);
+        }
+        let mut rows = Vec::new();
+        while self.peek() == Some(b'\n') {
+            self.advance();
+            let mut map = serde_json::Map::new();
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    self.expect_byte(b',')?;
+                }
+                if !matches!(self.peek(), Some(b',' | b'\n' | b']') | None) {
+                    map.insert(key.clone(), self.parse_value()?);
+                }
+            }
+            rows.push(serde_json::Value::Object(map));
+        }
+        self.expect_byte(b']')?;
+        Ok(serde_json::Value::Array(rows))
     }
 
     /// Parse a JSON-style quoted string (handles standard escape sequences).
@@ -704,16 +801,92 @@ mod tests {
     }
 
     #[test]
-    fn ascii_safe_output() {
-        let v = json!({"key": "hello world", "num": 42});
+    fn control_chars_are_escaped() {
+        let v = json!({"key": "tab\there\u{0}nul\u{7f}del\u{2028}ls", "num": 42});
         let s = enc(&v);
-        for ch in s.chars() {
-            assert!(
-                ch.is_ascii() && (ch as u8) >= 0x20,
-                "non-ASCII or control char in output: {:?}",
-                ch
-            );
-        }
+        assert!(!s.chars().any(|c| c.is_control()), "raw control char in {s:?}");
+        assert!(!s.contains('\u{2028}'), "raw line separator in {s:?}");
+        assert_eq!(rt(v.clone()), v);
+    }
+
+    #[test]
+    fn non_ascii_text_is_kept_as_is() {
+        let v = json!({"title": "Design note 📄", "jp": "こんにちは", "de": "Größe"});
+        let s = enc(&v);
+        assert!(s.contains("📄") && s.contains("こんにちは") && s.contains("Größe"), "{s}");
+        assert!(!s.contains("\\u"), "no \\u escapes for printable text: {s}");
+        assert_eq!(rt(v.clone()), v);
+    }
+
+    // --- tables ---
+
+    #[test]
+    fn uniform_objects_become_a_table() {
+        let v = json!([
+            {"id": 1, "name": "alpha"},
+            {"id": 2, "name": "beta"},
+            {"id": 3, "name": "gamma"}
+        ]);
+        assert_eq!(enc(&v), "TOON:[#id,name\n1,\"alpha\"\n2,\"beta\"\n3,\"gamma\"]");
+        assert_eq!(rt(v.clone()), v);
+    }
+
+    #[test]
+    fn table_marks_absent_keys_with_empty_cells() {
+        let v = json!([
+            {"a": 1, "b": "x", "c": null},
+            {"a": 2, "c": false},
+            {"a": 3, "b": "", "c": true}
+        ]);
+        let s = enc(&v);
+        assert!(s.starts_with("TOON:[#a,b,c\n"), "{s}");
+        assert!(s.contains("\n2,,false\n"), "absent b is an empty cell: {s}");
+        assert!(s.contains("\n3,\"\",true]"), "empty string stays distinct: {s}");
+        assert_eq!(rt(v.clone()), v);
+    }
+
+    #[test]
+    fn table_rows_stay_on_one_line() {
+        let v = json!({"items": [
+            {"id": 1, "user": {"login": "ana"}, "labels": [{"name": "bug"}, {"name": "ui"}], "body": "a\nb"},
+            {"id": 2, "user": {"login": "wei"}, "labels": [{"name": "docs"}, {"name": "x"}], "body": "c"},
+            {"id": 3, "user": {"login": "bot"}, "labels": [], "body": "d,e"}
+        ]});
+        let s = enc(&v);
+        assert_eq!(s.lines().count(), 4, "header plus one line per row: {s}");
+        assert!(s.contains("labels:") || s.contains(",labels"), "{s}");
+        assert_eq!(rt(v.clone()), v);
+    }
+
+    #[test]
+    fn sparse_or_mixed_arrays_stay_plain() {
+        let sparse = json!([{"a": 1}, {"b": 2}, {"c": 3}, {"d": 4}]);
+        assert!(!enc(&sparse).contains("[#"), "{}", enc(&sparse));
+        assert_eq!(rt(sparse.clone()), sparse);
+
+        let mixed = json!([{"a": 1}, {"a": 2}, 3]);
+        assert!(!enc(&mixed).contains("[#"), "{}", enc(&mixed));
+        assert_eq!(rt(mixed.clone()), mixed);
+
+        let single = json!([{"a": 1, "b": 2}]);
+        assert_eq!(enc(&single), "TOON:[{a:1,b:2}]");
+    }
+
+    #[test]
+    fn table_keys_are_quoted_when_needed() {
+        let v = json!([
+            {"my-key": 1, "true": "t", "a b": [1, 2]},
+            {"my-key": 2, "true": "f", "a b": []}
+        ]);
+        assert!(enc(&v).starts_with("TOON:[#"), "{}", enc(&v));
+        assert_eq!(rt(v.clone()), v);
+    }
+
+    #[test]
+    fn decode_rejects_ragged_rows() {
+        assert!(ToonEncoder.decode("TOON:[#a,b\n1]").is_err(), "too few cells");
+        assert!(ToonEncoder.decode("TOON:[#a\n1,2]").is_err(), "too many cells");
+        assert!(ToonEncoder.decode("TOON:[#\n1]").is_err(), "no keys");
     }
 
     // --- is_json tests ---

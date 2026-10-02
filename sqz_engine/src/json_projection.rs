@@ -2,17 +2,17 @@
 /// relevant to the current context.
 ///
 /// Unlike `strip_nulls` (removes null values) or `keep_fields` (requires
-/// an explicit field list), projection automatically identifies and removes
-/// low-value fields based on content patterns:
+/// an explicit field list), projection automatically removes low-value
+/// fields by default:
 ///
-/// - Internal/debug fields: `_id`, `__v`, `debug_*`, `internal_*`, `trace_*`
-/// - Metadata bloat: `created_by`, `updated_by`, `etag`, `_links`, `_embedded`
-/// - Redundant timestamps: keeps `created_at`, drops `modified_at` if same day
-/// - Empty collections: `[]`, `{}`
-/// - Verbose nested objects below a depth threshold
+/// - Bookkeeping fields by exact name: `__v`, `etag`, request and
+///   correlation ids
+/// - Empty collections and strings: `[]`, `{}`, `""`
 ///
-/// The projection is conservative — it only removes fields that are
-/// demonstrably low-value for LLM comprehension.
+/// Prefix rules, same-day timestamp dedup, and depth summaries are opt-in.
+/// Names like `_id`, `_source`, `_embedded`, `_links`, `cursor`, or
+/// `traceback` carry the payload, the record id, or the next page in real
+/// APIs, so the defaults leave them alone.
 
 use crate::error::Result;
 
@@ -24,38 +24,30 @@ pub struct ProjectionConfig {
     /// Remove fields matching these exact names (case-insensitive).
     pub strip_names: Vec<String>,
     /// Maximum nesting depth to preserve. Objects deeper than this
-    /// are replaced with `{...N keys}`. Default: 5.
+    /// are replaced with `{...N keys}`. Default: 64.
     pub max_depth: usize,
     /// Remove empty arrays and objects. Default: true.
     pub strip_empty: bool,
-    /// Remove redundant timestamps (keep only the most recent). Default: true.
+    /// Keep one timestamp per calendar day per object. Default: false,
+    /// since `closed_at` on the day an issue opened still matters.
     pub dedup_timestamps: bool,
 }
 
 impl Default for ProjectionConfig {
     fn default() -> Self {
         Self {
-            strip_prefixes: vec![
-                "_".to_string(),
-                "debug".to_string(),
-                "internal".to_string(),
-                "trace".to_string(),
-                "x_".to_string(),
-            ],
+            strip_prefixes: Vec::new(),
             strip_names: vec![
                 "__v".to_string(),
-                "__typename".to_string(),
                 "etag".to_string(),
-                "_links".to_string(),
-                "_embedded".to_string(),
-                "cursor".to_string(),
                 "request_id".to_string(),
                 "x_request_id".to_string(),
                 "correlation_id".to_string(),
             ],
-            max_depth: 5,
+            // Guards pathological nesting only; real payloads go deeper than 5.
+            max_depth: 64,
             strip_empty: true,
-            dedup_timestamps: true,
+            dedup_timestamps: false,
         }
     }
 }
@@ -284,25 +276,70 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn project_default(input: serde_json::Value) -> (serde_json::Value, usize) {
+        let result =
+            project_json(&serde_json::to_string(&input).unwrap(), &ProjectionConfig::default()).unwrap();
+        (serde_json::from_str(&result.data).unwrap(), result.fields_removed)
+    }
+
     #[test]
-    fn test_strips_internal_fields() {
-        let input = json!({
+    fn test_strips_bookkeeping_fields_only() {
+        let (parsed, removed) = project_default(json!({
             "id": 1,
             "name": "Alice",
             "_id": "abc123",
             "__v": 3,
+            "etag": "W/\"1\"",
             "debug_info": "verbose stuff",
             "internal_state": "hidden"
-        });
-        let config = ProjectionConfig::default();
-        let result = project_json(&serde_json::to_string(&input).unwrap(), &config).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result.data).unwrap();
+        }));
         assert!(parsed.get("id").is_some(), "id should be kept");
-        assert!(parsed.get("name").is_some(), "name should be kept");
-        assert!(parsed.get("_id").is_none(), "_id should be stripped");
+        assert!(parsed.get("_id").is_some(), "a Mongo _id is the record id");
+        assert!(parsed.get("debug_info").is_some(), "no prefix guessing by default");
+        assert!(parsed.get("internal_state").is_some());
         assert!(parsed.get("__v").is_none(), "__v should be stripped");
-        assert!(parsed.get("debug_info").is_none(), "debug_info should be stripped");
-        assert!(result.fields_removed > 0);
+        assert!(parsed.get("etag").is_none(), "etag should be stripped");
+        assert_eq!(removed, 2);
+    }
+
+    #[test]
+    fn test_keeps_payload_fields_real_apis_put_behind_underscores() {
+        let (parsed, _) = project_default(json!({
+            "hits": {"hits": [{"_id": "doc-1", "_score": 9.5, "_source": {"title": "Runbook"}}]},
+            "_embedded": {"orders": [{"id": 7}]},
+            "_links": {"next": {"href": "/orders?page=2"}},
+            "cursor": "c2",
+            "traceback": "File \"app.py\", line 3",
+            "__typename": "Issue"
+        }));
+        assert_eq!(parsed["hits"]["hits"][0]["_source"]["title"], "Runbook");
+        assert_eq!(parsed["_embedded"]["orders"][0]["id"], 7);
+        assert_eq!(parsed["_links"]["next"]["href"], "/orders?page=2");
+        assert_eq!(parsed["cursor"], "c2");
+        assert!(parsed.get("traceback").is_some());
+        assert_eq!(parsed["__typename"], "Issue");
+    }
+
+    #[test]
+    fn test_keeps_deeply_nested_text() {
+        // Notion search: the title is six levels down.
+        let (parsed, _) = project_default(json!({
+            "results": [{"properties": {"title": {"title": [{"plain_text": "Design note"}]}}}]
+        }));
+        assert_eq!(
+            parsed["results"][0]["properties"]["title"]["title"][0]["plain_text"],
+            "Design note"
+        );
+    }
+
+    #[test]
+    fn test_keeps_same_day_timestamps_by_default() {
+        let (parsed, removed) = project_default(json!({
+            "created_at": "2024-01-15T10:00:00Z",
+            "closed_at": "2024-01-15T14:30:00Z"
+        }));
+        assert!(parsed.get("closed_at").is_some());
+        assert_eq!(removed, 0);
     }
 
     #[test]
@@ -350,7 +387,10 @@ mod tests {
             "updated_at": "2024-01-15T14:30:00Z",
             "modified_at": "2024-01-15T14:30:00Z"
         });
-        let config = ProjectionConfig::default();
+        let config = ProjectionConfig {
+            dedup_timestamps: true,
+            ..Default::default()
+        };
         let result = project_json(&serde_json::to_string(&input).unwrap(), &config).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result.data).unwrap();
         // Should keep created_at, drop one of the redundant same-day timestamps
@@ -412,7 +452,10 @@ mod tests {
                 "debug_flags": [1, 2, 3]
             }
         });
-        let config = ProjectionConfig::default();
+        let config = ProjectionConfig {
+            strip_prefixes: vec!["_".to_string(), "debug".to_string()],
+            ..Default::default()
+        };
         let result = project_json(&serde_json::to_string(&input).unwrap(), &config).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result.data).unwrap();
         assert!(parsed["user"].get("id").is_some());

@@ -365,129 +365,65 @@ impl CompressionStage for TruncateStringsStage {
 // Stage 7: collapse_arrays
 // ---------------------------------------------------------------------------
 
-/// For JSON content, if an array has more than `max_items` elements:
-/// 1. First, try tabular encoding: if all elements are objects with the same
-///    keys, encode as a header row + data rows for maximum compression.
-/// 2. Otherwise, keep the first `max_items` and replace the rest with a
-///    summary string element.
+/// For JSON content, cap arrays that are both long and large. An array with
+/// more than `max_items` elements whose compact JSON is over `max_chars`
+/// keeps leading elements up to `max_chars` (never fewer than `max_items`)
+/// and ends with a summary string element. Smaller arrays stay whole, so a
+/// search result or a page of records keeps every entry.
 ///
 /// Config options:
 ///   - `max_items` (u32, default 5)
+///   - `max_chars` (u32, default 32000; 0 caps on `max_items` alone)
 ///   - `summary_template` (string, default "... and {remaining} more items")
 /// Non-JSON content passes through unchanged.
 pub struct CollapseArraysStage;
 
-/// Check if all elements in an array are objects with the same set of keys.
-/// Returns the shared keys in a stable order if uniform, None otherwise.
-fn detect_uniform_array(arr: &[serde_json::Value]) -> Option<Vec<String>> {
-    if arr.len() < 2 {
-        return None;
-    }
-
-    let first_keys: Vec<String> = match &arr[0] {
-        serde_json::Value::Object(map) => {
-            if map.is_empty() {
-                return None;
-            }
-            map.keys().cloned().collect()
-        }
-        _ => return None,
-    };
-
-    // Check that every element is an object with exactly the same keys
-    for item in &arr[1..] {
-        match item {
-            serde_json::Value::Object(map) => {
-                if map.len() != first_keys.len() {
-                    return None;
-                }
-                for key in &first_keys {
-                    if !map.contains_key(key) {
-                        return None;
-                    }
-                }
-            }
-            _ => return None,
-        }
-    }
-
-    Some(first_keys)
-}
-
-/// Encode a uniform array of objects as a compact tabular string:
-/// `[headers] | col1 | col2 | ... \n val1 | val2 | ...`
-fn encode_tabular(arr: &[serde_json::Value], keys: &[String]) -> String {
-    let mut lines = Vec::with_capacity(arr.len() + 1);
-
-    // Header row
-    lines.push(keys.join(" | "));
-
-    // Data rows
-    for item in arr {
-        if let serde_json::Value::Object(map) = item {
-            let row: Vec<String> = keys
-                .iter()
-                .map(|k| value_to_compact_string(map.get(k).unwrap_or(&serde_json::Value::Null)))
-                .collect();
-            lines.push(row.join(" | "));
-        }
-    }
-
-    lines.join("\n")
-}
-
-/// Convert a JSON value to a compact single-line string for tabular display.
-fn value_to_compact_string(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            if s.len() > 50 {
-                format!("{}...", crate::text_boundary::truncate_str(s, 47))
-            } else {
-                s.clone()
-            }
-        }
-        serde_json::Value::Array(a) => format!("[{} items]", a.len()),
-        serde_json::Value::Object(m) => format!("{{{} keys}}", m.len()),
-    }
-}
+/// About 8K tokens of compact JSON per array.
+pub const DEFAULT_COLLAPSE_MAX_CHARS: usize = 32_000;
 
 fn collapse_arrays_recursive(
     value: &mut serde_json::Value,
     max_items: usize,
+    max_chars: usize,
     summary_template: &str,
 ) {
     match value {
         serde_json::Value::Array(arr) => {
-            // First recurse into existing items
             for item in arr.iter_mut() {
-                collapse_arrays_recursive(item, max_items, summary_template);
+                collapse_arrays_recursive(item, max_items, max_chars, summary_template);
             }
-
-            // Try tabular encoding for uniform arrays
-            if arr.len() > max_items {
-                if let Some(keys) = detect_uniform_array(arr) {
-                    let table = encode_tabular(arr, &keys);
-                    let count = arr.len();
-                    arr.clear();
-                    arr.push(serde_json::Value::String(
-                        format!("[table: {count} rows]\n{table}"),
-                    ));
-                    return;
+            if arr.len() <= max_items {
+                return;
+            }
+            let sizes: Vec<usize> = arr
+                .iter()
+                .map(|v| serde_json::to_string(v).map(|s| s.len()).unwrap_or(0))
+                .collect();
+            // Brackets plus one comma between elements.
+            let total = sizes.iter().sum::<usize>() + sizes.len() + 1;
+            if total <= max_chars {
+                return;
+            }
+            let mut keep = 0;
+            let mut used = 2;
+            for size in &sizes {
+                if keep >= max_items && used + size + 1 > max_chars {
+                    break;
                 }
-
-                // Fallback: simple truncation with summary
-                let remaining = arr.len() - max_items;
-                arr.truncate(max_items);
-                let summary = summary_template.replace("{remaining}", &remaining.to_string());
-                arr.push(serde_json::Value::String(summary));
+                used += size + 1;
+                keep += 1;
             }
+            if keep >= arr.len() {
+                return;
+            }
+            let remaining = arr.len() - keep;
+            arr.truncate(keep);
+            let summary = summary_template.replace("{remaining}", &remaining.to_string());
+            arr.push(serde_json::Value::String(summary));
         }
         serde_json::Value::Object(map) => {
             for v in map.values_mut() {
-                collapse_arrays_recursive(v, max_items, summary_template);
+                collapse_arrays_recursive(v, max_items, max_chars, summary_template);
             }
         }
         _ => {}
@@ -513,15 +449,22 @@ impl CompressionStage for CollapseArraysStage {
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
             .unwrap_or(5);
+        let max_chars: usize = config
+            .options
+            .get("max_chars")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(DEFAULT_COLLAPSE_MAX_CHARS);
         let summary_template = config
             .options
             .get("summary_template")
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .unwrap_or("... and {remaining} more items")
             .to_owned();
 
         with_json(content, |value| {
-            collapse_arrays_recursive(value, max_items, &summary_template);
+            collapse_arrays_recursive(value, max_items, max_chars, &summary_template);
             Ok(())
         })
     }
@@ -1094,6 +1037,7 @@ mod tests {
         let mut c = json_content(r#"{"items":[1,2,3,4,5,6,7]}"#);
         let cfg = enabled_config(json!({
             "max_items": 5,
+            "max_chars": 0,
             "summary_template": "... and {remaining} more items"
         }));
         CollapseArraysStage.process(&mut c, &cfg).unwrap();
@@ -1289,126 +1233,77 @@ mod tests {
         assert_eq!(c.raw, raw);
     }
 
-    // --- tabular encoding (in collapse_arrays) ---
+    fn records(n: usize, body_len: usize) -> serde_json::Value {
+        let items: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                let mut r = json!({"id": i, "title": format!("record {i}"), "body": "x".repeat(body_len)});
+                if i % 3 == 0 {
+                    r["draft"] = json!(true);
+                }
+                r
+            })
+            .collect();
+        json!({ "items": items })
+    }
 
-    #[test]
-    fn collapse_arrays_tabular_encoding_uniform_objects() {
-        // Array of objects with identical keys → should produce tabular output
-        let raw = r#"{"users":[
-            {"id":1,"name":"Alice","role":"admin"},
-            {"id":2,"name":"Bob","role":"user"},
-            {"id":3,"name":"Carol","role":"user"},
-            {"id":4,"name":"Dave","role":"admin"},
-            {"id":5,"name":"Eve","role":"user"},
-            {"id":6,"name":"Frank","role":"user"}
-        ]}"#;
-        let mut c = json_content(raw);
-        let cfg = enabled_config(json!({
-            "max_items": 3,
-            "summary_template": "... and {remaining} more items"
-        }));
-        CollapseArraysStage.process(&mut c, &cfg).unwrap();
+    fn collapse(raw: &serde_json::Value, opts: serde_json::Value) -> Vec<serde_json::Value> {
+        let mut c = json_content(&raw.to_string());
+        CollapseArraysStage.process(&mut c, &enabled_config(opts)).unwrap();
         let v: serde_json::Value = serde_json::from_str(&c.raw).unwrap();
-        let arr = v["users"].as_array().unwrap();
-        // Should be collapsed to a single tabular string element
-        assert_eq!(arr.len(), 1, "uniform array should be encoded as single table element");
-        let table_str = arr[0].as_str().unwrap();
-        assert!(table_str.contains("[table: 6 rows]"), "should contain row count: {}", table_str);
-        assert!(table_str.contains("Alice"), "should contain data: {}", table_str);
-        assert!(table_str.contains("Frank"), "should contain all rows: {}", table_str);
+        v["items"].as_array().unwrap().clone()
     }
 
     #[test]
-    fn collapse_arrays_mixed_objects_falls_back_to_truncation() {
-        // Array of objects with DIFFERENT keys → should fall back to truncation
-        let raw = r#"{"items":[
-            {"id":1,"name":"Alice"},
-            {"x":2,"y":3},
-            {"id":3,"name":"Carol"},
-            {"x":4,"y":5},
-            {"id":5,"name":"Eve"},
-            {"x":6,"y":7}
-        ]}"#;
-        let mut c = json_content(raw);
-        let cfg = enabled_config(json!({
-            "max_items": 3,
-            "summary_template": "... and {remaining} more items"
-        }));
-        CollapseArraysStage.process(&mut c, &cfg).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&c.raw).unwrap();
-        let arr = v["items"].as_array().unwrap();
-        // Should fall back to truncation: 3 kept + 1 summary
+    fn collapse_arrays_keeps_every_record_under_the_size_cap() {
+        // Ten search results with uneven keys: nothing may be dropped.
+        let arr = collapse(&records(10, 300), json!({"max_items": 5}));
+        assert_eq!(arr.len(), 10);
+        assert!(arr.iter().all(|r| r.is_object()));
+    }
+
+    #[test]
+    fn collapse_arrays_caps_large_arrays_by_size() {
+        let arr = collapse(&records(100, 500), json!({"max_items": 5, "max_chars": 8000}));
+        let summary = arr.last().unwrap().as_str().unwrap();
+        let kept = arr.len() - 1;
+        assert!(kept >= 5, "kept {kept}");
+        assert_eq!(summary, format!("... and {} more items", 100 - kept));
+        let kept_size = serde_json::to_string(&arr[..kept]).unwrap().len();
+        assert!(kept_size <= 8000, "kept {kept_size} chars");
+        assert_eq!(arr[0]["id"], 0, "leading records are the ones kept");
+    }
+
+    #[test]
+    fn collapse_arrays_keeps_max_items_when_items_are_huge() {
+        let arr = collapse(&records(10, 5000), json!({"max_items": 5, "max_chars": 8000}));
+        assert_eq!(arr.len(), 6);
+        assert_eq!(arr[5].as_str().unwrap(), "... and 5 more items");
+    }
+
+    #[test]
+    fn collapse_arrays_zero_max_chars_caps_on_count() {
+        let arr = collapse(&records(7, 10), json!({"max_items": 3, "max_chars": 0}));
         assert_eq!(arr.len(), 4);
-        assert!(arr[3].as_str().unwrap().contains("3 more items"));
+        assert_eq!(arr[3].as_str().unwrap(), "... and 4 more items");
+    }
+
+    #[test]
+    fn collapse_arrays_empty_template_uses_default() {
+        let arr = collapse(
+            &records(7, 10),
+            json!({"max_items": 3, "max_chars": 0, "summary_template": ""}),
+        );
+        assert_eq!(arr[3].as_str().unwrap(), "... and 4 more items");
     }
 
     #[test]
     fn collapse_arrays_small_uniform_array_unchanged() {
-        // Uniform array but under max_items → no collapse
         let raw = r#"{"users":[{"id":1,"name":"Alice"},{"id":2,"name":"Bob"}]}"#;
         let mut c = json_content(raw);
         let cfg = enabled_config(json!({"max_items": 5}));
         CollapseArraysStage.process(&mut c, &cfg).unwrap();
         let v: serde_json::Value = serde_json::from_str(&c.raw).unwrap();
         assert_eq!(v["users"].as_array().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn detect_uniform_array_returns_keys_for_uniform() {
-        let arr = vec![
-            json!({"a": 1, "b": 2}),
-            json!({"a": 3, "b": 4}),
-        ];
-        let keys = detect_uniform_array(&arr);
-        assert!(keys.is_some());
-        let keys = keys.unwrap();
-        assert!(keys.contains(&"a".to_string()));
-        assert!(keys.contains(&"b".to_string()));
-    }
-
-    #[test]
-    fn detect_uniform_array_returns_none_for_mixed() {
-        let arr = vec![
-            json!({"a": 1, "b": 2}),
-            json!({"x": 3, "y": 4}),
-        ];
-        assert!(detect_uniform_array(&arr).is_none());
-    }
-
-    #[test]
-    fn detect_uniform_array_returns_none_for_non_objects() {
-        let arr = vec![json!(1), json!(2), json!(3)];
-        assert!(detect_uniform_array(&arr).is_none());
-    }
-
-    #[test]
-    fn detect_uniform_array_returns_none_for_single_element() {
-        let arr = vec![json!({"a": 1})];
-        assert!(detect_uniform_array(&arr).is_none());
-    }
-
-    #[test]
-    fn value_to_compact_string_truncates_long_strings() {
-        let long = "a".repeat(100);
-        let v = serde_json::Value::String(long);
-        let s = value_to_compact_string(&v);
-        assert!(s.len() <= 53); // 47 chars + "..."
-        assert!(s.ends_with("..."));
-    }
-
-    #[test]
-    fn value_to_compact_string_short_string_unchanged() {
-        let v = serde_json::Value::String("hello".to_string());
-        assert_eq!(value_to_compact_string(&v), "hello");
-    }
-
-    #[test]
-    fn value_to_compact_string_nested_types() {
-        assert_eq!(value_to_compact_string(&json!(null)), "null");
-        assert_eq!(value_to_compact_string(&json!(true)), "true");
-        assert_eq!(value_to_compact_string(&json!(42)), "42");
-        assert_eq!(value_to_compact_string(&json!([1, 2, 3])), "[3 items]");
-        assert_eq!(value_to_compact_string(&json!({"a": 1})), "{1 keys}");
     }
 
     // --- word_abbreviate ---

@@ -6,7 +6,7 @@
 //!
 //! ## What's included
 //!
-//! - TOON encoding for JSON (null stripping, array collapsing, tabular encoding)
+//! - TOON encoding for JSON (null stripping, size-capped array collapsing)
 //! - Content classification (JSON, code, logs, prose)
 //! - Text compression with phrase abbreviation and word shortening
 //! - Log condensing (repeated lines collapsed)
@@ -44,9 +44,9 @@
 //!
 //! ## Presets
 //!
-//! - `"minimal"` — TOON encoding only, no stripping
-//! - `"default"` — strip nulls + condense + TOON + word abbreviation
-//! - `"aggressive"` — all of default + collapse arrays at 5 items
+//! - `"minimal"`: TOON encoding only, no stripping
+//! - `"default"`: strip nulls + condense + TOON + word abbreviation
+//! - `"aggressive"`: all of default + a tighter cap on large arrays
 
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -162,92 +162,48 @@ fn strip_nulls(value: &mut serde_json::Value) {
     }
 }
 
-/// Collapse arrays with more than `max_items` elements.
-/// For uniform arrays (all objects with same keys), use tabular encoding.
-fn collapse_arrays(value: &mut serde_json::Value, max_items: usize) {
+/// Cap arrays that are both long and large: more than `max_items` elements
+/// and over `max_chars` of compact JSON. Leading elements up to `max_chars`
+/// are kept (never fewer than `max_items`), then a summary string. Smaller
+/// arrays stay whole. Same rule as sqz_engine's collapse_arrays stage.
+fn collapse_arrays(value: &mut serde_json::Value, max_items: usize, max_chars: usize) {
     match value {
         serde_json::Value::Array(arr) => {
             for item in arr.iter_mut() {
-                collapse_arrays(item, max_items);
+                collapse_arrays(item, max_items, max_chars);
             }
-            if arr.len() > max_items {
-                // Check for uniform array → tabular encoding
-                if let Some(keys) = detect_uniform_keys(arr) {
-                    let table = encode_table(arr, &keys);
-                    let count = arr.len();
-                    arr.clear();
-                    arr.push(serde_json::Value::String(
-                        format!("[table: {} rows]\n{}", count, table),
-                    ));
-                } else {
-                    let remaining = arr.len() - max_items;
-                    arr.truncate(max_items);
-                    arr.push(serde_json::Value::String(
-                        format!("... and {} more items", remaining),
-                    ));
+            if arr.len() <= max_items {
+                return;
+            }
+            let sizes: Vec<usize> = arr
+                .iter()
+                .map(|v| serde_json::to_string(v).map(|s| s.len()).unwrap_or(0))
+                .collect();
+            if sizes.iter().sum::<usize>() + sizes.len() + 1 <= max_chars {
+                return;
+            }
+            let mut keep = 0;
+            let mut used = 2;
+            for size in &sizes {
+                if keep >= max_items && used + size + 1 > max_chars {
+                    break;
                 }
+                used += size + 1;
+                keep += 1;
             }
+            if keep >= arr.len() {
+                return;
+            }
+            let remaining = arr.len() - keep;
+            arr.truncate(keep);
+            arr.push(serde_json::Value::String(format!("... and {remaining} more items")));
         }
         serde_json::Value::Object(map) => {
             for v in map.values_mut() {
-                collapse_arrays(v, max_items);
+                collapse_arrays(v, max_items, max_chars);
             }
         }
         _ => {}
-    }
-}
-
-fn detect_uniform_keys(arr: &[serde_json::Value]) -> Option<Vec<String>> {
-    if arr.len() < 2 {
-        return None;
-    }
-    let first_keys: Vec<String> = match &arr[0] {
-        serde_json::Value::Object(map) if !map.is_empty() => map.keys().cloned().collect(),
-        _ => return None,
-    };
-    for item in &arr[1..] {
-        match item {
-            serde_json::Value::Object(map) => {
-                if map.len() != first_keys.len() {
-                    return None;
-                }
-                for key in &first_keys {
-                    if !map.contains_key(key) {
-                        return None;
-                    }
-                }
-            }
-            _ => return None,
-        }
-    }
-    Some(first_keys)
-}
-
-fn encode_table(arr: &[serde_json::Value], keys: &[String]) -> String {
-    let mut lines = Vec::with_capacity(arr.len() + 1);
-    lines.push(keys.join(" | "));
-    for item in arr {
-        if let serde_json::Value::Object(map) = item {
-            let row: Vec<String> = keys
-                .iter()
-                .map(|k| compact_value(map.get(k).unwrap_or(&serde_json::Value::Null)))
-                .collect();
-            lines.push(row.join(" | "));
-        }
-    }
-    lines.join("\n")
-}
-
-fn compact_value(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            if s.len() > 50 { format!("{}...", &s[..47]) } else { s.clone() }
-        }
-        serde_json::Value::Array(a) => format!("[{} items]", a.len()),
-        serde_json::Value::Object(m) => format!("{{{} keys}}", m.len()),
     }
 }
 
@@ -614,10 +570,10 @@ impl WasmEngine {
             strip_nulls(&mut value);
         }
 
-        // Collapse arrays (Aggressive only, or Default with large arrays)
+        // Collapse large arrays (not in Minimal)
         match self.preset {
-            Preset::Aggressive => collapse_arrays(&mut value, 5),
-            Preset::Default => collapse_arrays(&mut value, 10),
+            Preset::Aggressive => collapse_arrays(&mut value, 5, 8_000),
+            Preset::Default => collapse_arrays(&mut value, 10, 32_000),
             Preset::Minimal => {}
         }
 
@@ -661,9 +617,9 @@ pub struct SqzWasm {
 impl SqzWasm {
     /// Create a new SqzWasm instance.
     /// `preset_json` selects the compression preset:
-    /// - `"minimal"` — TOON encoding only
-    /// - `"default"` — strip nulls + condense + TOON + word abbreviation
-    /// - `"aggressive"` — all of default + collapse arrays at 5 items
+    /// - `"minimal"`: TOON encoding only
+    /// - `"default"`: strip nulls + condense + TOON + word abbreviation
+    /// - `"aggressive"`: all of default + a tighter cap on large arrays
     #[wasm_bindgen(constructor)]
     pub fn new(preset_json: &str) -> Result<SqzWasm, JsValue> {
         let preset = Preset::from_str(preset_json);
@@ -907,20 +863,31 @@ mod tests {
     }
 
     #[test]
-    fn collapse_arrays_uniform() {
-        let mut v = serde_json::json!([
+    fn collapse_arrays_keeps_small_arrays_whole() {
+        let original = serde_json::json!([
             {"id": 1, "name": "Alice"},
-            {"id": 2, "name": "Bob"},
+            {"id": 2, "name": "Bob", "admin": true},
             {"id": 3, "name": "Carol"},
             {"id": 4, "name": "Dave"},
             {"id": 5, "name": "Eve"},
             {"id": 6, "name": "Frank"}
         ]);
-        collapse_arrays(&mut v, 3);
+        let mut v = original.clone();
+        collapse_arrays(&mut v, 3, 32_000);
+        assert_eq!(v, original, "every record and field survives");
+    }
+
+    #[test]
+    fn collapse_arrays_caps_large_arrays_by_size() {
+        let mut v = serde_json::Value::Array(
+            (0..50).map(|i| serde_json::json!({"id": i, "body": "x".repeat(400)})).collect(),
+        );
+        collapse_arrays(&mut v, 5, 4_000);
         let arr = v.as_array().unwrap();
-        assert_eq!(arr.len(), 1, "uniform array should be tabular-encoded");
-        let table = arr[0].as_str().unwrap();
-        assert!(table.contains("[table: 6 rows]"), "table: {table}");
+        let kept = arr.len() - 1;
+        assert!(kept >= 5 && kept < 50, "kept {kept}");
+        assert_eq!(arr[kept].as_str().unwrap(), format!("... and {} more items", 50 - kept));
+        assert!(serde_json::to_string(&arr[..kept]).unwrap().len() <= 4_000);
     }
 
     #[test]

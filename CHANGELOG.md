@@ -151,11 +151,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routine ones. A segment that mentions an error, panic, traceback,
   failure or exception is now always kept.
 - **`sqz-mcp proxy` says how to recover every lossy result.** On first
-  pass the pipeline cuts long JSON strings, summarizes deep objects and
-  shortens long arrays, but only entropy-truncated results carried the
-  `sqz_expand` hint, so an agent shown `... and 5 more items` had no ref
-  to ask for. Every first-pass compression now ends with the hint, and
-  the net-win gate counts it.
+  pass the pipeline can cut long JSON strings and large arrays, but only
+  entropy-truncated results carried the `sqz_expand` hint, so an agent
+  shown `... and 5 more items` had no ref to ask for. Every first-pass
+  compression now ends with the hint, and the net-win gate counts it.
+- **JSON output keeps every record and field.** Arrays over five
+  elements were cut to five unless every element had the same keys, so
+  a mixed search result (issues next to pull requests, Slack messages
+  with and without threads) showed half its entries, and arrays that
+  did share keys became a text table that printed nested objects as
+  `{6 keys}` (every Jira summary and status) and cut strings at 50
+  characters. JSON projection stripped any key starting with `_`,
+  `debug`, `internal`, `trace` or `x_` (an Elasticsearch hit's
+  `_source`, HAL's `_embedded`, a `traceback`), summarized anything five
+  levels down (Notion page titles), dropped `cursor` and `_links` (the
+  next page), and kept one timestamp per day, so `closed_at` went when
+  an issue closed the day it opened. Arrays are now cut only past 32,000
+  characters of compact JSON (`max_chars` in a preset's
+  `collapse_arrays`; 0 restores the count-only cap), projection removes
+  only `__v`, `etag` and request or correlation ids, and an array of
+  objects is written as a lossless TOON table: one header row of keys,
+  one line per object, an empty cell for a missing key. On seven MCP
+  payloads (GitHub, Jira, Notion, Elasticsearch, MongoDB, Slack) the
+  proxy now keeps every id and title, against about half before, and
+  saves 36% instead of 67%; most of the 67% was the dropped data. The
+  proxy and the `compress` MCP tool also get the verifier's safe-mode
+  fallback that `sqz compress` already had. The browser extension's
+  WASM source has the same array fix; its bundled build predates it.
+- **TOON keeps non-ASCII text as-is.** `é` was written as `\u00e9` and
+  an emoji as a 12-character surrogate pair, which costs more tokens
+  than the character itself. Control characters are still escaped.
 - **`sqz doctor --fix` repairs log rows written by the pre-1.8.0
   token estimator.** sqz-mcp before 1.8.0 counted a read tool's input
   with chars/4 and its output with the BPE tokenizer, so verbatim

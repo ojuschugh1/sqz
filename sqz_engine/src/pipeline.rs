@@ -265,35 +265,35 @@ impl CompressionPipeline {
         // verbatim — TOON re-encoding is data-lossless but reformats and
         // shifts line numbers, which breaks "read this file faithfully".
         let data = if !lossless && ToonEncoder::is_json(&content.raw) {
-            // Dictionary compression — observe and try to compress.
-            // Only use dict compression if it actually saves bytes (header overhead
-            // can make small payloads larger).
+            let json: serde_json::Value = serde_json::from_str(&content.raw)
+                .map_err(|e| SqzError::Other(format!("pipeline: JSON parse error: {e}")))?;
+            let encoded = self.toon_encoder.encode(&json)?;
+
+            // Short codes for repeated keys. Tables already print each key
+            // once, so the dictionary is kept only when it beats plain TOON
+            // with its header counted.
             self.dict_compressor.borrow_mut().observe(&content.raw);
             let dict_result = self.dict_compressor.borrow().compress(&content.raw)?;
-
-            if dict_result.substitutions > 0 && dict_result.bytes_saved > 50 {
-                // Dict compression was beneficial — encode the JSON body with TOON
-                stages_applied.push("dict_compress".to_owned());
-                if let Some(newline_pos) = dict_result.data.find("\n{") {
-                    let header = &dict_result.data[..newline_pos + 1];
-                    let json_body = &dict_result.data[newline_pos + 1..];
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_body) {
-                        let encoded = self.toon_encoder.encode(&json)?;
-                        stages_applied.push("toon_encode".to_owned());
-                        format!("{header}{encoded}")
-                    } else {
-                        dict_result.data
-                    }
-                } else {
-                    dict_result.data
-                }
+            let with_dict = if dict_result.substitutions > 0 {
+                dict_result.data.find("\n{").and_then(|pos| {
+                    let (header, body) = dict_result.data.split_at(pos + 1);
+                    let json = serde_json::from_str::<serde_json::Value>(body).ok()?;
+                    let body = self.toon_encoder.encode(&json).ok()?;
+                    Some(format!("{header}{body}"))
+                })
             } else {
-                // No beneficial dict substitutions — standard TOON encoding
-                let json: serde_json::Value = serde_json::from_str(&content.raw)
-                    .map_err(|e| SqzError::Other(format!("pipeline: JSON parse error: {e}")))?;
-                let encoded = self.toon_encoder.encode(&json)?;
-                stages_applied.push("toon_encode".to_owned());
-                encoded
+                None
+            };
+            match with_dict {
+                Some(dict) if dict.len() < encoded.len() => {
+                    stages_applied.push("dict_compress".to_owned());
+                    stages_applied.push("toon_encode".to_owned());
+                    dict
+                }
+                _ => {
+                    stages_applied.push("toon_encode".to_owned());
+                    encoded
+                }
             }
         } else {
             content.raw
@@ -449,6 +449,7 @@ fn stage_config_from_preset(name: &str, preset: &Preset) -> StageConfig {
                     enabled: cfg.enabled,
                     options: serde_json::json!({
                         "max_items": cfg.max_items,
+                        "max_chars": cfg.max_chars,
                         "summary_template": cfg.summary_template
                     }),
                 }
@@ -612,6 +613,7 @@ mod tests {
                 collapse_arrays: Some(CollapseArraysConfig {
                     enabled: true,
                     max_items: 5,
+                    max_chars: 32_000,
                     summary_template: "... and {remaining} more items".into(),
                 }),
                 custom_transforms: Some(CustomTransformsConfig { enabled: true }),
@@ -1052,11 +1054,12 @@ fn main() {
     proptest! {
         /// **Validates: Requirements 17.1, 17.2, 13.2**
         ///
-        /// Property 22: ASCII-safe output.
+        /// Property 22: no raw control characters.
         ///
         /// For any JSON input, the Compression_Pipeline SHALL produce output
-        /// using only ASCII-safe characters: printable ASCII (0x20–0x7E) plus
-        /// standard whitespace (\t = 0x09, \n = 0x0A, \r = 0x0D).
+        /// whose only control characters are standard whitespace (\t, \n,
+        /// \r). Text outside the control range is written as-is, the same as
+        /// non-JSON output.
         #[test]
         fn prop_pipeline_ascii_safe_output(v in arb_json_value()) {
             let preset = default_preset();
@@ -1067,13 +1070,11 @@ fn main() {
                 .expect("compress should not fail");
 
             for ch in result.data.chars() {
-                let cp = ch as u32;
-                let is_printable_ascii = cp >= 0x20 && cp <= 0x7E;
-                let is_standard_whitespace = cp == 0x09 || cp == 0x0A || cp == 0x0D;
+                let is_standard_whitespace = matches!(ch, '\t' | '\n' | '\r');
                 prop_assert!(
-                    is_printable_ascii || is_standard_whitespace,
-                    "non-ASCII-safe character in output: U+{:04X} ({:?})\noutput: {:?}",
-                    cp, ch, result.data
+                    !ch.is_control() || is_standard_whitespace,
+                    "raw control character in output: U+{:04X}\noutput: {:?}",
+                    ch as u32, result.data
                 );
             }
         }

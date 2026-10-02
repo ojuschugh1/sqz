@@ -713,4 +713,80 @@ mod tests {
         state.on_client_message(&req.to_string()).unwrap();
         assert!(state.pending.contains_key("\"abc-1\""));
     }
+
+    fn compressed_text(state: &mut ProxyState, id: u64, tool: &str, doc: &serde_json::Value) -> String {
+        let raw = serde_json::to_string_pretty(doc).unwrap();
+        let out = call_and_respond(state, id, tool, &raw);
+        let text = out.pointer("/result/content/0/text").unwrap().as_str().unwrap().to_string();
+        assert!(text.len() < raw.len(), "{tool} should compress: {text}");
+        text
+    }
+
+    #[test]
+    fn search_results_keep_every_record() {
+        let (mut state, _dir) = test_state();
+        // Issues and pull requests mixed, so the records don't share keys.
+        let items: Vec<serde_json::Value> = (0..10)
+            .map(|i| {
+                let mut item = serde_json::json!({
+                    "number": 40 + i,
+                    "title": format!("Hook rewrite case number {i}"),
+                    "state": if i % 2 == 0 { "open" } else { "closed" },
+                    "user": { "login": format!("dev{i}"), "type": "User" },
+                    "labels": [{ "name": "bug", "color": "d73a4a" }],
+                    "body": "Steps to reproduce: run sqz init, then compare the output line by line."
+                });
+                if i % 3 == 1 {
+                    item["pull_request"] = serde_json::json!({ "url": format!("https://example.com/pull/{i}") });
+                }
+                item
+            })
+            .collect();
+        let text = compressed_text(
+            &mut state,
+            1,
+            "search_issues",
+            &serde_json::json!({ "total_count": 10, "items": items }),
+        );
+        for i in 0..10 {
+            assert!(text.contains(&format!("Hook rewrite case number {i}")), "title {i} missing: {text}");
+            assert!(text.contains(&format!("dev{i}")), "login {i} missing: {text}");
+        }
+        assert!(!text.contains("more items"), "nothing truncated: {text}");
+    }
+
+    #[test]
+    fn nested_payload_fields_survive() {
+        let (mut state, _dir) = test_state();
+        let hits: Vec<serde_json::Value> = (0..10)
+            .map(|i| serde_json::json!({
+                "_index": "runbooks", "_id": format!("doc-{i}"), "_score": 9.5 - i as f64 * 0.4,
+                "_source": { "title": format!("Runbook for incident class {i}"), "team": "platform" }
+            }))
+            .collect();
+        let es = compressed_text(
+            &mut state,
+            2,
+            "search",
+            &serde_json::json!({ "took": 4, "hits": { "total": { "value": 10 }, "hits": hits } }),
+        );
+
+        let pages: Vec<serde_json::Value> = (0..10)
+            .map(|i| serde_json::json!({
+                "object": "page", "id": format!("page-{i:04}"),
+                "properties": { "title": { "title": [{ "plain_text": format!("Design note {i}") }] } }
+            }))
+            .collect();
+        let notion = compressed_text(
+            &mut state,
+            3,
+            "notion_search",
+            &serde_json::json!({ "object": "list", "results": pages }),
+        );
+        for i in 0..10 {
+            assert!(es.contains(&format!("doc-{i}")), "es id {i}: {es}");
+            assert!(es.contains(&format!("Runbook for incident class {i}")), "es _source {i}: {es}");
+            assert!(notion.contains(&format!("Design note {i}")), "notion title {i}: {notion}");
+        }
+    }
 }

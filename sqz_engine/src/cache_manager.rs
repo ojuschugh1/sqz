@@ -336,7 +336,23 @@ impl CacheManager {
         content: &[u8],
         pipeline: &CompressionPipeline,
     ) -> Result<CacheResult> {
-        self.get_or_compress_inner(path, content, pipeline, false)
+        let ctx = SessionContext {
+            session_id: "cache".to_string(),
+        };
+        let preset = Preset::default();
+        self.get_or_compress_inner(path, content, &|text| pipeline.compress(text, &ctx, &preset))
+    }
+
+    /// [`get_or_compress`](Self::get_or_compress) with the caller's own
+    /// compressor for misses and stale refs, so a cached result goes through
+    /// the same verification as an uncached one.
+    pub fn get_or_compress_with(
+        &self,
+        path: &Path,
+        content: &[u8],
+        compress: &dyn Fn(&str) -> Result<CompressedContent>,
+    ) -> Result<CacheResult> {
+        self.get_or_compress_inner(path, content, compress)
     }
 
     /// Lossless variant used by the file-read MCP tools (`sqz_read_file` /
@@ -350,15 +366,20 @@ impl CacheManager {
         content: &[u8],
         pipeline: &CompressionPipeline,
     ) -> Result<CacheResult> {
-        self.get_or_compress_inner(path, content, pipeline, true)
+        let ctx = SessionContext {
+            session_id: "cache".to_string(),
+        };
+        let preset = Preset::default();
+        self.get_or_compress_inner(path, content, &|text| {
+            pipeline.compress_lossless(text, &ctx, &preset)
+        })
     }
 
     fn get_or_compress_inner(
         &self,
         _path: &Path,
         content: &[u8],
-        pipeline: &CompressionPipeline,
-        lossless: bool,
+        compress: &dyn Fn(&str) -> Result<CompressedContent>,
     ) -> Result<CacheResult> {
         let hash = Self::sha256_hex(content);
 
@@ -384,15 +405,7 @@ impl CacheManager {
                 // The original may have been compacted out of the LLM's context.
                 let _ = self.store.record_cache_hit().map_err(|e| eprintln!("[sqz] cache stale-hit record error: {e}"));
                 let text = String::from_utf8_lossy(content).into_owned();
-                let ctx = SessionContext {
-                    session_id: "cache".to_string(),
-                };
-                let preset = Preset::default();
-                let compressed = if lossless {
-                    pipeline.compress_lossless(&text, &ctx, &preset)?
-                } else {
-                    pipeline.compress(&text, &ctx, &preset)?
-                };
+                let compressed = compress(&text)?;
                 // Record that we re-sent this content
                 self.record_ref_sent(&hash);
                 return Ok(CacheResult::Fresh { output: compressed });
@@ -412,15 +425,7 @@ impl CacheManager {
         let _ = self.store.record_cache_miss().map_err(|e| eprintln!("[sqz] cache miss record error: {e}"));
         if let Some(delta_result) = self.try_delta_encode(&text)? {
             // Store the new content in cache for future exact matches
-            let ctx = SessionContext {
-                session_id: "cache".to_string(),
-            };
-            let preset = Preset::default();
-            let compressed = if lossless {
-                pipeline.compress_lossless(&text, &ctx, &preset)?
-            } else {
-                pipeline.compress(&text, &ctx, &preset)?
-            };
+            let compressed = compress(&text)?;
             // Persist the raw bytes so `sqz expand <prefix>` can round-trip.
             self.store
                 .save_cache_entry_with_original(&hash, &compressed, Some(content))?;
@@ -435,15 +440,7 @@ impl CacheManager {
             });
         }
 
-        let ctx = SessionContext {
-            session_id: "cache".to_string(),
-        };
-        let preset = Preset::default();
-        let compressed = if lossless {
-            pipeline.compress_lossless(&text, &ctx, &preset)?
-        } else {
-            pipeline.compress(&text, &ctx, &preset)?
-        };
+        let compressed = compress(&text)?;
         self.store
             .save_cache_entry_with_original(&hash, &compressed, Some(content))?;
         self.index_for_similarity(&hash, &compressed.data);
@@ -1072,6 +1069,7 @@ mod tests {
                 collapse_arrays: Some(CollapseArraysConfig {
                     enabled: true,
                     max_items: 5,
+                    max_chars: 32_000,
                     summary_template: "... and {remaining} more items".into(),
                 }),
                 custom_transforms: Some(CustomTransformsConfig { enabled: true }),

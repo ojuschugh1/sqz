@@ -258,17 +258,16 @@ impl SqzEngine {
     /// compression instead of the 92% dedup path advertised in the
     /// README.
     pub fn compress_with_cache(&self, input: &str) -> Result<crate::cache_manager::CacheResult> {
-        let pipeline = self.pipeline.lock()
-            .map_err(|_| SqzError::Other("pipeline lock poisoned".into()))?;
         // The `path` argument is informational only — cache keys are
         // SHA-256 of the content bytes, not the path. Pass an empty
         // path so we don't partition the cache by accidental file
         // location differences (e.g. `./src/main.rs` vs
-        // `/abs/path/to/src/main.rs`).
-        self.cache_manager.get_or_compress(
+        // `/abs/path/to/src/main.rs`). Misses go through `compress`, so
+        // the verifier's safe-mode fallback applies here too.
+        self.cache_manager.get_or_compress_with(
             std::path::Path::new(""),
             input.as_bytes(),
-            &pipeline,
+            &|text| self.compress(text),
         )
     }
 
