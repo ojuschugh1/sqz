@@ -110,6 +110,95 @@ pub fn plan(command: &str) -> Result<Plan<'_>, Skip> {
     })
 }
 
+/// One command of a [`flat`] list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlatCmd {
+    /// Byte offset just past the command's last token.
+    pub end: usize,
+    /// The stats and formatter label, set when this command's output
+    /// should go through sqz.
+    pub label: Option<String>,
+    /// The command doesn't place stderr itself, so `2>&1` goes before the pipe.
+    pub merge_stderr: bool,
+}
+
+/// Commands too quiet to be worth a pipe.
+const QUIET: &[&str] = &[
+    "true", "false", ":", "sleep", "mkdir", "rmdir", "touch", "rm", "mv", "cp", "ln", "chmod",
+    "chown", "chgrp", "echo", "printf", "test", "[", "kill", "read", "clear", "unlink",
+    "truncate",
+];
+
+/// Split `command` into simple commands joined by `&&`, `||`, `;` or
+/// newlines, marking the ones whose output can go through sqz on their
+/// own. Nothing is grouped, so builtins keep running in the shell itself
+/// and a permission checker sees the user's commands as written.
+///
+/// `None` for a pipeline, subshell, group, loop, conditional, heredoc or
+/// background job, or when no command is worth piping.
+pub fn flat(command: &str) -> Option<Vec<FlatCmd>> {
+    let command = command.trim_end();
+    let mut scan = Scanner::new(command);
+    scan.list(false).ok()?;
+    if !scan.pending.is_empty() || scan.heredoc {
+        return None;
+    }
+    let segs = segments(command, &scan.toks).ok()?;
+    if segs.iter().any(|s| s.sep == Some(Sep::Pipe) || s.subshell || s.kw > 0) {
+        return None;
+    }
+    if segs.iter().filter_map(|s| s.cmd.as_deref()).any(|c| is_sqz(basename(c))) {
+        return None;
+    }
+    let braces = command.contains(['{', '}']);
+    let cmds: Vec<FlatCmd> = segs
+        .iter()
+        .map(|seg| {
+            let label = seg.cmd.as_deref().and_then(|cmd| {
+                let base = basename(cmd);
+                let text = &command[seg.first.unwrap_or(0)..seg.last];
+                let skip = STATE_BUILTINS.contains(&cmd)
+                    || QUIET.contains(&base)
+                    || seg.out
+                    || long_running(base, &seg.args)
+                    || watch_text(text);
+                if skip {
+                    return None;
+                }
+                flat_label(command, &seg.words, braces)
+            });
+            FlatCmd { end: seg.last, label, merge_stderr: !seg.err }
+        })
+        .collect();
+    cmds.iter().any(|c| c.label.is_some()).then_some(cmds)
+}
+
+/// The command word and the plain words after it, up to the first one with
+/// quotes, expansions or globs. With braces elsewhere in the command the
+/// label stays one unquoted word: some permission checkers treat a brace
+/// and a quote in the same command as possible obfuscation.
+fn flat_label(command: &str, words: &[(usize, usize)], braces: bool) -> Option<String> {
+    let plain = |w: &str| {
+        !w.is_empty()
+            && w.bytes().all(|c| c.is_ascii_alphanumeric() || b"_./:@+,=-".contains(&c))
+    };
+    let mut label = String::new();
+    for &(start, end) in words {
+        let word = &command[start..end];
+        if !plain(word) || label.len() + word.len() + 1 > 100 {
+            break;
+        }
+        if !label.is_empty() {
+            if braces {
+                break;
+            }
+            label.push(' ');
+        }
+        label.push_str(word);
+    }
+    (!label.is_empty()).then_some(label)
+}
+
 /// Watch and dev-server spellings matched on the whole command.
 fn watch_text(cmd: &str) -> bool {
     cmd.contains("--watch")
@@ -238,9 +327,11 @@ enum Sep {
 
 #[derive(Debug)]
 enum Tok {
-    Word { start: usize, plain: String },
+    Word { start: usize, end: usize, plain: String },
     Sep { kind: Sep, end: usize },
-    Redirect,
+    /// `out`: stdout goes somewhere other than the pipe. `err`: the
+    /// command already says where stderr goes.
+    Redirect { start: usize, end: usize, out: bool, err: bool },
     Subshell,
 }
 
@@ -332,7 +423,7 @@ impl<'a> Scanner<'a> {
                         self.i += 2;
                         self.sep(Sep::And, nested);
                     }
-                    Some(b'>') => self.redirect(nested)?,
+                    Some(b'>') => self.redirect(nested, self.i, None)?,
                     _ => return Err(Skip::Background),
                 },
                 b'|' => {
@@ -361,14 +452,16 @@ impl<'a> Scanner<'a> {
                     }
                     return Err(Skip::Unparsed);
                 }
-                b'<' | b'>' if self.peek(1) != Some(b'(') => self.redirect(nested)?,
+                b'<' | b'>' if self.peek(1) != Some(b'(') => self.redirect(nested, self.i, None)?,
                 _ => {
                     let digits = self.b[self.i..].iter().take_while(|c| c.is_ascii_digit()).count();
                     let op = self.b.get(self.i + digits).copied();
                     let after = self.b.get(self.i + digits + 1).copied();
                     if digits > 0 && matches!(op, Some(b'<' | b'>')) && after != Some(b'(') {
+                        let start = self.i;
+                        let fd = self.s[start..start + digits].parse().ok();
                         self.i += digits;
-                        self.redirect(nested)?;
+                        self.redirect(nested, start, fd)?;
                     } else {
                         self.word(nested)?;
                     }
@@ -385,7 +478,7 @@ impl<'a> Scanner<'a> {
                 return Err(Skip::Unparsed);
             }
         } else {
-            self.toks.push(Tok::Word { start, plain });
+            self.toks.push(Tok::Word { start, end: self.i, plain });
         }
         Ok(())
     }
@@ -563,39 +656,25 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// A redirection operator and its target word.
-    fn redirect(&mut self, nested: bool) -> Res<()> {
-        let heredoc = match (self.peek(0), self.peek(1), self.peek(2)) {
-            (Some(b'<'), Some(b'<'), Some(b'<')) => {
-                self.i += 3;
-                None
-            }
-            (Some(b'<'), Some(b'<'), Some(b'-')) => {
-                self.i += 3;
-                Some(true)
-            }
-            (Some(b'<'), Some(b'<'), _) => {
-                self.i += 2;
-                Some(false)
-            }
-            (Some(b'<'), Some(b'>' | b'&'), _) | (Some(b'>'), Some(b'>' | b'|' | b'&'), _) => {
-                self.i += 2;
-                None
-            }
-            (Some(b'&'), Some(b'>'), Some(b'>')) => {
-                self.i += 3;
-                None
-            }
-            (Some(b'&'), Some(b'>'), _) => {
-                self.i += 2;
-                None
-            }
-            (Some(b'<' | b'>'), _, _) => {
-                self.i += 1;
-                None
-            }
+    /// A redirection operator and its target word. `start` is where the
+    /// redirect began, including an fd number; `fd` is that number.
+    fn redirect(&mut self, nested: bool, start: usize, fd: Option<u32>) -> Res<()> {
+        let (op, heredoc) = match (self.peek(0), self.peek(1), self.peek(2)) {
+            (Some(b'<'), Some(b'<'), Some(b'<')) => ("<<<", None),
+            (Some(b'<'), Some(b'<'), Some(b'-')) => ("<<-", Some(true)),
+            (Some(b'<'), Some(b'<'), _) => ("<<", Some(false)),
+            (Some(b'<'), Some(b'>'), _) => ("<>", None),
+            (Some(b'<'), Some(b'&'), _) => ("<&", None),
+            (Some(b'>'), Some(b'>'), _) => (">>", None),
+            (Some(b'>'), Some(b'|'), _) => (">|", None),
+            (Some(b'>'), Some(b'&'), _) => (">&", None),
+            (Some(b'&'), Some(b'>'), Some(b'>')) => ("&>>", None),
+            (Some(b'&'), Some(b'>'), _) => ("&>", None),
+            (Some(b'<'), _, _) => ("<", None),
+            (Some(b'>'), _, _) => (">", None),
             _ => return Err(Skip::Unparsed),
         };
+        self.i += op.len();
         while matches!(self.peek(0), Some(b' ' | b'\t')) {
             self.i += 1;
         }
@@ -608,10 +687,22 @@ impl<'a> Scanner<'a> {
         let (_, target) = self.word_text()?;
         if let Some(strip_tabs) = heredoc {
             self.heredoc = true;
-            self.pending.push((target, strip_tabs));
+            self.pending.push((target.clone(), strip_tabs));
         }
+        let to_fd = !target.is_empty() && target.bytes().all(|c| c.is_ascii_digit());
+        let (out, err) = match (op, fd) {
+            ("&>" | "&>>", _) => (true, true),
+            (">" | ">>" | ">|", None | Some(1)) => (true, false),
+            (">" | ">>" | ">|" | ">&", Some(2)) => (false, true),
+            // `>&2` and `>&-` move stdout; bash's `>& file` moves both.
+            (">&", None | Some(1)) if target == "1" => (false, false),
+            (">&", None | Some(1)) => (true, !to_fd && target != "-"),
+            ("<>", Some(1)) => (true, false),
+            ("<>", Some(2)) => (false, true),
+            _ => (false, false),
+        };
         if !nested {
-            self.toks.push(Tok::Redirect);
+            self.toks.push(Tok::Redirect { start, end: self.i, out, err });
         }
         Ok(())
     }
@@ -653,6 +744,21 @@ struct Seg {
     /// The separator after this command and the offset just past it.
     sep: Option<Sep>,
     end: usize,
+    /// Byte range from the first token to the end of the last one.
+    first: Option<usize>,
+    last: usize,
+    /// Source ranges of the command word and the words after it.
+    words: Vec<(usize, usize)>,
+    /// A redirect sends stdout away from the pipe / already places stderr.
+    out: bool,
+    err: bool,
+}
+
+impl Seg {
+    fn span(&mut self, start: usize, end: usize) {
+        self.first.get_or_insert(start);
+        self.last = end;
+    }
 }
 
 fn segments(command: &str, toks: &[Tok]) -> Res<Vec<Seg>> {
@@ -676,7 +782,13 @@ fn segments(command: &str, toks: &[Tok]) -> Res<Vec<Seg>> {
                 at_cmd = true;
                 wrapper = false;
             }
-            Tok::Redirect => segs.last_mut().expect("never empty").tokens += 1,
+            Tok::Redirect { start, end, out, err } => {
+                let seg = segs.last_mut().expect("never empty");
+                seg.tokens += 1;
+                seg.out |= *out;
+                seg.err |= *err;
+                seg.span(*start, *end);
+            }
             Tok::Subshell => {
                 let seg = segs.last_mut().expect("never empty");
                 // Only reserved words may come before `( )`: anything else
@@ -688,11 +800,13 @@ fn segments(command: &str, toks: &[Tok]) -> Res<Vec<Seg>> {
                 seg.subshell = true;
                 at_cmd = false;
             }
-            Tok::Word { start, plain } => {
+            Tok::Word { start, end, plain } => {
                 let seg = segs.last_mut().expect("never empty");
                 seg.tokens += 1;
+                seg.span(*start, *end);
                 if !at_cmd {
                     seg.args.push(plain.clone());
+                    seg.words.push((*start, *end));
                     continue;
                 }
                 if is_assignment(&command[*start..]) {
@@ -726,6 +840,7 @@ fn segments(command: &str, toks: &[Tok]) -> Res<Vec<Seg>> {
                     return Err(Skip::Unparsed);
                 }
                 seg.cmd = Some(plain.clone());
+                seg.words.push((*start, *end));
                 at_cmd = false;
                 wrapper = false;
             }
@@ -958,6 +1073,85 @@ mod tests {
         // The terminator must be alone on its line.
         skipped("cat <<EOF\n  EOF\n", Skip::Unparsed);
         grouped("cat <<-EOF\n\tbody\n\tEOF");
+    }
+
+    /// `(text up to each command's end, its label, merge_stderr)` for a flat list.
+    fn flat_parts(cmd: &str) -> Vec<(&str, Option<String>, bool)> {
+        let parts = flat(cmd).unwrap_or_else(|| panic!("{cmd:?} should be flat"));
+        parts.into_iter().map(|p| (&cmd[..p.end], p.label, p.merge_stderr)).collect()
+    }
+
+    #[test]
+    fn flat_lists_mark_the_commands_worth_piping() {
+        assert_eq!(flat_parts("git status"), [("git status", Some("git status".into()), true)]);
+        assert_eq!(
+            flat_parts("cd sub && cargo test --release; ls -la"),
+            [
+                ("cd sub", None, true),
+                ("cd sub && cargo test --release", Some("cargo test --release".into()), true),
+                ("cd sub && cargo test --release; ls -la", Some("ls -la".into()), true),
+            ]
+        );
+        // Builtins, assignments and quiet commands stay unpiped, in the shell.
+        let parts = flat_parts("export CI=1\nsource env.sh && mkdir -p out && X=1 make");
+        let labels: Vec<_> = parts.iter().map(|p| p.1.as_deref()).collect();
+        assert_eq!(labels, [None, None, None, Some("make")]);
+        // A trailing comment stays after the inserted pipe.
+        assert_eq!(flat_parts("ls # list"), [("ls", Some("ls".into()), true)]);
+    }
+
+    #[test]
+    fn flat_respects_the_commands_own_redirects() {
+        // stdout already goes elsewhere: nothing to pipe.
+        assert_eq!(flat("make > build.log 2>&1"), None);
+        assert_eq!(flat("make &> build.log"), None);
+        assert_eq!(flat("echo hi >&2"), None);
+        // stderr already placed: pipe, but don't add a second `2>&1`.
+        assert_eq!(flat_parts("cargo test 2>&1")[0].2, false);
+        assert_eq!(flat_parts("cargo build 2>/dev/null")[0].2, false);
+        assert_eq!(flat_parts("sort < in.txt")[0].2, true);
+        let parts = flat_parts("make > log; make test");
+        assert_eq!(parts[0].1, None);
+        assert_eq!(parts[1].1.as_deref(), Some("make test"));
+    }
+
+    #[test]
+    fn flat_labels_stop_at_quotes_and_expansions() {
+        assert_eq!(flat_parts("git commit -m \"fix it\"")[0].1.as_deref(), Some("git commit -m"));
+        assert_eq!(flat_parts("cargo test $ARGS")[0].1.as_deref(), Some("cargo test"));
+        assert_eq!(flat_parts("RUST_LOG=debug cargo run --bin x")[0].1.as_deref(), Some("cargo run --bin x"));
+        // With a brace anywhere, the label stays one word so the rewrite
+        // never pairs a brace with a quote.
+        assert_eq!(flat_parts("find . -exec grep foo {} \\;")[0].1.as_deref(), Some("find"));
+        assert_eq!(flat_parts("ls ${DIR}")[0].1.as_deref(), Some("ls"));
+        // Nothing plain to name the command by: leave it unpiped.
+        assert_eq!(flat("\"$TOOL\"/bin/run"), None);
+    }
+
+    #[test]
+    fn flat_refuses_what_needs_grouping() {
+        for cmd in [
+            "git log | head -20",
+            "make |& tee log",
+            "(cd sub && make)",
+            "for f in *.rs; do wc -l \"$f\"; done",
+            "if [ -f x ]; then cat x; fi",
+            "time cargo build",
+            "! grep -q x y",
+            "cat <<EOF\nhi\nEOF",
+            "make &",
+            "git status 2>&1 | sqz compress",
+            "cd x && sqz stats",
+            "echo 'unterminated",
+            // Only builtins, quiet or long-running commands: nothing to pipe.
+            "cd sub",
+            "export A=1 && cd b",
+            "mkdir -p x && touch x/y",
+            "tail -f app.log",
+            "cd web && npm run dev",
+        ] {
+            assert_eq!(flat(cmd), None, "{cmd:?}");
+        }
     }
 
     #[test]

@@ -126,16 +126,18 @@ The built-in `Read`, `Grep`, `Glob` tools remain available. Use them for:
 ### Bash commands (hooked automatically)
 
 When you run a shell command through the `Bash` tool, a PreToolUse hook
-rewrites it to pipe output through `sqz compress`, keeping its exit
-status. This is transparent: you don't need to add anything. Pipes,
-`&&`/`;` chains, loops and heredocs are piped as a whole, and a leading
-`cd dir &&` runs outside the pipe so the directory change sticks.
+gives each command in it a pipe through `sqz compress`, under
+`set -o pipefail` so exit status and `&&`/`||` behave as before. This is
+transparent: you don't need to add anything. Builtins like `cd` and
+`export` stay outside the pipes, and the permission rules you already
+have still apply, since sqz never approves a command for you.
 
-The rewrite is skipped for commands that change shell state (`export`,
-`source`, `set`, a `cd` after the first command), background jobs and
+A pipeline, loop, subshell or heredoc is left as written (outside bypass
+mode its grouped form couldn't match your allow rules); when it exits 0,
+a PostToolUse hook compresses its output instead. Background jobs and
 `run_in_background` calls, followers and servers (`tail -f`,
 `npm run dev`), editors and REPLs, and anything already going through
-sqz.
+sqz are never rewritten.
 
 ### Escape hatch — when you see a `§ref:HASH§` token
 

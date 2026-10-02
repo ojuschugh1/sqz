@@ -7,7 +7,7 @@
 //! that sqz strips and exits with:
 //!
 //! ```sh
-//! { cmd 2>&1; printf '\n__SQZ_EXIT_%d__\n' "$?"; } | sqz compress --cmd cmd
+//! { cmd; printf '\n__SQZ_EXIT_%d__\n' "$?"; } 2>&1 | sqz compress --cmd cmd
 //! ```
 //!
 //! Plain POSIX, so it works in bash/zsh/dash/ash/ksh where `pipefail`
@@ -17,10 +17,12 @@
 //! unaffected.
 
 /// Build the POSIX form of a rewritten command that carries its exit
-/// status to sqz. `escaped_label` must already be shell-escaped.
+/// status to sqz. `escaped_label` must already be shell-escaped. The
+/// `2>&1` sits on the group, so a redirect of the command's own, such as
+/// `2>/dev/null` or `2> err.log`, still wins.
 pub fn posix_rewrite(command: &str, escaped_label: &str) -> String {
     format!(
-        "{{ {command} 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; }} | sqz compress --cmd {escaped_label}"
+        "{{ {command}; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; }} 2>&1 | sqz compress --cmd {escaped_label}"
     )
 }
 
@@ -31,6 +33,35 @@ pub fn posix_rewrite_list(body: &str, escaped_label: &str) -> String {
     format!(
         "{{ {body}\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; }} 2>&1 | sqz compress --cmd {escaped_label}"
     )
+}
+
+/// The ungrouped form for bash and zsh: each marked command gets its own
+/// pipe, and `pipefail` makes each pipe exit with the command's status, so
+/// `&&` and `||` behave as before and builtins run in the shell itself.
+/// The shell must not keep state between commands, or `pipefail` leaks.
+pub fn posix_flat_rewrite(command: &str, cmds: &[crate::shell_scan::FlatCmd]) -> String {
+    let command = command.trim_end();
+    let mut out = String::from("set -o pipefail; ");
+    let mut at = 0;
+    for cmd in cmds {
+        out.push_str(&command[at..cmd.end]);
+        if let Some(label) = &cmd.label {
+            if cmd.merge_stderr {
+                out.push_str(" 2>&1");
+            }
+            out.push_str(" | sqz compress --cmd ");
+            if label.contains(' ') {
+                out.push('\'');
+                out.push_str(label);
+                out.push('\'');
+            } else {
+                out.push_str(label);
+            }
+        }
+        at = cmd.end;
+    }
+    out.push_str(&command[at..]);
+    out
 }
 
 /// Build the PowerShell form. Native commands set `$LASTEXITCODE`;
@@ -163,7 +194,7 @@ mod tests {
         let r = posix_rewrite("git status", "'git status'");
         assert_eq!(
             r,
-            "{ git status 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } | sqz compress --cmd 'git status'"
+            "{ git status; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'git status'"
         );
     }
 
@@ -181,6 +212,19 @@ mod tests {
             posix_rewrite_list("ls # all", "'sh: ls # all'"),
             "{ ls # all\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: ls # all'"
         );
+    }
+
+    #[test]
+    fn flat_rewrite_shape() {
+        let cmd = "cd sub && cargo test 2>&1; git log -3 # recent\n";
+        let parts = crate::shell_scan::flat(cmd).unwrap();
+        assert_eq!(
+            posix_flat_rewrite(cmd, &parts),
+            "set -o pipefail; cd sub && cargo test 2>&1 | sqz compress --cmd 'cargo test'; \
+             git log -3 2>&1 | sqz compress --cmd 'git log -3' # recent"
+        );
+        let parts = crate::shell_scan::flat("ls").unwrap();
+        assert_eq!(posix_flat_rewrite("ls", &parts), "set -o pipefail; ls 2>&1 | sqz compress --cmd ls");
     }
 
     #[test]

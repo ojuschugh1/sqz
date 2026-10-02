@@ -159,7 +159,7 @@ const SqzPluginFactory = async (ctx: any) => {{
 
   function wrap(cmd: string, label: string): string {{
     if (!POSIX) return `${{cmd}} 2>&1 | ${{SQZ_PATH}} compress --cmd ${{label}}`;
-    return `{{ ${{cmd}} 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' "$?"; }} | ${{SQZ_PATH}} compress --cmd ${{label}}`;
+    return `{{ ${{cmd}}; printf '\\n__SQZ_EXIT_%d__\\n' "$?"; }} 2>&1 | ${{SQZ_PATH}} compress --cmd ${{label}}`;
   }}
 
   return {{

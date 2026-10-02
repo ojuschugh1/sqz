@@ -10,21 +10,40 @@ fn sqz() -> &'static str {
     env!("CARGO_BIN_EXE_sqz")
 }
 
-fn rewrite(command: &str) -> Option<String> {
-    let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}}).to_string();
+/// Run `sqz hook <tool>` on `payload` with Claude Code's settings pointed
+/// at `config` (or an empty directory), returning the rewritten command.
+fn hook(tool: &str, payload: serde_json::Value, config: &Path) -> Option<String> {
     let mut child = Command::new(sqz())
-        .args(["hook", "claude"])
+        .args(["hook", tool])
+        .env("CLAUDE_CONFIG_DIR", config)
+        .env("CLAUDE_PROJECT_DIR", config)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
     let out = child.wait_with_output().unwrap();
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     parsed
-        .pointer("/hookSpecificOutput/updatedInput/command")?
+        .pointer("/hookSpecificOutput/updatedInput/command")
+        .or_else(|| parsed.pointer("/hookSpecificOutput/tool_input/command"))?
         .as_str()
         .map(str::to_string)
+}
+
+/// The grouped form, as Gemini CLI and the other POSIX hosts get it.
+fn grouped(command: &str, config: &Path) -> Option<String> {
+    let payload = serde_json::json!({"tool_name": "run_shell_command", "tool_input": {"command": command}});
+    hook("gemini", payload, config)
+}
+
+fn claude(command: &str, mode: &str, config: &Path) -> Option<String> {
+    let payload = serde_json::json!({
+        "tool_name": "Bash",
+        "permission_mode": mode,
+        "tool_input": {"command": command},
+    });
+    hook("claude", payload, config)
 }
 
 #[derive(Debug, PartialEq)]
@@ -63,12 +82,25 @@ fn run(shell: &str, command: &str, dir: &Path, home: &Path) -> Run {
     Run { out: text, status: out.status.code().unwrap_or(-1), cwd }
 }
 
+fn installed(name: &str) -> bool {
+    [format!("/bin/{name}"), format!("/usr/bin/{name}")].iter().any(|p| Path::new(p).exists())
+}
+
 fn shells() -> Vec<&'static str> {
     let mut found = vec!["bash", "sh"];
-    for (name, paths) in [("zsh", ["/bin/zsh", "/usr/bin/zsh"]), ("dash", ["/bin/dash", "/usr/bin/dash"])] {
-        if paths.iter().any(|p| Path::new(p).exists()) {
+    for name in ["zsh", "dash"] {
+        if installed(name) {
             found.push(name);
         }
+    }
+    found
+}
+
+/// The shells Claude Code runs its Bash tool in.
+fn claude_shells() -> Vec<&'static str> {
+    let mut found = vec!["bash"];
+    if installed("zsh") {
+        found.push("zsh");
     }
     found
 }
@@ -92,6 +124,8 @@ const CASES: &[&str] = &[
     "if [ -d sub ]; then echo yes; else echo no; fi",
     "(cd sub && pwd)",
     "grep -c alpha notes.txt || true",
+    "sh -c 'echo out; echo err >&2' 2>/dev/null",
+    "sh -c 'echo kept; echo logged >&2' 2>err.log; cat err.log",
     "echo first\necho second",
     "echo done;",
     "printf '\\377\\376raw\\000bytes\\n'",
@@ -101,35 +135,91 @@ const CASES: &[&str] = &[
     "sh -c 'exit 7'",
 ];
 
-#[test]
-fn rewrites_behave_like_the_original() {
+/// Lists only the ungrouped form takes: builtins that must keep running
+/// in the shell itself, around commands that get their own pipe.
+const FLAT_CASES: &[&str] = &[
+    "export X=1 && sh -c 'echo x=$X'",
+    "cd sub && ls && cd .. && pwd",
+    "X=2; sh -c 'echo $0' \"$X\"",
+    "sh -c 'exit 4' && echo skipped",
+    "sh -c 'exit 4' || sh -c 'echo handled'",
+    "grep beta notes.txt 2>/dev/null; grep missing notes.txt",
+    "ls sub > listing.txt && cat listing.txt",
+    "sh -c 'echo to-stderr >&2' 2>/dev/null",
+];
+
+fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let fixture = tempfile::tempdir().unwrap();
     let dir = fixture.path().join("work");
     std::fs::create_dir_all(dir.join("sub")).unwrap();
     std::fs::write(dir.join("notes.txt"), "alpha\nbeta\n").unwrap();
     let home = fixture.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
+    (fixture, dir, home)
+}
 
+fn assert_same(shell: &str, command: &str, rewritten: &str, dir: &Path, home: &Path) {
+    assert!(rewritten.contains("sqz compress"), "{rewritten}");
+    let _ = std::fs::remove_file(dir.join("listing.txt"));
+    let original = run(shell, command, dir, home);
+    let _ = std::fs::remove_file(dir.join("listing.txt"));
+    let piped = run(shell, rewritten, dir, home);
+    assert_eq!(
+        piped,
+        original,
+        "{shell}: {command:?}\nrewritten: {rewritten}\nout: {:?}\nwant: {:?}",
+        String::from_utf8_lossy(&piped.out),
+        String::from_utf8_lossy(&original.out)
+    );
+}
+
+#[test]
+fn rewrites_behave_like_the_original() {
+    let (fixture, dir, home) = fixture();
     for shell in shells() {
         for command in CASES {
-            let rewritten = rewrite(command).unwrap_or_else(|| panic!("not rewritten: {command:?}"));
-            assert!(rewritten.contains("sqz compress"), "{rewritten}");
-            let original = run(shell, command, &dir, &home);
-            let piped = run(shell, &rewritten, &dir, &home);
-            assert_eq!(
-                piped,
-                original,
-                "{shell}: {command:?}\nrewritten: {rewritten}\nout: {:?}\nwant: {:?}",
-                String::from_utf8_lossy(&piped.out),
-                String::from_utf8_lossy(&original.out)
-            );
+            let rewritten = grouped(command, fixture.path())
+                .unwrap_or_else(|| panic!("not rewritten: {command:?}"));
+            assert_same(shell, command, &rewritten, &dir, &home);
         }
     }
 }
 
 #[test]
-fn state_changes_are_not_rewritten() {
+fn claude_rewrites_behave_like_the_original() {
+    let (fixture, dir, home) = fixture();
+    for shell in claude_shells() {
+        for command in CASES.iter().chain(FLAT_CASES) {
+            let rewritten = claude(command, "bypassPermissions", fixture.path())
+                .unwrap_or_else(|| panic!("not rewritten: {command:?}"));
+            assert_same(shell, command, &rewritten, &dir, &home);
+        }
+    }
+}
+
+#[test]
+fn claude_default_mode_needs_the_allow_rules() {
+    let (fixture, _, _) = fixture();
+    assert_eq!(claude("cargo test", "default", fixture.path()), None);
+    std::fs::write(
+        fixture.path().join("settings.json"),
+        serde_json::json!({"permissions": {"allow": ["Bash(set -o pipefail)", "Bash(sqz compress --cmd *)"]}})
+            .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        claude("cargo test", "default", fixture.path()).as_deref(),
+        Some("set -o pipefail; cargo test 2>&1 | sqz compress --cmd 'cargo test'")
+    );
+    // Grouped forms never match an allow rule, so they wait for bypass mode.
+    assert_eq!(claude("git log | head", "default", fixture.path()), None);
+    assert!(claude("git log | head", "bypassPermissions", fixture.path()).is_some());
+}
+
+#[test]
+fn state_changes_are_not_grouped() {
+    let (fixture, _, _) = fixture();
     for command in ["export X=1 && make", "make && cd build", "npm run build &", "tail -f log.txt", "set -e; make"] {
-        assert_eq!(rewrite(command), None, "{command:?}");
+        assert_eq!(grouped(command, fixture.path()), None, "{command:?}");
     }
 }

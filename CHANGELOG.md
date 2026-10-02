@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **sqz no longer approves commands on your behalf.** The Claude Code
+  hook returned `permissionDecision: "allow"` with every rewrite, and in
+  Claude Code an allow skips the permission prompt, so a command like
+  `git push --force` or `rm -rf build` ran without the prompt your
+  settings would have shown (deny and ask rules still applied). Copilot
+  CLI 1.0.66 and later treat its `allow` the same way. Both hooks now
+  return only the rewritten input and leave the decision to the client.
+  Checked against Claude Code 2.1.286: a command that needed approval
+  before still needs it after the rewrite, and one your rules allow
+  still runs without a prompt.
+
+### Added
+
+- **Claude Code commands keep your permission rules when rewritten.**
+  Claude Code checks its rules against the rewritten command and treats
+  a grouped `{ ...; } | sqz` command as too complex to match any of
+  them, so the hook now gives each command its own pipe instead:
+  `set -o pipefail; cd sub && cargo test 2>&1 | sqz compress --cmd 'cargo test'`.
+  `pipefail` keeps each command's exit status and the `&&`/`||` logic,
+  and `cd`, `export` and `source` stay outside the pipes, so lists that
+  change shell state are compressed too. `sqz init` adds two allow rules
+  for the parts the rewrite adds, `Bash(set -o pipefail)` and
+  `Bash(sqz compress --cmd *)`; neither runs anything. Until they are
+  there the hook leaves commands alone, and `sqz doctor` flags an older
+  install (`--fix` adds them). Pipelines, loops and heredocs are left as
+  written, except in bypass mode where nothing is checked. On the
+  11,203 real agent commands below, 55.7% are rewritten in default mode
+  (1.9.0 rewrote 28.7%, and approved all of them) and 96.6% in bypass
+  mode; 4,186 of the rest contain a pipe, where the agent is usually
+  filtering the output already.
+- **Claude Code PostToolUse hook.** When a command the PreToolUse hook
+  left alone exits 0, `sqz hook claude-post` compresses its stdout and
+  stderr in place through `updatedToolOutput`, which keeps the Bash
+  result's shape. Output Claude Code has already cut to a preview
+  (`BASH_MAX_OUTPUT_LENGTH`, 30,000 characters by default), images and
+  interrupted commands are left as they are.
+
 ### Changed
 
 - **`sqz doctor` shows the integration tier of every client.**
@@ -41,8 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sqz read tools return losslessly) made up almost all of its estimate,
   including the README example. Replay now handles each output the way
   sqz could have reached it on that client: shell output through the hook
-  path (on Claude Code, split into commands the hook rewrites and ones it
-  skips), file reads dedup-only, other MCP servers exactly what
+  path (on Claude Code, split into commands the hooks compress and ones
+  they skip), file reads dedup-only, other MCP servers exactly what
   `sqz-mcp proxy` does, and web fetches, edits and sub-agent results
   counted as out of reach. The report gives two totals, saved with no
   help from the agent and saved if the agent uses every route, and says
@@ -55,20 +94,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skipped any command containing `|`, `&&`, `;`, `>` or `<<`, which left
   71% of one machine's 11,203 real agent commands uncompressed. A
   quote-aware scanner now pipes the whole command through sqz as one
-  group, keeps a leading `cd dir &&` outside it so the directory change
-  sticks, and leaves alone anything that changes shell state (`export`,
-  `source`, `set`, a later `cd`), backgrounds a job, follows output
-  (`tail -f`, `docker logs -f`, `kubectl get -w`) or runs a server
-  (`npm run dev`, `rails s`, `docker compose up` without `-d`). On
-  those commands the share rewritten went from 28.7% to 96.2%, and every
-  rewrite parses in bash and zsh wherever the original did. Lists and
-  pipelines skip the per-command formatters, since their output is
-  partial or comes from several commands. `python` and `node` running a
-  script, `-c` code or `-m` module are rewritten too; bare REPLs, `-i`
-  and dev servers still aren't.
+  group (Gemini CLI, Copilot CLI, and Claude Code in bypass mode; other
+  Claude Code sessions get the per-command form above), keeps a leading
+  `cd dir &&` outside it so the directory change sticks, and leaves
+  alone anything that changes shell state (`export`, `source`, `set`, a
+  later `cd`), backgrounds a job, follows output (`tail -f`,
+  `docker logs -f`, `kubectl get -w`) or runs a server (`npm run dev`,
+  `rails s`, `docker compose up` without `-d`). On those commands the
+  share rewritten went from 28.7% to 96.2%, and every rewrite parses in
+  bash and zsh wherever the original did. Lists and pipelines skip the
+  per-command formatters, since their output is partial or comes from
+  several commands. `python` and `node` running a script, `-c` code or
+  `-m` module are rewritten too; bare REPLs, `-i` and dev servers still
+  aren't.
 
 ### Fixed
 
+- **Gemini CLI commands kept only their `command` argument.** Gemini's
+  scheduler replaces a call's arguments with the hook's `tool_input`
+  rather than merging it, so a rewritten command lost `dir_path` and ran
+  in the project root. The hook now sends every original argument.
+- **A command's own stderr redirect lost to the hook's.** The one-line
+  rewrite put `2>&1` after the command, so `cargo build 2> errors.log`
+  sent its errors into the pipe and left `errors.log` empty, and
+  `2>/dev/null` stopped hiding anything. The redirect now sits on the
+  group, where the command's own wins.
+- **`sqz uninstall` deleted a project's whole
+  `.claude/settings.local.json`.** Claude Code saves your "don't ask
+  again" answers in that file, so they went too. It now removes only
+  sqz's hooks and rules, and the file only if nothing else is left.
 - **A trailing `# comment` broke the rewritten command.** The comment
   ran on over the closing `}` of the group, so the shell hit end of
   file instead of running the command.

@@ -101,6 +101,9 @@ pub struct Managed {
     pub kiro_global: SteeringState,
     pub kiro_project: SteeringState,
     pub shell_block_stale: bool,
+    /// A Claude Code settings file has the sqz hook without the allow rules
+    /// and PostToolUse hook current sqz writes next to it.
+    pub claude_stale: bool,
 }
 
 impl Managed {
@@ -147,6 +150,12 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
         problems.push(Problem {
             message: "Kiro loads sqz steering twice (user-level and this project), on every request".to_string(),
             fix: Some(format!("{FIX_CMD}   (removes the project copy; the user-level one covers every workspace)")),
+        });
+    }
+    if managed.claude_stale {
+        problems.push(Problem {
+            message: "the Claude Code hook comes from an older sqz install: without the two allow rules for its pipe it leaves commands uncompressed, and the PostToolUse hook is missing".to_string(),
+            fix: Some(format!("{FIX_CMD}   (adds Bash(set -o pipefail) and Bash(sqz compress --cmd *) to the allow list)")),
         });
     }
     if managed.shell_block_stale {
@@ -502,7 +511,24 @@ fn apply_fixes(store: &sqz_engine::SessionStore, managed: &Managed, project_dir:
             Err(e) => println!("  ERR --fix: {e}"),
         }
     }
+
+    for path in claude_settings_paths(project_dir) {
+        if !sqz_engine::claude_settings_stale(&path) {
+            continue;
+        }
+        match sqz_engine::refresh_claude_settings(&path, &fallback) {
+            Ok(_) => println!("  ok  --fix: added the PostToolUse hook and pipe allow rules to {}", path.display()),
+            Err(e) => println!("  ERR --fix: could not update {}: {e}", path.display()),
+        }
+    }
     Ok(())
+}
+
+/// The Claude Code settings files `sqz init` writes, user and project.
+fn claude_settings_paths(project_dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<_> = sqz_engine::claude_user_settings_path().into_iter().collect();
+    paths.push(project_dir.join(".claude").join("settings.local.json"));
+    paths
 }
 
 fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
@@ -510,6 +536,9 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
         kiro_global: sqz_engine::kiro_steering_state(&sqz_engine::kiro_user_steering_path(), true),
         kiro_project: sqz_engine::kiro_steering_state(&sqz_engine::kiro_steering_path(project_dir), false),
         shell_block_stale: hook.needs_refresh(),
+        claude_stale: claude_settings_paths(project_dir)
+            .iter()
+            .any(|p| sqz_engine::claude_settings_stale(p)),
     }
 }
 
@@ -517,7 +546,8 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
 ///
 /// With `fix`, repairs what doctor can repair on its own: log rows a past
 /// bug wrote wrongly (after backing up the database), stale or duplicate
-/// sqz-managed Kiro steering, and an outdated sqz shell block.
+/// sqz-managed Kiro steering, an outdated sqz shell block, and a Claude
+/// Code hook missing the allow rules and PostToolUse entry.
 pub fn run(fix: bool) -> i32 {
     let version = env!("CARGO_PKG_VERSION");
     println!("sqz doctor — {version}");
@@ -687,6 +717,7 @@ mod tests {
             kiro_global: SteeringState::Current,
             kiro_project: SteeringState::Missing,
             shell_block_stale: false,
+            claude_stale: false,
         }
     }
 
@@ -760,6 +791,7 @@ mod tests {
             kiro_global: SteeringState::Stale,
             kiro_project: SteeringState::Current,
             shell_block_stale: false,
+            claude_stale: false,
         };
         let problems = diagnose(&tools, &active(), &managed);
         assert_eq!(problems.len(), 2, "{problems:?}");
@@ -775,6 +807,7 @@ mod tests {
             kiro_global: SteeringState::UserAuthored,
             kiro_project: SteeringState::UserAuthored,
             shell_block_stale: false,
+            claude_stale: false,
         };
         assert!(diagnose(&tools, &active(), &managed).is_empty());
     }
@@ -786,6 +819,17 @@ mod tests {
         let problems = diagnose(&tools, &active(), &managed);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("shell rc"));
+    }
+
+    #[test]
+    fn stale_claude_hook_is_flagged_with_the_rules_it_adds() {
+        let tools = vec![tool("Claude Code", "claude", Detection::Detected, ConfigScope::Global)];
+        let managed = Managed { claude_stale: true, ..clean() };
+        let problems = diagnose(&tools, &active(), &managed);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("older sqz"));
+        let fix = problems[0].fix.as_deref().unwrap();
+        assert!(fix.starts_with(FIX_CMD) && fix.contains("Bash(sqz compress --cmd *)"), "{fix}");
     }
 
     #[test]

@@ -12,7 +12,7 @@
 //! Each output is replayed the way sqz could actually have reached it on
 //! that client, not all through one pipeline:
 //! - shell output goes through the same path as the shell hook, split on
-//!   transparent clients into commands the hook rewrites and ones it skips;
+//!   transparent clients into commands the hooks compress and ones they skip;
 //! - built-in file reads, searches and listings: the sqz MCP tools that
 //!   replace them are lossless, so only dedup counts;
 //! - other MCP servers' results get exactly what `sqz-mcp proxy` does;
@@ -86,8 +86,8 @@ impl Client {
 /// How sqz could have reached one tool output on the client that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Reach {
-    /// Shell command the client's hook rewrites: compressed with no help
-    /// from the agent.
+    /// Shell command the client's hooks compress, before it runs or after
+    /// it succeeds: no help from the agent needed.
     ShellHooked,
     /// Shell command sqz only sees if the agent pipes it through
     /// `sqz compress`.
@@ -125,6 +125,9 @@ pub struct ToolOutput {
     /// What sqz would have been handed: the command's output without the
     /// client's wrapper, the MCP server's text, the read result.
     pub text: String,
+    /// The client logged the call as an error, which for a shell command
+    /// means a non-zero exit.
+    pub failed: bool,
 }
 
 /// Sniff the dialect from the first parseable line.
@@ -195,23 +198,16 @@ fn already_through_sqz(command: &str) -> bool {
             .map_or(false, |first| first == "sqz" || first.ends_with("/sqz"))
 }
 
-/// Whether Claude Code's PreToolUse hook would rewrite this command. Runs
-/// the real hook so the answer tracks whatever it rewrites today.
-fn hook_rewrites(command: &str) -> bool {
-    let input = serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": command } });
-    sqz_engine::process_hook(&input.to_string())
-        .ok()
-        .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
-        .map_or(false, |v| v.pointer("/hookSpecificOutput/updatedInput").is_some())
-}
-
 /// Which way sqz could have reached `output` on `client`.
 pub fn classify(client: Client, output: &ToolOutput) -> Reach {
     if is_shell_tool(&output.tool) {
         if already_through_sqz(&output.label) {
             return Reach::AlreadySqz;
         }
-        if client.tier() == IntegrationTier::Transparent && hook_rewrites(&output.label) {
+        // The hooks as `sqz init` installs them, in a default-mode session.
+        if client.tier() == IntegrationTier::Transparent
+            && sqz_engine::claude_hooks_compress(&output.label, output.failed)
+        {
             return Reach::ShellHooked;
         }
         return Reach::Shell;
@@ -307,8 +303,9 @@ fn extract_claude_line(v: &serde_json::Value, pending: &mut Pending, out: &mut V
                         .and_then(|id| pending.remove(id))
                         .unwrap_or_else(unmatched);
                     let text = item.get("content").map(claude_result_text).unwrap_or_default();
+                    let failed = item.get("is_error").and_then(|e| e.as_bool()) == Some(true);
                     if !text.trim().is_empty() {
-                        out.push(ToolOutput { tool, label, text });
+                        out.push(ToolOutput { tool, label, text, failed });
                     }
                 }
             }
@@ -394,7 +391,7 @@ fn extract_kiro_line(v: &serde_json::Value, pending: &mut Pending, out: &mut Vec
                         })
                         .unwrap_or_default();
                     if !text.trim().is_empty() {
-                        out.push(ToolOutput { tool, label, text });
+                        out.push(ToolOutput { tool, label, text, failed: false });
                     }
                 }
             }
@@ -501,7 +498,7 @@ fn extract_kiro_ide_line(v: &serde_json::Value, pending: &mut Pending, out: &mut
             };
             for text in texts {
                 if !text.trim().is_empty() {
-                    out.push(ToolOutput { tool: tool.clone(), label: label.clone(), text });
+                    out.push(ToolOutput { tool: tool.clone(), label: label.clone(), text, failed: false });
                 }
             }
         }
@@ -817,8 +814,8 @@ fn plural(n: usize) -> &'static str {
 
 fn reach_name(reach: Reach, tier: IntegrationTier) -> &'static str {
     match (reach, tier) {
-        (Reach::ShellHooked, _) => "shell, hook rewrites",
-        (Reach::Shell, IntegrationTier::Transparent) => "shell, hook skips",
+        (Reach::ShellHooked, _) => "shell, hooks compress",
+        (Reach::Shell, IntegrationTier::Transparent) => "shell, hooks skip",
         (Reach::Shell, IntegrationTier::Advisory) => "shell",
         (Reach::FileRead, _) => "file reads",
         (Reach::Mcp, _) => "other MCP servers",
@@ -861,10 +858,11 @@ fn tier_note(tier: IntegrationTier, clients: &[&str]) -> String {
     let names = join_names(clients);
     let text = match tier {
         IntegrationTier::Transparent => format!(
-            "On {names} the hook rewrites simple shell commands on its own. Pipes, chains \
-             and redirects are skipped and need the agent to pipe them, file reads need \
-             the sqz MCP tools (lossless, so dedup only) and MCP servers need \
-             `sqz-mcp proxy` (lossy on first pass, sqz_expand recovers the rest)."
+            "On {names} the hooks compress shell output on their own: plain commands and \
+             lists before they run, anything else that exits 0 afterwards. Failed \
+             pipelines and loops need the agent to pipe them, file reads need the sqz MCP \
+             tools (lossless, so dedup only) and MCP servers need `sqz-mcp proxy` (lossy \
+             on first pass, sqz_expand recovers the rest)."
         ),
         IntegrationTier::Advisory => format!(
             "{names} can't let sqz rewrite tool calls, so each saving needs the agent: \
@@ -1157,12 +1155,20 @@ mod tests {
 
     #[test]
     fn classifies_by_client() {
-        let out = |tool: &str, label: &str| ToolOutput { tool: tool.into(), label: label.into(), text: "x".into() };
-        // Claude Code's hook rewrites commands and pipelines, not ones that
-        // change shell state or follow a log.
+        let out = |tool: &str, label: &str| ToolOutput {
+            tool: tool.into(),
+            label: label.into(),
+            text: "x".into(),
+            failed: false,
+        };
+        let failed = |tool: &str, label: &str| ToolOutput { failed: true, ..out(tool, label) };
+        // Claude Code's PreToolUse hook takes plain lists, builtins and all;
+        // the PostToolUse hook takes the rest when it exits 0. Followers
+        // never finish.
         assert_eq!(classify(Client::ClaudeCode, &out("Bash", "git status")), Reach::ShellHooked);
+        assert_eq!(classify(Client::ClaudeCode, &failed("Bash", "export X=1 && make")), Reach::ShellHooked);
         assert_eq!(classify(Client::ClaudeCode, &out("Bash", "git log | head")), Reach::ShellHooked);
-        assert_eq!(classify(Client::ClaudeCode, &out("Bash", "export X=1 && make")), Reach::Shell);
+        assert_eq!(classify(Client::ClaudeCode, &failed("Bash", "git log | head")), Reach::Shell);
         assert_eq!(classify(Client::ClaudeCode, &out("Bash", "tail -f app.log")), Reach::Shell);
         // Kiro has no rewrite hook at all.
         assert_eq!(classify(Client::KiroIde, &out("execute_bash", "git status")), Reach::Shell);
@@ -1235,8 +1241,8 @@ mod tests {
         report.clients.entry(Client::KiroCli).or_default().sessions.insert(PathBuf::from("c"));
         let text = render(&report, 7);
         assert!(text.contains("Claude Code: 1 session, transparent"), "{text}");
-        assert!(text.contains("shell, hook rewrites"), "{text}");
-        assert!(text.contains("\n  On Claude Code the hook rewrites simple shell commands"), "{text}");
+        assert!(text.contains("shell, hooks compress"), "{text}");
+        assert!(text.contains("\n  On Claude Code the hooks compress shell output on their own"), "{text}");
         assert!(text.contains("\n  Kiro IDE and Kiro CLI can't let sqz rewrite tool calls"), "{text}");
         assert_eq!(text.matches("can't let sqz rewrite").count(), 1, "one note per tier: {text}");
         assert!(text.contains("Avoidable with no help from the agent:   300 tokens"), "{text}");

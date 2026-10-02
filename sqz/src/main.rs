@@ -1,5 +1,6 @@
 mod cli_proxy;
 mod doctor;
+mod post_hook;
 mod replay;
 mod shell_hook;
 mod tests;
@@ -1939,7 +1940,12 @@ fn cmd_uninstall(skip_confirm: bool) {
         }
         let full = project_dir.join(&config.config_path);
         if full.exists() {
-            files_to_remove.push((full.display().to_string(), true));
+            let shown = if config.tool_name == "Claude Code" {
+                format!("{} (sqz entries only)", full.display())
+            } else {
+                full.display().to_string()
+            };
+            files_to_remove.push((shown, true));
         }
     }
 
@@ -2174,6 +2180,19 @@ fn cmd_uninstall(skip_confirm: bool) {
                     Ok(()) => println!("[sqz] ✓ removed {}", target.display()),
                     Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", target.display()),
                 }
+            }
+            continue;
+        }
+        // Claude Code keeps the user's "don't ask again" permissions in
+        // the same local settings file, so only sqz's entries come out.
+        if config.tool_name == "Claude Code" {
+            match sqz_engine::remove_claude_project_hook(&project_dir) {
+                Ok(Some((path, true))) if path.exists() => {
+                    println!("[sqz] ✓ removed sqz entries from {}", path.display())
+                }
+                Ok(Some((path, true))) => println!("[sqz] ✓ removed {}", path.display()),
+                Ok(_) => {}
+                Err(e) => eprintln!("[sqz] ✗ could not clean up Claude Code settings: {e}"),
             }
             continue;
         }
@@ -3593,6 +3612,14 @@ fn cmd_hook(tool: &str) {
             }
         }
         println!("{{}}");
+        return;
+    }
+
+    // Claude Code PostToolUse: print a replacement result or nothing.
+    if tool == "claude-post" {
+        if let Some(reply) = post_hook::claude_post_tool_use(&input) {
+            print!("{reply}");
+        }
         return;
     }
 

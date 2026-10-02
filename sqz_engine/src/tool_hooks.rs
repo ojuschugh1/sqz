@@ -6,7 +6,9 @@
 /// happened — it just sees smaller output.
 ///
 /// Supported hook formats (tools that support command rewriting via hooks):
-/// - Claude Code: .claude/settings.local.json (nested PreToolUse, matcher: "Bash|PowerShell")
+/// - Claude Code: .claude/settings.local.json or ~/.claude/settings.json (nested
+///   PreToolUse, matcher "Bash|PowerShell", plus PostToolUse for Bash and
+///   two allow rules for the parts the rewrite adds)
 /// - Gemini CLI: .gemini/settings.json (nested BeforeTool, matcher: "run_shell_command")
 /// - OpenCode: ~/.config/opencode/plugins/sqz.ts (TypeScript plugin, tool.execute.before)
 ///
@@ -160,11 +162,11 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // Only intercept Bash/shell tool calls.
     //
     // Claude Code's built-in tools (Read, Grep, Glob, Write) bypass shell
-    // hooks entirely. PostToolUse hooks can view but NOT modify their output
-    // (confirmed: github.com/anthropics/claude-code/issues/4544). The tool
-    // output enters the context unchanged. We can only compress Bash command
-    // output by rewriting the command via PreToolUse. The MCP server
-    // (sqz-mcp) provides compressed alternatives to these built-in tools.
+    // hooks entirely. A PostToolUse hook can now replace a result, but the
+    // replacement must match each tool's own result shape and Read's
+    // feeds Claude Code's edit tracking, so only Bash results are
+    // replaced there (`claude_post_tool_use_target`). The MCP server
+    // (sqz-mcp) provides compressed alternatives to the built-in tools.
     let is_shell = matches!(tool_name, "Bash" | "bash" | "Shell" | "shell" | "terminal"
         | "run_terminal_command" | "run_shell_command" | "execute_bash"
         | "PowerShell" | "powershell" | "pwsh")
@@ -254,7 +256,12 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // command name and raise `CommandNotFoundException`. `--cmd NAME`
     // is a normal CLI argument and all three shells parse it fine.
     let is_powershell = matches!(tool_name, "PowerShell" | "powershell" | "pwsh");
-    let rewritten = if is_powershell {
+    let rewritten = if platform == HookPlatform::ClaudeCode {
+        match claude_rewrite(&parsed, command, is_powershell, &claude_settings_files(&parsed)) {
+            Some(rewritten) => rewritten,
+            None => return Ok(passthrough(platform, input)),
+        }
+    } else if is_powershell {
         // PowerShell pipes objects, so only plain commands are rewritten.
         if is_interactive_command(command) || has_shell_operators(command) {
             return Ok(passthrough(platform, input));
@@ -267,12 +274,10 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         }
     };
 
-    // Claude Code's updatedInput REPLACES the whole input object (per
-    // code.claude.com/docs/en/hooks), so unchanged fields like
-    // run_in_background, timeout, or description must be carried over or
-    // they are silently dropped. Start from the original tool_input and
-    // swap only the command. Gemini merges server-side, so it keeps the
-    // minimal {command} form.
+    // Claude Code's updatedInput and Gemini's tool_input both REPLACE the
+    // arguments, so unchanged fields like run_in_background, timeout,
+    // description or dir_path must be carried over or they are silently
+    // dropped. Start from the original tool_input and swap only the command.
     let mut updated_input = parsed
         .get("tool_input")
         .or_else(|| parsed.get("toolArgs"))
@@ -290,12 +295,14 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // Each AI tool expects a different JSON response format. Using the wrong
     // format causes silent failures (the tool ignores the rewrite).
     //
-    // Verified against each tool's official docs:
+    // No output claims a permission decision. In Claude Code and Copilot CLI
+    // an "allow" skips the approval prompt, so the user's own rules and
+    // prompts would stop applying to every command sqz rewrites. Without a
+    // decision the host applies the new input and runs its normal checks.
     //
-    // Claude Code (docs.anthropic.com/en/docs/claude-code/hooks):
+    // Claude Code (code.claude.com/docs/en/hooks):
     //   hookSpecificOutput.hookEventName = "PreToolUse"
-    //   hookSpecificOutput.permissionDecision = "allow"
-    //   hookSpecificOutput.updatedInput = { "command": "..." }  (camelCase, replaces entire input)
+    //   hookSpecificOutput.updatedInput = { ... }  (replaces the entire input)
     //
     // Cursor (confirmed against working hook configs in the wild):
     //   permission = "allow"
@@ -303,8 +310,9 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     //   Returns {} when no rewrite (Cursor requires JSON on all paths)
     //
     // Gemini CLI (geminicli.com/docs/hooks/reference):
-    //   decision = "allow" | "deny"  (top-level)
-    //   hookSpecificOutput.tool_input = { "command": "..." }  (merged with model args)
+    //   hookSpecificOutput.tool_input = { ... }. The scheduler replaces the
+    //   call's arguments with it rather than merging, so it carries every
+    //   original field.
     //
     // Codex (developers.openai.com/codex/hooks):
     //   Only "deny" works in PreToolUse. "allow", updatedInput, additionalContext
@@ -314,8 +322,6 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         HookPlatform::ClaudeCode => serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "permissionDecisionReason": "sqz: command output will be compressed for token savings",
                 "updatedInput": updated_input
             }
         }),
@@ -326,11 +332,8 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
             }
         }),
         HookPlatform::GeminiCli => serde_json::json!({
-            "decision": "allow",
             "hookSpecificOutput": {
-                "tool_input": {
-                    "command": rewritten
-                }
+                "tool_input": updated_input
             }
         }),
         HookPlatform::Windsurf => {
@@ -340,15 +343,11 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
             serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": "sqz: command output will be compressed for token savings",
                     "updatedInput": updated_input
                 }
             })
         }
         HookPlatform::Copilot => serde_json::json!({
-            "permissionDecision": "allow",
-            "permissionDecisionReason": "sqz: command output will be compressed for token savings",
             "modifiedArgs": updated_input
         }),
         HookPlatform::Kiro => {
@@ -419,11 +418,14 @@ path is still what you want for most output."#,
 
     vec![
         // Claude Code — goes in .claude/settings.local.json (nested format)
-        // Three hooks, each addressing a different concern:
+        // Four hooks, each addressing a different concern, plus the two
+        // allow rules the PreToolUse rewrite needs:
         //
         //   PreToolUse:   compress shell tool output before the agent sees it
         //                 (matcher "Bash|PowerShell" covers both Unix and
         //                 Windows shells without firing on Read/Edit/etc.)
+        //   PostToolUse:  compress the output of a successful Bash command
+        //                 the PreToolUse hook left alone
         //   PreCompact:   mark sqz's dedup refs stale before Claude Code
         //                 summarises older turns. Otherwise our §ref:HASH§
         //                 tokens would outlive the content they pointed at,
@@ -435,44 +437,7 @@ path is still what you want for most output."#,
         ToolHookConfig {
             tool_name: "Claude Code".to_string(),
             config_path: PathBuf::from(".claude/settings.local.json"),
-            config_content: format!(
-                r#"{{
-  "hooks": {{
-    "PreToolUse": [
-      {{
-        "matcher": "Bash|PowerShell",
-        "hooks": [
-          {{
-            "type": "command",
-            "command": "{sqz_path} hook claude"
-          }}
-        ]
-      }}
-    ],
-    "PreCompact": [
-      {{
-        "hooks": [
-          {{
-            "type": "command",
-            "command": "{sqz_path} hook precompact"
-          }}
-        ]
-      }}
-    ],
-    "SessionStart": [
-      {{
-        "matcher": "compact",
-        "hooks": [
-          {{
-            "type": "command",
-            "command": "{sqz_path} resume"
-          }}
-        ]
-      }}
-    ]
-  }}
-}}"#
-            ),
+            config_content: claude_settings_content(sqz_path_raw),
             scope: HookScope::Project,
         },
         // Cursor — beforeShellExecution hook can only allow/deny/ask; it
@@ -1493,14 +1458,28 @@ pub fn claude_project_settings_needs_update(path: &Path, sqz_path: &str) -> Resu
     for (event, entry, sentinel) in sqz_hook_entries(sqz_path) {
         upsert_sqz_hook_entry(hooks_obj, event, entry, sentinel);
     }
+    upsert_claude_allow_rules(root_obj);
     let after = serde_json::to_string(&root_obj).unwrap_or_default();
     Ok(before != after)
 }
 
-/// The three hook entries sqz installs into Claude Code settings files,
-/// as `(event_name, entry_json, sentinel)` tuples. Single source of
-/// truth for both the real merge and the dry-run probe.
-fn sqz_hook_entries(sqz_path: &str) -> [(&'static str, serde_json::Value, &'static str); 3] {
+/// A fresh Claude Code settings file holding only sqz's hooks and rules.
+fn claude_settings_content(sqz_path: &str) -> String {
+    let mut hooks = serde_json::Map::new();
+    for (event, entry, sentinel) in sqz_hook_entries(sqz_path) {
+        upsert_sqz_hook_entry(&mut hooks, event, entry, sentinel);
+    }
+    let mut root = serde_json::Map::new();
+    root.insert("hooks".to_string(), serde_json::Value::Object(hooks));
+    upsert_claude_allow_rules(&mut root);
+    serde_json::to_string_pretty(&serde_json::Value::Object(root))
+        .expect("a map of strings always serializes")
+}
+
+/// The hook entries sqz installs into Claude Code settings files, as
+/// `(event_name, entry_json, sentinel)` tuples. Single source of truth for
+/// the real merge, the dry-run probe and uninstall.
+fn sqz_hook_entries(sqz_path: &str) -> [(&'static str, serde_json::Value, &'static str); 4] {
     [
         (
             "PreToolUse",
@@ -1509,6 +1488,14 @@ fn sqz_hook_entries(sqz_path: &str) -> [(&'static str, serde_json::Value, &'stat
                 "hooks": [{ "type": "command", "command": format!("{sqz_path} hook claude") }]
             }),
             "hook claude",
+        ),
+        (
+            "PostToolUse",
+            serde_json::json!({
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": format!("{sqz_path} hook claude-post") }]
+            }),
+            "hook claude-post",
         ),
         (
             "PreCompact",
@@ -1585,6 +1572,7 @@ fn merge_sqz_hooks_into_settings(path: &Path, sqz_path: &str) -> Result<bool> {
     for (event, entry, sentinel) in sqz_hook_entries(sqz_path) {
         upsert_sqz_hook_entry(hooks_obj, event, entry, sentinel);
     }
+    upsert_claude_allow_rules(root_obj);
 
     let after = serde_json::to_string(&root_obj).unwrap_or_default();
     if before == after && path.exists() {
@@ -1663,6 +1651,20 @@ fn remove_claude_global_hook_at(
             None => return Ok(None),
         },
     };
+    remove_sqz_from_claude_settings(path)
+}
+
+/// Remove sqz's entries from a project's `.claude/settings.local.json`,
+/// keeping whatever else is in it, such as the permissions Claude Code
+/// saves there when you pick "don't ask again". Same results as
+/// [`remove_claude_global_hook`].
+pub fn remove_claude_project_hook(project_dir: &Path) -> Result<Option<(PathBuf, bool)>> {
+    remove_sqz_from_claude_settings(project_dir.join(".claude").join("settings.local.json"))
+}
+
+/// Strip sqz's hook entries and allow rules from the Claude Code settings
+/// file at `path`, deleting the file if nothing else is left in it.
+fn remove_sqz_from_claude_settings(path: PathBuf) -> Result<Option<(PathBuf, bool)>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -1684,13 +1686,9 @@ fn remove_claude_global_hook_at(
         return Ok(Some((path, false)));
     };
 
-    let mut changed = false;
+    let mut changed = remove_claude_allow_rules(root_obj);
     if let Some(hooks) = root_obj.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-        for (event, sentinel) in &[
-            ("PreToolUse", "hook claude"),
-            ("PreCompact", "hook precompact"),
-            ("SessionStart", "resume"),
-        ] {
+        for (event, _, sentinel) in &sqz_hook_entries("") {
             if let Some(arr) = hooks.get_mut(*event).and_then(|v| v.as_array_mut()) {
                 let before = arr.len();
                 arr.retain(|entry| !hook_entry_command_contains(entry, sentinel));
@@ -1798,6 +1796,87 @@ fn upsert_sqz_hook_entry(
     arr.push(new_entry);
 }
 
+/// Add [`CLAUDE_ALLOW_RULES`] to `permissions.allow`, keeping the user's
+/// own rules. A `permissions` or `allow` of an unexpected type is left alone.
+fn upsert_claude_allow_rules(root: &mut serde_json::Map<String, serde_json::Value>) {
+    let perms = root
+        .entry("permissions".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(perms) = perms.as_object_mut() else { return };
+    let allow = perms
+        .entry("allow".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let Some(allow) = allow.as_array_mut() else { return };
+    for rule in CLAUDE_ALLOW_RULES {
+        if !allow.iter().any(|r| r.as_str() == Some(rule)) {
+            allow.push(serde_json::Value::String(rule.to_string()));
+        }
+    }
+}
+
+/// Take [`CLAUDE_ALLOW_RULES`] back out, dropping `allow` and `permissions`
+/// if that leaves them empty. Returns whether anything was removed.
+fn remove_claude_allow_rules(root: &mut serde_json::Map<String, serde_json::Value>) -> bool {
+    let Some(perms) = root.get_mut("permissions").and_then(|p| p.as_object_mut()) else {
+        return false;
+    };
+    let Some(allow) = perms.get_mut("allow").and_then(|a| a.as_array_mut()) else {
+        return false;
+    };
+    let before = allow.len();
+    allow.retain(|r| !r.as_str().is_some_and(|s| CLAUDE_ALLOW_RULES.contains(&s)));
+    if allow.len() == before {
+        return false;
+    }
+    if allow.is_empty() {
+        perms.remove("allow");
+    }
+    if perms.is_empty() {
+        root.remove("permissions");
+    }
+    true
+}
+
+/// The binary path in a settings file's sqz PreToolUse hook, if it has one.
+fn claude_settings_sqz_path(root: &serde_json::Value) -> Option<String> {
+    root.pointer("/hooks/PreToolUse")?.as_array()?.iter().find_map(|entry| {
+        entry.get("hooks")?.as_array()?.iter().find_map(|h| {
+            let command = h.get("command")?.as_str()?;
+            command.strip_suffix(" hook claude").map(str::to_string)
+        })
+    })
+}
+
+/// Whether a Claude Code settings file has sqz's PreToolUse hook but not
+/// the allow rules or PostToolUse hook `sqz init` now writes, as an
+/// install from an older sqz does. Without the rules the hook leaves
+/// every command alone outside bypass mode.
+pub fn claude_settings_stale(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
+    if claude_settings_sqz_path(&root).is_none() {
+        return false;
+    }
+    let post_hook = root
+        .pointer("/hooks/PostToolUse")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.iter().any(|e| hook_entry_command_contains(e, "hook claude-post")));
+    !post_hook || !claude_rules_installed(&[path.to_path_buf()])
+}
+
+/// Bring a stale settings file (see [`claude_settings_stale`]) up to date,
+/// keeping the sqz binary its hook already runs when that still exists.
+pub fn refresh_claude_settings(path: &Path, fallback_sqz: &str) -> Result<bool> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| crate::error::SqzError::Other(format!("read {}: {e}", path.display())))?;
+    let root: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| crate::error::SqzError::Other(format!("parse {}: {e}", path.display())))?;
+    let sqz_path = claude_settings_sqz_path(&root)
+        .filter(|p| Path::new(p).exists())
+        .unwrap_or_else(|| fallback_sqz.to_string());
+    merge_sqz_hooks_into_settings(path, &sqz_path)
+}
+
 /// True if any command in a hook entry contains the given substring.
 /// Used to locate sqz's own entries without pinning to an exact command
 /// (so future format changes still upgrade cleanly).
@@ -1893,6 +1972,183 @@ fn runs_in_background(parsed: &serde_json::Value) -> bool {
         || args.get("mode").and_then(|v| v.as_str()) == Some("async")
 }
 
+/// Allow rules `sqz init` adds to Claude Code settings so the two parts the
+/// ungrouped rewrite adds never need approval of their own. Neither runs
+/// anything: one sets a shell option, the other reads stdin.
+pub const CLAUDE_ALLOW_RULES: [&str; 2] = ["Bash(set -o pipefail)", "Bash(sqz compress --cmd *)"];
+
+/// Claude Code checks permissions against the rewritten command, so a
+/// rewrite must not make an allowed command prompt. Outside bypass mode
+/// that holds only for the ungrouped form, and only once the user has
+/// allowed its extra parts; grouped commands are judged too complex to
+/// match any rule. Everything else is left alone.
+fn claude_rewrite(
+    parsed: &serde_json::Value,
+    command: &str,
+    is_powershell: bool,
+    settings: &[PathBuf],
+) -> Option<String> {
+    let bypass = parsed.get("permission_mode").and_then(|v| v.as_str()) == Some("bypassPermissions");
+    if is_powershell {
+        if !bypass || is_interactive_command(command) || has_shell_operators(command) {
+            return None;
+        }
+        return Some(crate::exit_marker::powershell_rewrite(command, &shell_escape(command)));
+    }
+    if let Some(cmds) = crate::shell_scan::flat(command) {
+        return (bypass || claude_rules_installed(settings))
+            .then(|| crate::exit_marker::posix_flat_rewrite(command, &cmds));
+    }
+    if bypass {
+        return crate::shell_scan::plan(command).ok().map(|plan| posix_rewrite_plan(&plan));
+    }
+    None
+}
+
+/// A successful Bash result the Claude Code PostToolUse hook may shrink.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PostToolUseTarget {
+    /// The tool's result object. A replacement must keep its shape, so
+    /// only `stdout` and `stderr` should change.
+    pub response: serde_json::Map<String, serde_json::Value>,
+    /// The stats and formatter label for its output.
+    pub label: String,
+}
+
+/// Decide whether a Claude Code PostToolUse payload is worth compressing:
+/// a Bash call the PreToolUse hook didn't already pipe through sqz, with
+/// text output that Claude Code hasn't truncated. Claude Code only runs
+/// PostToolUse after a command exits 0; a failure goes to
+/// PostToolUseFailure, which can't replace output.
+pub fn claude_post_tool_use_target(input: &str) -> Option<PostToolUseTarget> {
+    let parsed: serde_json::Value = serde_json::from_str(input).ok()?;
+    if parsed.get("hook_event_name").and_then(|v| v.as_str()) != Some("PostToolUse")
+        || parsed.get("tool_name").and_then(|v| v.as_str()) != Some("Bash")
+        || runs_in_background(&parsed)
+    {
+        return None;
+    }
+    let command = parsed.pointer("/tool_input/command")?.as_str()?;
+    if command.contains("sqz compress")
+        || crate::shell_scan::plan(command) == Err(crate::shell_scan::Skip::AlreadySqz)
+    {
+        return None;
+    }
+    let response = parsed.get("tool_response")?.as_object()?.clone();
+    let flag = |k: &str| response.get(k).and_then(|v| v.as_bool()) == Some(true);
+    if flag("isImage") || flag("interrupted") {
+        return None;
+    }
+    // Past this many characters Claude Code has already cut the output and
+    // shows only a preview, so a smaller replacement changes nothing.
+    let limit = std::env::var("BASH_MAX_OUTPUT_LENGTH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(30_000);
+    let long = |k: &str| {
+        response
+            .get(k)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.chars().count() >= limit)
+    };
+    if response.get("stdout").and_then(|v| v.as_str()).is_none() || long("stdout") || long("stderr") {
+        return None;
+    }
+    Some(PostToolUseTarget { response, label: post_tool_use_label(command) })
+}
+
+/// Whether sqz's Claude Code hooks, as `sqz init` installs them, compress a
+/// Bash command's output in a default-mode session: the PreToolUse rewrite
+/// takes it, or it exits 0 and the PostToolUse hook does. Followers and
+/// background jobs never finish with output to replace.
+pub fn claude_hooks_compress(command: &str, failed: bool) -> bool {
+    use crate::shell_scan::{flat, plan, Skip};
+    if command.contains("sqz compress") {
+        return false;
+    }
+    match plan(command) {
+        Err(Skip::AlreadySqz) => false,
+        _ if flat(command).is_some() => true,
+        Err(Skip::LongRunning | Skip::Background) => false,
+        _ => !failed,
+    }
+}
+
+/// One command's label when only one command in the list has output worth
+/// compressing, so its formatter can run; the generic `sh:` label otherwise.
+fn post_tool_use_label(command: &str) -> String {
+    if let Some(cmds) = crate::shell_scan::flat(command) {
+        let mut labels = cmds.into_iter().filter_map(|c| c.label);
+        if let (Some(only), None) = (labels.next(), labels.next()) {
+            return only;
+        }
+    }
+    list_label(command)
+}
+
+/// The settings files Claude Code reads allow rules from, managed policy
+/// aside: the user file, then the project's shared and local files.
+fn claude_settings_files(parsed: &serde_json::Value) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let user = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs_next::home_dir().map(|h| h.join(".claude")));
+    if let Some(dir) = user {
+        files.push(dir.join("settings.json"));
+    }
+    let project = std::env::var_os("CLAUDE_PROJECT_DIR")
+        .map(PathBuf::from)
+        .or_else(|| parsed.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from));
+    if let Some(dir) = project {
+        files.push(dir.join(".claude").join("settings.json"));
+        files.push(dir.join(".claude").join("settings.local.json"));
+    }
+    files
+}
+
+/// Whether the allow rules across `files` cover both parts the ungrouped
+/// rewrite adds.
+fn claude_rules_installed(files: &[PathBuf]) -> bool {
+    let (mut pipefail, mut compress) = (false, false);
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(file) else { continue };
+        let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let Some(rules) = root.pointer("/permissions/allow").and_then(|a| a.as_array()) else {
+            continue;
+        };
+        for rule in rules.iter().filter_map(|r| r.as_str()) {
+            pipefail |= bash_rule_allows(rule, "set -o pipefail");
+            compress |= bash_rule_allows(rule, "sqz compress --cmd ls");
+        }
+    }
+    pipefail && compress
+}
+
+/// Claude Code's matching for the rule shapes that could cover `command`:
+/// bare `Bash`, an exact command, or one trailing wildcard (`x *`, `x:*`
+/// and `x*`). Anything else counts as not covering it.
+fn bash_rule_allows(rule: &str, command: &str) -> bool {
+    let rule = rule.trim();
+    if rule == "Bash" {
+        return true;
+    }
+    let Some(spec) = rule.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')) else {
+        return false;
+    };
+    if let Some(prefix) = spec.strip_suffix(":*").or_else(|| spec.strip_suffix(" *")) {
+        if prefix.contains('*') {
+            return false;
+        }
+        return command == prefix
+            || command.strip_prefix(prefix).is_some_and(|rest| rest.starts_with(' '));
+    }
+    match spec.strip_suffix('*') {
+        Some(prefix) if !prefix.contains('*') => command.starts_with(prefix),
+        Some(_) => false,
+        None => spec == command,
+    }
+}
+
 /// The POSIX rewrite for a command `shell_scan` accepted.
 fn posix_rewrite_plan(plan: &crate::shell_scan::Plan<'_>) -> String {
     let grouped = if plan.simple {
@@ -1968,7 +2224,8 @@ mod tests {
         let input = r#"{"sessionId":"s","timestamp":1,"cwd":"/x","toolName":"bash","toolArgs":{"command":"git log -20","timeoutSec":30}}"#;
         let result = process_hook_copilot(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["permissionDecision"], "allow");
+        // An "allow" would skip Copilot's own approval prompt.
+        assert!(parsed.get("permissionDecision").is_none(), "{parsed}");
         let args = &parsed["modifiedArgs"];
         assert!(args["command"].as_str().unwrap().contains("sqz compress"));
         assert_eq!(args["timeoutSec"], 30, "sibling toolArgs fields carried over");
@@ -1995,7 +2252,7 @@ mod tests {
     fn test_claude_updated_input_preserves_sibling_fields() {
         // Claude Code's updatedInput replaces the whole input object, so
         // run_in_background / timeout / description must survive the rewrite.
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":"cargo test","run_in_background":false,"timeout":120000,"description":"Run tests"}}"#;
+        let input = r#"{"tool_name":"Bash","permission_mode":"bypassPermissions","tool_input":{"command":"cargo test","run_in_background":false,"timeout":120000,"description":"Run tests"}}"#;
         let result = process_hook(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let updated = &parsed["hookSpecificOutput"]["updatedInput"];
@@ -2012,8 +2269,120 @@ mod tests {
             .map(str::to_string)
     }
 
+    /// A Claude Code Bash call in bypass mode, where the rewrite doesn't
+    /// depend on the allow rules in this machine's settings files.
     fn bash(command: &str) -> String {
-        serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}}).to_string()
+        serde_json::json!({
+            "tool_name": "Bash",
+            "permission_mode": "bypassPermissions",
+            "tool_input": {"command": command}
+        })
+        .to_string()
+    }
+
+    fn claude_default(command: &str, settings: &[PathBuf]) -> Option<String> {
+        let parsed = serde_json::json!({
+            "tool_name": "Bash",
+            "permission_mode": "default",
+            "tool_input": {"command": command}
+        });
+        claude_rewrite(&parsed, command, false, settings)
+    }
+
+    fn settings_with_rules(dir: &Path, rules: &[&str]) -> PathBuf {
+        let path = dir.join("settings.json");
+        std::fs::write(&path, serde_json::json!({"permissions": {"allow": rules}}).to_string())
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn claude_default_mode_rewrites_only_with_the_allow_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = dir.path().join("missing.json");
+        assert_eq!(claude_default("git status", &[none.clone()]), None);
+
+        let partial = settings_with_rules(dir.path(), &["Bash(sqz compress --cmd *)"]);
+        assert_eq!(claude_default("git status", &[partial]), None, "pipefail rule missing");
+
+        let full = settings_with_rules(dir.path(), &CLAUDE_ALLOW_RULES);
+        assert_eq!(
+            claude_default("git status", &[none, full.clone()]).as_deref(),
+            Some("set -o pipefail; git status 2>&1 | sqz compress --cmd 'git status'")
+        );
+        // Grouping is judged too complex for any allow rule to match, so
+        // pipelines are left alone outside bypass mode.
+        assert_eq!(claude_default("git log | head -5", &[full.clone()]), None);
+        assert_eq!(claude_default("for f in *; do wc -l $f; done", &[full]), None);
+    }
+
+    #[test]
+    fn claude_default_mode_keeps_builtins_in_the_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = settings_with_rules(dir.path(), &CLAUDE_ALLOW_RULES);
+        assert_eq!(
+            claude_default("cd sub && export CI=1 && cargo test", &[rules]).as_deref(),
+            Some("set -o pipefail; cd sub && export CI=1 && cargo test 2>&1 | sqz compress --cmd 'cargo test'")
+        );
+    }
+
+    #[test]
+    fn claude_powershell_is_rewritten_only_in_bypass_mode() {
+        let parsed = serde_json::json!({"tool_name": "PowerShell", "permission_mode": "default"});
+        assert_eq!(claude_rewrite(&parsed, "Get-ChildItem", true, &[]), None);
+        let parsed = serde_json::json!({"tool_name": "PowerShell", "permission_mode": "bypassPermissions"});
+        assert!(claude_rewrite(&parsed, "Get-ChildItem", true, &[]).is_some());
+    }
+
+    #[test]
+    fn bash_rule_matching() {
+        for (rule, command, expected) in [
+            ("Bash", "set -o pipefail", true),
+            ("Bash(*)", "set -o pipefail", true),
+            ("Bash(set -o pipefail)", "set -o pipefail", true),
+            ("Bash(set -o pipefail)", "set -o pipefail -x", false),
+            ("Bash(set *)", "set -o pipefail", true),
+            ("Bash(set:*)", "set -o pipefail", true),
+            ("Bash(sqz compress --cmd *)", "sqz compress --cmd ls", true),
+            ("Bash(sqz *)", "sqz compress --cmd ls", true),
+            ("Bash(sqz*)", "sqz compress --cmd ls", true),
+            ("Bash(sq *)", "sqz compress --cmd ls", false),
+            ("Bash(* --cmd ls)", "sqz compress --cmd ls", false),
+            ("Read(./x)", "sqz compress --cmd ls", false),
+        ] {
+            assert_eq!(bash_rule_allows(rule, command), expected, "{rule} vs {command}");
+        }
+    }
+
+    #[test]
+    fn stale_claude_settings_are_detected_and_refreshed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let bin = dir.path().join("sqz");
+        std::fs::write(&bin, "").unwrap();
+        let bin = bin.to_string_lossy().to_string();
+        // What a 1.9.0 install wrote, plus one of the user's own hooks.
+        let old = serde_json::json!({"hooks": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": format!("{bin} hook claude")}]}],
+            "PostToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "prettier --write"}]}],
+        }});
+        std::fs::write(&path, old.to_string()).unwrap();
+        assert!(claude_settings_stale(&path));
+
+        assert!(refresh_claude_settings(&path, "/fallback/sqz").unwrap());
+        assert!(!claude_settings_stale(&path));
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let post = v["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 2, "the user's own PostToolUse hook stays: {post:?}");
+        assert_eq!(
+            v["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            format!("{bin} hook claude"),
+            "keeps the binary the hook already used"
+        );
+
+        std::fs::write(&path, r#"{"permissions":{}}"#).unwrap();
+        assert!(!claude_settings_stale(&path), "no sqz hook, nothing to refresh");
     }
 
     #[test]
@@ -2035,22 +2404,42 @@ mod tests {
             "{ cargo test 2>&1 | tail -30\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: cargo test 2>&1 | tail -30'"
         );
         // A trailing comment no longer swallows the closing brace.
+        let cmd = rewritten(&bash("ls | head # list")).unwrap();
+        assert!(cmd.starts_with("{ ls | head # list\nprintf"), "{cmd}");
+        // Without a pipe nothing needs grouping, and the comment stays last.
         let cmd = rewritten(&bash("ls # list")).unwrap();
-        assert!(cmd.starts_with("{ ls # list\nprintf"), "{cmd}");
+        assert_eq!(cmd, "set -o pipefail; ls 2>&1 | sqz compress --cmd ls # list");
     }
 
     #[test]
     fn leading_cd_runs_outside_the_group() {
+        let cmd = rewritten(&bash("cd sqz_engine && cargo test 2>&1 | tail -5")).unwrap();
+        assert_eq!(
+            cmd,
+            "cd sqz_engine && {  cargo test 2>&1 | tail -5\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: cargo test 2>&1 | tail -5'"
+        );
         let cmd = rewritten(&bash("cd sqz_engine && cargo test 2>&1")).unwrap();
         assert_eq!(
             cmd,
-            "cd sqz_engine && { cargo test 2>&1 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } | sqz compress --cmd 'cargo test'"
+            "set -o pipefail; cd sqz_engine && cargo test 2>&1 | sqz compress --cmd 'cargo test'"
         );
     }
 
     #[test]
-    fn state_changes_and_followers_pass_through() {
-        for command in ["export X=1 && make", "make && cd build", "tail -f app.log", "make &", "git log | sqz compress"] {
+    fn state_changes_pipe_only_the_commands_around_them() {
+        assert_eq!(
+            rewritten(&bash("export X=1 && make")).as_deref(),
+            Some("set -o pipefail; export X=1 && make 2>&1 | sqz compress --cmd make")
+        );
+        assert_eq!(
+            rewritten(&bash("make && cd build")).as_deref(),
+            Some("set -o pipefail; make 2>&1 | sqz compress --cmd make && cd build")
+        );
+    }
+
+    #[test]
+    fn followers_background_jobs_and_sqz_pass_through() {
+        for command in ["tail -f app.log", "make &", "git log | sqz compress", "cd x && npm run dev"] {
             assert_eq!(rewritten(&bash(command)), None, "{command}");
         }
     }
@@ -2058,13 +2447,15 @@ mod tests {
     #[test]
     fn test_process_hook_rewrites_bash_command() {
         // Use the official Claude Code input format: tool_name + tool_input
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":"git status"}}"#;
-        let result = process_hook(input).unwrap();
+        let input = bash("git status");
+        let result = process_hook(&input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         // Claude Code format: hookSpecificOutput with updatedInput
         let hook_output = &parsed["hookSpecificOutput"];
         assert_eq!(hook_output["hookEventName"].as_str().unwrap(), "PreToolUse");
-        assert_eq!(hook_output["permissionDecision"].as_str().unwrap(), "allow");
+        // "allow" would skip the permission prompt for the command.
+        assert!(hook_output.get("permissionDecision").is_none(), "{hook_output}");
+        assert!(hook_output.get("permissionDecisionReason").is_none(), "{hook_output}");
         // updatedInput for Claude Code (camelCase)
         let cmd = hook_output["updatedInput"]["command"].as_str().unwrap();
         assert!(cmd.contains("sqz compress"), "should pipe through sqz: {cmd}");
@@ -2094,7 +2485,7 @@ mod tests {
 
     #[test]
     fn test_process_hook_rewrites_powershell_command() {
-        let input = r#"{"tool_name":"PowerShell","tool_input":{"command":"Get-Content big.log"}}"#;
+        let input = r#"{"tool_name":"PowerShell","permission_mode":"bypassPermissions","tool_input":{"command":"Get-Content big.log"}}"#;
         let result = process_hook(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"]
@@ -2116,7 +2507,7 @@ mod tests {
 
     #[test]
     fn test_process_hook_rewrites_pwsh_command() {
-        let input = r#"{"tool_name":"pwsh","tool_input":{"command":"ls"}}"#;
+        let input = r#"{"tool_name":"pwsh","permission_mode":"bypassPermissions","tool_input":{"command":"ls"}}"#;
         let result = process_hook(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(
@@ -2127,22 +2518,25 @@ mod tests {
 
     #[test]
     fn bash_rewrite_carries_exit_status_trailer() {
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":"cargo test"}}"#;
-        let result = process_hook(input).unwrap();
+        let input = r#"{"tool_name":"run_shell_command","tool_input":{"command":"cargo test"}}"#;
+        let result = process_hook_gemini(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+        let cmd = parsed["hookSpecificOutput"]["tool_input"]["command"]
             .as_str()
             .unwrap();
         assert_eq!(
             cmd,
-            "{ cargo test 2>&1; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } | sqz compress --cmd 'cargo test'",
+            "{ cargo test; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'cargo test'",
             "POSIX rewrite must send the command's exit status through the pipe"
         );
+        // Claude Code gets the ungrouped form, where pipefail carries it.
+        let cmd = rewritten(&bash("cargo test")).unwrap();
+        assert_eq!(cmd, "set -o pipefail; cargo test 2>&1 | sqz compress --cmd 'cargo test'");
     }
 
     #[test]
     fn powershell_rewrite_uses_lastexitcode_not_printf() {
-        let input = r#"{"tool_name":"PowerShell","tool_input":{"command":"cargo test"}}"#;
+        let input = r#"{"tool_name":"PowerShell","permission_mode":"bypassPermissions","tool_input":{"command":"cargo test"}}"#;
         let result = process_hook(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"]
@@ -2157,10 +2551,7 @@ mod tests {
     fn exit_trailer_rewrite_is_not_rewrapped() {
         // Feed the hook its own output — the anti-rewrap guard must catch
         // the new brace-group form (it contains `sqz compress --cmd`).
-        let first = process_hook(
-            r#"{"tool_name":"Bash","tool_input":{"command":"git log"}}"#,
-        )
-        .unwrap();
+        let first = process_hook(&bash("git log")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
         let rewritten = parsed["hookSpecificOutput"]["updatedInput"]["command"]
             .as_str()
@@ -2211,8 +2602,7 @@ mod tests {
         let input = r#"{"tool_name":"run_shell_command","tool_input":{"command":"git log"}}"#;
         let result = process_hook_gemini(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        // Gemini uses top-level decision (not hookSpecificOutput.permissionDecision)
-        assert_eq!(parsed["decision"].as_str().unwrap(), "allow");
+        assert!(parsed.get("decision").is_none(), "the policy engine decides: {parsed}");
         // Gemini format: hookSpecificOutput.tool_input.command (NOT updatedInput)
         let cmd = parsed["hookSpecificOutput"]["tool_input"]["command"].as_str().unwrap();
         assert!(cmd.contains("sqz compress"), "should pipe through sqz: {cmd}");
@@ -2224,9 +2614,21 @@ mod tests {
     }
 
     #[test]
+    fn gemini_tool_input_keeps_every_argument() {
+        // The scheduler replaces the call's arguments with tool_input.
+        let input = r#"{"tool_name":"run_shell_command","tool_input":{"command":"git log","dir_path":"sub","description":"log"}}"#;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&process_hook_gemini(input).unwrap()).unwrap();
+        let args = &parsed["hookSpecificOutput"]["tool_input"];
+        assert_eq!(args["dir_path"], "sub");
+        assert_eq!(args["description"], "log");
+        assert!(args["command"].as_str().unwrap().contains("sqz compress"));
+    }
+
+    #[test]
     fn test_process_hook_legacy_format() {
         // Test backward compatibility with older toolName/toolCall format
-        let input = r#"{"toolName":"Bash","toolCall":{"command":"git status"}}"#;
+        let input = r#"{"toolName":"Bash","permission_mode":"bypassPermissions","toolCall":{"command":"git status"}}"#;
         let result = process_hook(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
@@ -2321,8 +2723,8 @@ mod tests {
     /// a normal CLI argument that every shell accepts.
     #[test]
     fn issue_10_rewrite_is_shell_neutral() {
-        let input = r#"{"tool_name":"Bash","tool_input":{"command":"dotnet build NewNeonCheckers3.sln"}}"#;
-        let result = process_hook(input).unwrap();
+        let input = bash("dotnet build NewNeonCheckers3.sln");
+        let result = process_hook(&input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let cmd = parsed["hookSpecificOutput"]["updatedInput"]["command"]
             .as_str()
@@ -3369,6 +3771,124 @@ mod ci_hook_tests {
         std::fs::write(&path, "{}").unwrap();
         assert!(!remove_ci_hook(dir.path()).unwrap());
         assert!(path.exists());
+    }
+
+    fn read_json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn claude_install_adds_the_post_hook_and_allow_rules_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"permissions":{"allow":["Bash(npm test)"],"deny":["Bash(rm *)"]}}"#)
+            .unwrap();
+        assert!(install_claude_global_at("/usr/local/bin/sqz", Some(tmp.path())).unwrap());
+        let v = read_json(&path);
+        assert_eq!(
+            v["permissions"]["allow"],
+            serde_json::json!(["Bash(npm test)", "Bash(set -o pipefail)", "Bash(sqz compress --cmd *)"])
+        );
+        assert_eq!(v["permissions"]["deny"], serde_json::json!(["Bash(rm *)"]));
+        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "Bash");
+        assert_eq!(
+            v["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
+            "/usr/local/bin/sqz hook claude-post"
+        );
+        assert!(claude_rules_installed(&[path.clone()]));
+        assert!(!install_claude_global_at("/usr/local/bin/sqz", Some(tmp.path())).unwrap());
+
+        let (_, changed) = remove_claude_global_hook_at(Some(tmp.path())).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(
+            read_json(&path),
+            serde_json::json!({"permissions": {"allow": ["Bash(npm test)"], "deny": ["Bash(rm *)"]}})
+        );
+    }
+
+    #[test]
+    fn fresh_project_settings_carry_the_rules_and_post_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.local.json");
+        std::fs::write(&path, claude_settings_content("/usr/bin/sqz")).unwrap();
+        assert!(claude_rules_installed(&[path.clone()]));
+        assert_eq!(
+            read_json(&path)["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
+            "/usr/bin/sqz hook claude-post"
+        );
+        assert!(!claude_project_settings_needs_update(&path, "/usr/bin/sqz").unwrap());
+
+        // A file from before the rules existed needs the update.
+        let mut old = read_json(&path);
+        old.as_object_mut().unwrap().remove("permissions");
+        std::fs::write(&path, old.to_string()).unwrap();
+        assert!(claude_settings_stale(&path));
+        assert!(claude_project_settings_needs_update(&path, "/usr/bin/sqz").unwrap());
+        assert!(merge_sqz_hooks_into_settings(&path, "/usr/bin/sqz").unwrap());
+        assert!(!claude_settings_stale(&path));
+    }
+
+    #[test]
+    fn project_uninstall_keeps_permissions_claude_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude").join("settings.local.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, claude_settings_content("/usr/bin/sqz")).unwrap();
+        // "Yes, and don't ask again" lands in the same file.
+        let mut v = read_json(&path);
+        v["permissions"]["allow"].as_array_mut().unwrap().push(serde_json::json!("Bash(make)"));
+        std::fs::write(&path, v.to_string()).unwrap();
+
+        let (_, changed) = remove_claude_project_hook(dir.path()).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(read_json(&path), serde_json::json!({"permissions": {"allow": ["Bash(make)"]}}));
+
+        // A file holding only sqz's entries goes away entirely.
+        std::fs::write(&path, claude_settings_content("/usr/bin/sqz")).unwrap();
+        remove_claude_project_hook(dir.path()).unwrap();
+        assert!(!path.exists());
+        assert!(remove_claude_project_hook(dir.path()).unwrap().is_none());
+    }
+
+    fn post(command: &str, response: serde_json::Value) -> String {
+        serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "tool_response": response,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn post_tool_use_picks_successful_bash_output_sqz_never_saw() {
+        let ok = serde_json::json!({"stdout": "out", "stderr": "", "interrupted": false, "isImage": false});
+        let t = claude_post_tool_use_target(&post("cargo test | tail -5", ok.clone())).unwrap();
+        assert_eq!(t.label, "sh: cargo test | tail -5");
+        assert_eq!(serde_json::Value::Object(t.response), ok);
+        // One command with output: its formatter can run.
+        let t = claude_post_tool_use_target(&post("cd a && cargo test", ok.clone())).unwrap();
+        assert_eq!(t.label, "cargo test");
+
+        let skipped = [
+            post("set -o pipefail; ls 2>&1 | sqz compress --cmd ls", ok.clone()),
+            post("sqz stats", ok.clone()),
+            post("ls", serde_json::json!({"stdout": "x", "isImage": true})),
+            post("ls", serde_json::json!({"stdout": "x", "interrupted": true})),
+            post("ls", serde_json::json!({"content": "x"})),
+            post("ls", serde_json::json!({"stdout": "a".repeat(30_000), "stderr": ""})),
+            serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "ls"}, "tool_response": ok}).to_string(),
+            serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Read",
+                "tool_input": {"file_path": "/x"}, "tool_response": ok}).to_string(),
+            serde_json::json!({"hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "make", "run_in_background": true}, "tool_response": ok}).to_string(),
+            "not json".to_string(),
+        ];
+        for input in skipped {
+            assert_eq!(claude_post_tool_use_target(&input), None, "{input}");
+        }
     }
 }
 
