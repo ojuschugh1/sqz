@@ -40,13 +40,7 @@ fn format_build(output: &str) -> String {
     }
 
     if errors.is_empty() {
-        return output
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("ok")
-            .trim()
-            .to_string();
+        return output.to_string();
     }
 
     let mut out = format!(
@@ -106,15 +100,7 @@ fn format_test(output: &str) -> String {
     let mut out = String::new();
     match summary {
         Some(s) => out.push_str(&format!("dotnet test: {s}\n")),
-        None => {
-            return output
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("ok")
-                .trim()
-                .to_string();
-        }
+        None => return output.to_string(),
     }
     for block in failed_blocks.iter().take(CAP_ERRORS) {
         out.push_str(&format!("  {block}\n"));

@@ -59,7 +59,8 @@ fn format_install(output: &str) -> String {
         return "ok: up to date".to_string();
     }
 
-    "ok".to_string()
+    // No summary line: the install didn't finish, so nothing is dropped.
+    output.to_string()
 }
 
 fn format_audit(output: &str) -> String {

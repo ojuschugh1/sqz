@@ -181,6 +181,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TOON keeps non-ASCII text as-is.** `é` was written as `\u00e9` and
   an emoji as a 12-character surrogate pair, which costs more tokens
   than the character itself. Control characters are still escaped.
+- **Failed commands no longer come back as "ok".** Several per-command
+  formatters answered "ok" whenever they didn't find their success line,
+  so a failed `npm install` (ERESOLVE) or `pip install` showed the agent
+  "ok", `git push` rejected or without an upstream showed "ok" or
+  "ok ! [rejected]", a `git pull` that stopped on a merge conflict showed
+  "ok", `kubectl apply` reduced its output to "applied: 1 configured"
+  and dropped the `Error from server` line, and gradle, dotnet and
+  xcodebuild fell back to the last line of the output. Every formatter
+  result is now checked: if a line that reports a failure (`error:`,
+  `fatal:`, `npm error`, `Error from server`, `CONFLICT`, `panicked at`,
+  `! [rejected]` and similar, as whole words) is missing, the formatter
+  isn't used and the output goes through the generic pipeline, which
+  keeps error lines. Lines that only restate the failure (`Build
+  FAILED.`, `could not compile`) may go when the output still says it
+  failed. Push and pull now drop only transfer progress, so pull request
+  links from `remote:` survive.
+- **Formatters no longer replace the data an agent asked for with a
+  summary.** `kubectl get -o json` became `List: 2500 items (showing
+  30)` with no items, `-o yaml` lost its indentation, `kubectl logs`
+  dropped the middle of long logs; `gh pr view --json body,comments`
+  kept only number, title, state and author, and `gh pr diff`, `gh pr
+  view` and `gh run view` were cut at 30 lines; an aws or gcloud object
+  holding an array of more than 30 items became a one-line summary with
+  none of them; `ls` showed
+  five file names, `find` printed `dir/ (40 files)` without the names,
+  and `grep` kept three matches per file. `git log -p` and `--stat`
+  kept only commit subjects, `git diff --stat` and `--name-only` kept
+  their first line, `git show rev:path` stripped the file's indentation,
+  `git branch` showed three branches, and `git diff` dropped rename,
+  mode and binary lines. `terraform plan` dropped every attribute
+  change (`# forces replacement` included) and `terraform apply` kept
+  only `Apply complete!`, losing the outputs. kubectl get and logs, gh,
+  aws, gcloud, ls and find now go through the generic pipeline; grep
+  output is written in ripgrep's heading layout, each path once with
+  every match under it; terraform drops only refresh and progress lines;
+  git log keeps commit bodies and passes anything else through; curl
+  drops only its progress meter, not blank lines or lines starting with
+  `%`; tree keeps every entry outside `node_modules`-style directories.
+- **Lists under 16,000 characters are no longer entropy-truncated.**
+  Entropy truncation drops the segments below the median, about half of
+  any long output, so 60 grep matches came back as 30 and a `find` of
+  80 files as 40. Output where most lines are records (`path:line:`
+  matches, bare paths, `ls -l` entries, `git log --oneline`, aligned
+  tables) keeps every line up to that size.
+- **Prose pruning no longer removes words that carry meaning.** The
+  built-in trigram table pruned the only completion it knew for a pair,
+  so "there are no failing tests" became "there are failing tests",
+  "does not exist" became "does not", and "at the same time" became "at
+  the time". Those entries are gone.
+- **Formatter savings are judged in real tokens.** The formatter path
+  counted chars/4 while the pipeline counted BPE tokens, and collapsing
+  column padding shrinks chars/4 a lot but tokens hardly at all, so
+  whitespace-only reformatting passed the net-win gate and was logged as
+  savings. Both paths now use the same token counter.
 - **`sqz doctor --fix` repairs log rows written by the pre-1.8.0
   token estimator.** sqz-mcp before 1.8.0 counted a read tool's input
   with chars/4 and its output with the BPE tokenizer, so verbatim

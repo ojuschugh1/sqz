@@ -18,6 +18,7 @@ fn format_gradle_build(output: &str) -> String {
     let mut errors: Vec<String> = Vec::new();
     let mut warnings = 0;
     let mut tasks_executed = 0;
+    let mut actionable = None;
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -26,7 +27,7 @@ fn format_gradle_build(output: &str) -> String {
         } else if trimmed.starts_with("w: ") || trimmed.starts_with("WARNING:") {
             warnings += 1;
         } else if trimmed.contains("actionable task") {
-            return trimmed.to_string();
+            actionable = Some(trimmed);
         }
         if trimmed.starts_with("> Task :") {
             tasks_executed += 1;
@@ -35,6 +36,9 @@ fn format_gradle_build(output: &str) -> String {
 
     if errors.is_empty() {
         if output.contains("BUILD SUCCESSFUL") {
+            if let Some(line) = actionable {
+                return line.to_string();
+            }
             let mut result = "BUILD SUCCESSFUL".to_string();
             if tasks_executed > 0 {
                 result.push_str(&format!(" ({} tasks)", tasks_executed));
@@ -44,10 +48,7 @@ fn format_gradle_build(output: &str) -> String {
             }
             return result;
         }
-        return output.lines().rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("ok")
-            .to_string();
+        return output.to_string();
     }
 
     let mut result = format!("BUILD FAILED: {} errors, {} warnings\n", errors.len(), warnings);
@@ -99,10 +100,7 @@ fn format_gradle_test(output: &str) -> String {
         return result.trim().to_string();
     }
 
-    output.lines().rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("ok")
-        .to_string()
+    output.to_string()
 }
 
 fn format_mvn(output: &str) -> String {
@@ -140,7 +138,7 @@ fn format_mvn(output: &str) -> String {
     }
 
     if errors.is_empty() {
-        return "ok".to_string();
+        return output.to_string();
     }
 
     format!("{} errors:\n{}", errors.len(),

@@ -82,15 +82,8 @@ pub fn format_xcodebuild(output: &str) -> String {
     }
 
     if out.is_empty() {
-        // Nothing recognized — return the last non-empty line rather
-        // than guessing.
-        return output
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("ok")
-            .trim()
-            .to_string();
+        // Nothing recognized: keep everything rather than guess.
+        return output.to_string();
     }
     out.trim_end().to_string()
 }

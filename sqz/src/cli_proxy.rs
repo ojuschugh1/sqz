@@ -284,8 +284,10 @@ impl CliProxy {
         // formatter that trims a few blank lines is a net loss.
         const NET_WIN_MIN_TOKENS: u32 = 16;
         if let Some(formatted) = format_command(cmd, output) {
-            let tokens_original = (output.len() as u32 + 3) / 4;
-            let tokens_compressed = (formatted.len() as u32 + 3) / 4;
+            // Real token counts, as on the pipeline path: collapsing column
+            // padding shrinks chars/4 a lot and BPE tokens hardly at all.
+            let tokens_original = self.engine.count_tokens(output);
+            let tokens_compressed = self.engine.count_tokens(&formatted);
             if tokens_original.saturating_sub(tokens_compressed) >= NET_WIN_MIN_TOKENS {
                 // Persist to L2 cache — but skip if content contains secrets
                 // (confidence router detected high-risk patterns like API keys)

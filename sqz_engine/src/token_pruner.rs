@@ -66,19 +66,14 @@ impl TokenPruner {
     /// Load built-in trigram patterns from common code and prose.
     fn load_builtin_patterns(&mut self) {
         // Common English prose trigrams (highly predictable completions)
+        // Only completions whose removal keeps the meaning ("there are no" keeps "no").
         let patterns: &[(&str, &str, &str, u32)] = &[
             // Articles and prepositions
             ("in", "the", "same", 80),
             ("in", "the", "following", 75),
-            ("of", "the", "same", 70),
-            ("on", "the", "other", 65),
-            ("at", "the", "same", 60),
-            ("to", "the", "same", 55),
             ("is", "a", "function", 50),
             ("is", "a", "method", 48),
             ("is", "a", "type", 45),
-            ("is", "the", "same", 70),
-            ("as", "a", "result", 60),
             // Common code-adjacent prose
             ("this", "is", "a", 90),
             ("this", "is", "the", 85),
@@ -88,7 +83,6 @@ impl TokenPruner {
             ("it", "is", "not", 75),
             ("there", "is", "a", 80),
             ("there", "is", "no", 75),
-            ("there", "are", "no", 70),
             ("that", "is", "a", 75),
             ("that", "is", "the", 70),
             ("which", "is", "a", 70),
@@ -102,13 +96,11 @@ impl TokenPruner {
             ("unable", "to", "open", 50),
             ("could", "not", "find", 60),
             ("could", "not", "open", 55),
-            ("does", "not", "exist", 65),
             ("is", "not", "a", 60),
             ("is", "not", "the", 55),
             // Documentation patterns
             ("for", "more", "information", 80),
             ("for", "more", "details", 75),
-            ("see", "the", "documentation", 70),
             ("refer", "to", "the", 65),
             ("please", "refer", "to", 60),
             ("note", "that", "the", 55),
@@ -465,6 +457,24 @@ mod tests {
             result.tokens_removed > 0 || result.text.len() <= "We need in order to do this task".len(),
             "expected some pruning on predictable prose"
         );
+    }
+
+    #[test]
+    fn test_prune_never_changes_meaning() {
+        let pruner = TokenPruner::new();
+        for phrase in [
+            "There are no failing tests in this run",
+            "The name foo does not exist in the current context",
+            "Both writes happen at the same time on the leader",
+            "The second checksum is the same as the first",
+            "As a result the build stops before linking",
+            "On the other hand the cache stays warm",
+            "See the documentation for the full list",
+            "Both are of the same type here",
+        ] {
+            let result = pruner.prune(phrase).unwrap();
+            assert_eq!(result.text, phrase, "pruning changed: {phrase}");
+        }
     }
 
     #[test]

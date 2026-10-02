@@ -9,7 +9,6 @@ mod kubectl;
 mod system;
 mod js;
 mod lint;
-mod gh;
 mod python;
 mod go;
 mod cloud;
@@ -25,7 +24,64 @@ pub fn format_command(cmd: &str, output: &str) -> Option<String> {
     let cleaned = preprocess::clean(output);
     let input = if cleaned.len() < output.len() { &cleaned } else { output };
 
-    dispatch(cmd, input)
+    let formatted = dispatch(cmd, input)?;
+    if drops_error_lines(input, &formatted) {
+        return None;
+    }
+    Some(formatted)
+}
+
+/// A formatter may summarize success, but every line reporting a failure
+/// has to come through, unless the formatter says it capped them. Lines
+/// that only restate the failure (`Build FAILED.`, `could not compile`) may
+/// go as long as the output still says it failed.
+fn drops_error_lines(input: &str, formatted: &str) -> bool {
+    if formatted.contains("...+") && !input.contains("...+") {
+        return false;
+    }
+    let lower = formatted.to_ascii_lowercase();
+    let says_failed = lower.contains("fail") || lower.contains("error");
+    input.lines().filter(|l| is_error_line(l)).any(|l| {
+        let t = l.trim();
+        if is_failure_summary(t) {
+            !says_failed
+        } else {
+            !formatted.contains(t)
+        }
+    })
+}
+
+fn is_failure_summary(line: &str) -> bool {
+    const SUMMARIES: &[&str] = &[
+        "could not compile", "aborting due to", "previous error", "build failed",
+        "build failure", "a complete log of this run", "test result: failed",
+    ];
+    let lower = line.to_ascii_lowercase();
+    (line.len() <= 40 && (lower.contains("failed") || lower.contains("failure")))
+        || SUMMARIES.iter().any(|s| lower.contains(s))
+}
+
+/// Narrower than a substring match on "error", so `Compiling thiserror`
+/// and `7 passed; 0 failed` don't count.
+fn is_error_line(line: &str) -> bool {
+    let t = line.trim_start();
+    const STARTS: &[&str] = &[
+        "error", "Error", "ERROR", "fatal", "Fatal", "FATAL", "FAILURE", "FAILED", "panic",
+        "Traceback", "Exception", "npm ERR!", "npm error", "ERR_", "CONFLICT", "! [rejected]",
+        "! [remote rejected]", "denied:", "[ERROR]",
+    ];
+    const CONTAINS: &[&str] = &[
+        ": error", ": fatal", "error[E", " FAILED", "Execution failed", "failed to ",
+        "Failed to ", "panicked at", "did not complete successfully", "An error occurred",
+        "Exception in thread", "Automatic merge failed",
+    ];
+    // Whole words only: `Errors  Files` and `ExceptionHandler` don't count.
+    let starts = STARTS.iter().any(|p| {
+        t.starts_with(p)
+            && !(p.ends_with(|c: char| c.is_ascii_alphabetic())
+                && t[p.len()..].starts_with(|c: char| c.is_ascii_alphanumeric()))
+    });
+    starts || CONTAINS.iter().any(|p| t.contains(p))
 }
 
 fn dispatch(cmd: &str, output: &str) -> Option<String> {
@@ -44,7 +100,6 @@ fn dispatch(cmd: &str, output: &str) -> Option<String> {
     match base {
         // Version control
         "git" => git::format_git(parts.get(1).copied(), output),
-        "gh" => gh::format_gh(parts.get(1).copied(), output),
 
         // Rust
         "cargo" => cargo::format_cargo(parts.get(1).copied(), output),
@@ -88,15 +143,11 @@ fn dispatch(cmd: &str, output: &str) -> Option<String> {
         "docker" | "podman" => docker::format_docker(parts.get(1).copied(), output),
         "kubectl" => kubectl::format_kubectl(parts.get(1).copied(), output),
 
-        // Cloud CLIs
-        "aws" => cloud::format_aws(parts.get(1).copied(), output),
+        // Infrastructure
         "terraform" | "tf" => cloud::format_terraform(parts.get(1).copied(), output),
-        "gcloud" => cloud::format_gcloud(output),
 
         // System utilities
-        "ls" => Some(system::format_ls(output)),
-        "find" | "fd" => Some(system::format_find(output)),
-        "grep" | "rg" | "ag" => Some(system::format_grep(output)),
+        "grep" | "rg" | "ag" => system::format_grep(output),
         "tree" => Some(system::format_tree(output)),
         "curl" | "wget" => Some(system::format_curl(output)),
 
@@ -107,6 +158,41 @@ fn dispatch(cmd: &str, output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_error_lines_are_whole_words() {
+        for line in [
+            "error[E0425]: cannot find value `x` in this scope",
+            "Error from server (NotFound): namespaces \"prod\" not found",
+            "npm error code ERESOLVE",
+            "fatal: not a git repository",
+            "src/a.ts(3,7): error TS2322: Type 'string' is not assignable",
+            "thread 'main' panicked at src/main.rs:3:5:",
+            " ! [rejected]        main -> main (fetch first)",
+        ] {
+            assert!(is_error_line(line), "{line}");
+        }
+        for line in [
+            "   Compiling thiserror v1.0.63",
+            "Errors  Files",
+            "test result: ok. 7 passed; 0 failed",
+            "ExceptionHandler.java compiled",
+        ] {
+            assert!(!is_error_line(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn test_formatter_that_drops_an_error_is_not_used() {
+        // A summary formatter that answers "ok" would hide the failure.
+        let failed = "Collecting torch==9.0\nERROR: No matching distribution found for torch==9.0\n";
+        assert!(drops_error_lines(failed, "ok"));
+        assert!(!drops_error_lines(failed, "ERROR: No matching distribution found for torch==9.0"));
+        // Restating lines may go when the output still says it failed.
+        let build = "x.cs(1,1): error CS0103: nope\nBuild FAILED.\n";
+        assert!(!drops_error_lines(build, "dotnet build: FAILED\n  x.cs(1,1): error CS0103: nope"));
+        assert!(drops_error_lines("Build FAILED.\n", "done"));
+    }
 
     #[test]
     fn test_format_command_routing() {
@@ -124,12 +210,29 @@ mod tests {
 
     #[test]
     fn test_new_commands_dispatch() {
-        assert!(format_command("gh pr list", "[]").is_some());
         assert!(format_command("ruff check", "All checks passed!").is_some());
         assert!(format_command("go test ./...", "ok").is_some());
-        assert!(format_command("grep foo bar.txt", "bar.txt:1:foo").is_some());
+        let grep: String = (0..10).map(|i| format!("src/main.rs:{i}:let x = compute();\n")).collect();
+        assert!(format_command("grep -rn compute src", &grep).is_some());
         assert!(format_command("tree", ".\n├── src\n└── Cargo.toml").is_some());
         assert!(format_command("curl http://example.com", "response").is_some());
+    }
+
+    #[test]
+    fn test_data_commands_are_left_to_the_pipeline() {
+        // Their output is the data the agent asked for: JSON, YAML, tables,
+        // diffs, file lists. The generic pipeline keeps all of it.
+        for (cmd, out) in [
+            ("gh pr view 12 --json body", r#"{"body":"long text","number":12}"#),
+            ("gh pr diff 12", "diff --git a/x b/x\n"),
+            ("aws ec2 describe-instances", r#"{"Reservations":[]}"#),
+            ("gcloud compute instances list", "NAME ZONE\nweb us-east1-b\n"),
+            ("kubectl get pods -o json", r#"{"kind":"PodList","items":[]}"#),
+            ("ls -la", "total 0\n-rw-r--r--  1 dev  staff  0 Sep 1 12:00 a\n"),
+            ("find . -name '*.rs'", "./a.rs\n./b.rs\n"),
+        ] {
+            assert!(format_command(cmd, out).is_none(), "{cmd}");
+        }
     }
 
     #[test]
@@ -145,8 +248,11 @@ mod tests {
 
     #[test]
     fn test_phase4_commands_dispatch() {
-        assert!(format_command("aws s3 ls", "2024-01-01 bucket/file.txt").is_some());
-        assert!(format_command("terraform plan", "No changes. Infrastructure is up-to-date.").is_some());
+        assert!(format_command(
+            "terraform plan",
+            "aws_instance.web: Refreshing state... [id=i-1]\nNo changes. Infrastructure is up-to-date."
+        )
+        .is_some());
         assert!(format_command("gradle build", "BUILD SUCCESSFUL in 3s").is_some());
         assert!(format_command("mvn compile", "[INFO] BUILD SUCCESS").is_some());
         assert!(format_command("kubectl describe pod nginx", "Name: nginx").is_some());

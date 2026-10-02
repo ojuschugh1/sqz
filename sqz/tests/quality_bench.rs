@@ -175,8 +175,169 @@ fn app_log() -> String {
     s
 }
 
+/// Facts built at runtime; the leak is per test process.
+fn leak(v: Vec<String>) -> &'static [&'static str] {
+    let v: Vec<&'static str> = v.into_iter().map(|s| &*Box::leak(s.into_boxed_str())).collect();
+    Box::leak(v.into_boxed_slice())
+}
+
+fn grep_matches() -> (String, &'static [&'static str]) {
+    let mut out = String::new();
+    let mut facts = Vec::new();
+    for (file, n) in [("src/billing/refund.py", 18), ("src/billing/ledger.py", 14), ("tests/test_refund.py", 13)] {
+        for i in 0..n {
+            let hit = format!("compute_fee(order_{file_id}_{i})", file_id = file.len());
+            out.push_str(&format!("{file}:{}:    fee = {hit}\n", i * 9 + 4));
+            facts.push(hit);
+        }
+        facts.push(file.to_string());
+    }
+    (out, leak(facts))
+}
+
+fn file_list() -> (String, &'static [&'static str]) {
+    let mut out = String::new();
+    let mut facts = Vec::new();
+    for dir in ["src/api", "src/billing", "src/workers", "tests/unit"] {
+        for i in 0..20 {
+            let path = format!("./{dir}/module_{i:02}.py");
+            out.push_str(&path);
+            out.push('\n');
+            facts.push(path);
+        }
+    }
+    (out, leak(facts))
+}
+
+fn ls_long() -> (String, &'static [&'static str]) {
+    let mut out = String::from("total 640\n");
+    let mut facts = Vec::new();
+    for i in 0..40 {
+        let name = if i % 7 == 0 { format!("pkg_{i:02}") } else { format!("report_{i:02}.csv") };
+        let kind = if i % 7 == 0 { 'd' } else { '-' };
+        out.push_str(&format!("{kind}rw-r--r--  1 dev  staff  {:>6} Sep {:>2} 12:{:02} {name}\n", 1000 + i * 137, 1 + i % 28, i));
+        facts.push(name);
+    }
+    (out, leak(facts))
+}
+
+fn pod_list_json() -> (String, &'static [&'static str]) {
+    let mut items = Vec::new();
+    let mut facts = vec!["CrashLoopBackOff".to_string()];
+    for i in 0..12 {
+        let name = format!("api-{:05x}-q{i}", 0x3f2a1 + i);
+        let crashing = i == 9;
+        items.push(format!(
+            r#"{{"metadata":{{"name":"{name}","namespace":"prod","labels":{{"app":"api"}}}},"spec":{{"nodeName":"node-{}","containers":[{{"name":"api","image":"registry/api:1.4.{i}"}}]}},"status":{{"phase":"Running","containerStatuses":[{{"name":"api","ready":{},"restartCount":{}{}}}]}}}}"#,
+            i % 3,
+            !crashing,
+            if crashing { 14 } else { 0 },
+            if crashing { r#","state":{"waiting":{"reason":"CrashLoopBackOff"}}"# } else { "" }
+        ));
+        facts.push(name);
+    }
+    let doc = format!(r#"{{"apiVersion":"v1","kind":"List","items":[{}]}}"#, items.join(","));
+    let pretty = serde_json::to_string_pretty(&serde_json::from_str::<serde_json::Value>(&doc).unwrap()).unwrap();
+    (pretty, leak(facts))
+}
+
+fn instances_json() -> (String, &'static [&'static str]) {
+    let mut instances = Vec::new();
+    let mut facts = Vec::new();
+    for i in 0..40 {
+        let id = format!("i-0{:015x}", 0xabc000 + i);
+        let ip = format!("10.0.{}.{}", i / 10, 20 + i);
+        let mut tags = vec![serde_json::json!({"Key": "Name", "Value": format!("worker-{i}")})];
+        if i % 4 == 0 {
+            tags.push(serde_json::json!({"Key": "team", "Value": "payments"}));
+        }
+        instances.push(serde_json::json!({
+            "InstanceId": id, "InstanceType": if i % 5 == 0 { "m7g.large" } else { "t3.medium" },
+            "PrivateIpAddress": ip, "State": {"Code": 16, "Name": "running"}, "Tags": tags,
+            "Placement": {"AvailabilityZone": format!("us-east-1{}", ["a", "b", "c"][i % 3])}
+        }));
+        facts.push(id);
+        facts.push(ip);
+    }
+    let doc = serde_json::json!({"Reservations": [{"ReservationId": "r-0123", "Instances": instances}]});
+    (serde_json::to_string_pretty(&doc).unwrap(), leak(facts))
+}
+
+fn pr_diff() -> String {
+    let mut s = String::new();
+    for f in ["src/billing/refund.py", "src/billing/ledger.py"] {
+        s.push_str(&format!("diff --git a/{f} b/{f}\nindex 3f2a1b9..8c7d6e5 100644\n--- a/{f}\n+++ b/{f}\n@@ -10,14 +10,15 @@ class RefundService:\n"));
+        for i in 0..6 {
+            s.push_str(&format!("     context_line_{i}()\n"));
+        }
+        s.push_str("-    if amount_cents <= 0:\n+    if amount_cents <= 0 or amount_cents > charge.amount_cents:\n+        log.warning(\"refund over charge\")\n");
+        for i in 6..12 {
+            s.push_str(&format!("     context_line_{i}()\n"));
+        }
+    }
+    s
+}
+
 fn fixtures() -> Vec<Fixture> {
+    let (grep_out, grep_facts) = grep_matches();
+    let (find_out, find_facts) = file_list();
+    let (ls_out, ls_facts) = ls_long();
+    let (pods_out, pods_facts) = pod_list_json();
+    let (ec2_out, ec2_facts) = instances_json();
     vec![
+        fx("grep, 45 matches in 3 files", "grep -rn compute_fee src tests", grep_out, grep_facts, &[]),
+        fx("find, 80 files", "find . -name '*.py'", find_out, find_facts, &[]),
+        fx("ls -la, 40 entries", "ls -la reports", ls_out, ls_facts, &[]),
+        fx("kubectl get pods -o json", "kubectl get pods -o json", pods_out, pods_facts, &[]),
+        fx(
+            "kubectl apply with an error",
+            "kubectl apply -f k8s/",
+            "configmap/api-env unchanged\nsecret/api-db unchanged\nservice/api unchanged\ndeployment.apps/api configured\nError from server (Invalid): error when creating \"k8s/ingress.yaml\": Ingress.networking.k8s.io \"api\" is invalid: spec.rules[0].host: Invalid value: \"API.example.com\": a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters\n",
+            &["deployment.apps/api configured", "Error from server (Invalid)", "spec.rules[0].host: Invalid value: \"API.example.com\""],
+            &["secret/api-db unchanged"],
+        ),
+        fx("aws ec2 describe-instances, 40", "aws ec2 describe-instances", ec2_out, ec2_facts, &[]),
+        fx(
+            "gh pr view --json",
+            "gh pr view 214 --json title,body,comments,files",
+            r#"{"title":"Refund guard","body":"Refunds above the charge amount now fail fast.\n\nThe ledger also logs a warning so support can find them.","comments":[{"author":{"login":"ana"},"body":"Can we keep the old error code for the mobile app?"},{"author":{"login":"wei"},"body":"Yes, mapped in errors.py"}],"files":[{"path":"src/billing/refund.py","additions":3,"deletions":1},{"path":"src/billing/errors.py","additions":4,"deletions":0}]}"#,
+            &["Refunds above the charge amount now fail fast.", "keep the old error code for the mobile app", "mapped in errors.py", "src/billing/errors.py"],
+            &[],
+        ),
+        fx(
+            "gh pr diff",
+            "gh pr diff 214",
+            pr_diff(),
+            &["+    if amount_cents <= 0 or amount_cents > charge.amount_cents:", "-    if amount_cents <= 0:", "+        log.warning(\"refund over charge\")", "src/billing/ledger.py"],
+            &[],
+        ),
+        fx(
+            "terraform plan",
+            "terraform plan",
+            "aws_db_instance.main: Refreshing state... [id=app-db]\naws_s3_bucket.logs: Refreshing state... [id=acme-logs]\naws_s3_bucket.assets: Refreshing state... [id=acme-assets]\naws_iam_role.api: Refreshing state... [id=api-role]\naws_security_group.db: Refreshing state... [id=sg-0a1b2c]\n\nTerraform used the selected providers to generate the following execution plan.\n\nTerraform will perform the following actions:\n\n  # aws_db_instance.main must be replaced\n-/+ resource \"aws_db_instance\" \"main\" {\n      ~ engine_version = \"14.9\" -> \"16.3\" # forces replacement\n        id             = \"app-db\"\n    }\n\nPlan: 1 to add, 0 to change, 1 to destroy.\n",
+            &["aws_db_instance.main must be replaced", "~ engine_version = \"14.9\" -> \"16.3\" # forces replacement", "Plan: 1 to add, 0 to change, 1 to destroy."],
+            &["Refreshing state"],
+        ),
+        fx(
+            "npm install failure",
+            "npm install",
+            "npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory.\nnpm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported\nnpm error code ERESOLVE\nnpm error ERESOLVE unable to resolve dependency tree\nnpm error\nnpm error While resolving: app@1.0.0\nnpm error Found: react@18.2.0\nnpm error node_modules/react\nnpm error   react@\"^18.2.0\" from the root project\nnpm error\nnpm error Could not resolve dependency:\nnpm error peer react@\"^17.0.0\" from ui-kit@2.0.0\nnpm error A complete log of this run can be found in: /home/dev/.npm/_logs/2026-09-14T10_22_03_000Z-debug-0.log\n",
+            &["npm error code ERESOLVE", "npm error peer react@\"^17.0.0\" from ui-kit@2.0.0", "Found: react@18.2.0"],
+            &[],
+        ),
+        fx(
+            "git push rejected",
+            "git push",
+            "Enumerating objects: 9, done.\nCounting objects: 100% (9/9), done.\nDelta compression using up to 10 threads\nCompressing objects: 100% (5/5), done.\nWriting objects: 100% (5/5), 1.02 KiB | 1.02 MiB/s, done.\nTotal 5 (delta 3), reused 0 (delta 0), pack-reused 0\nTo github.com:acme/api.git\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to 'github.com:acme/api.git'\nhint: Updates were rejected because the remote contains work that you do not\nhint: have locally. If you want to integrate the remote changes, use\nhint: 'git pull' before pushing again.\n",
+            &["! [rejected]        main -> main (fetch first)", "error: failed to push some refs", "hint: 'git pull' before pushing again."],
+            &["Counting objects: 100% (9/9), done."],
+        ),
+        verbatim(
+            "git show rev:path",
+            "git show HEAD~3:src/billing/refund.py",
+            "from .errors import RefundError\n\n\nclass RefundService:\n    def refund(self, charge, amount_cents):\n        if amount_cents <= 0:\n            raise RefundError(\"invalid refund amount\")\n\n        return self.gateway.refund(charge.id, amount_cents)\n",
+            &["        if amount_cents <= 0:", "            raise RefundError(\"invalid refund amount\")"],
+        ),
         fx(
             "cargo test failure",
             "cargo test",

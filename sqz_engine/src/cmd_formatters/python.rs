@@ -276,7 +276,8 @@ fn format_pip_install(output: &str) -> String {
     if output.contains("already satisfied") {
         return "ok: already satisfied".to_string();
     }
-    "ok".to_string()
+    // No summary line: the install didn't finish, so nothing is dropped.
+    output.to_string()
 }
 
 fn format_pip_list(output: &str) -> String {

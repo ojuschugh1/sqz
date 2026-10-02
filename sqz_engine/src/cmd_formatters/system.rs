@@ -1,103 +1,65 @@
-use super::truncate::CAP_LIST;
+// ls and find output is left to the generic pipeline, which keeps every entry.
 
-pub fn format_ls(output: &str) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-    if lines.len() <= 20 { return output.to_string(); }
+/// `path:line:text` matches in ripgrep's heading layout: each file's path
+/// once, then its `line:text` matches, a blank line between files. Every
+/// match stays; order is unchanged. Returns None unless at least 80% of the
+/// lines are matches and the layout saves 10%.
+pub fn format_grep(output: &str) -> Option<String> {
+    let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+    let parsed: Vec<Option<(&str, &str)>> = lines.iter().map(|l| split_match(l)).collect();
+    let matches = parsed.iter().filter(|p| p.is_some()).count();
+    if lines.is_empty() || matches * 5 < lines.len() * 4 {
+        return None;
+    }
 
-    let mut dirs = Vec::new();
-    let mut files = Vec::new();
-
-    for line in &lines {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("total") { continue; }
-        if trimmed.starts_with('d') || trimmed.ends_with('/') {
-            dirs.push(trimmed.split_whitespace().last().unwrap_or(trimmed).to_string());
-        } else {
-            files.push(trimmed.split_whitespace().last().unwrap_or(trimmed).to_string());
+    let mut out = String::with_capacity(output.len());
+    let mut current: Option<&str> = None;
+    for (line, parsed) in lines.iter().zip(&parsed) {
+        match parsed {
+            Some((path, rest)) => {
+                if current != Some(*path) {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(path);
+                    out.push('\n');
+                    current = Some(path);
+                }
+                out.push_str(rest);
+                out.push('\n');
+            }
+            None => {
+                if current.is_some() {
+                    out.push('\n');
+                }
+                out.push_str(line);
+                out.push('\n');
+                current = None;
+            }
         }
     }
-
-    let mut result = Vec::new();
-    if !dirs.is_empty() {
-        result.push(format!("dirs({}): {}", dirs.len(), dirs.join(", ")));
+    let out = out.trim_end().to_string();
+    if out.len() * 10 > output.trim_end().len() * 9 {
+        return None;
     }
-    if files.len() > 10 {
-        result.push(format!("files({}): {}, ...+{}", files.len(),
-            files[..5].join(", "), files.len() - 5));
-    } else if !files.is_empty() {
-        result.push(format!("files({}): {}", files.len(), files.join(", ")));
-    }
-    result.join("\n")
+    Some(out)
 }
 
-pub fn format_find(output: &str) -> String {
-    let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() <= 20 { return output.to_string(); }
-
-    let mut by_dir: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-    for line in &lines {
-        let path = std::path::Path::new(line.trim());
-        let parent = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        by_dir.entry(parent).or_default().push(name);
+/// `src/a.rs:12:text` -> (`src/a.rs`, `12:text`). The path has no spaces
+/// and looks like a file (a `/` or `.`), so `10:22:03` in a log line isn't
+/// read as one.
+fn split_match(line: &str) -> Option<(&str, &str)> {
+    let (path, rest) = line.split_once(':')?;
+    let digits = rest.find(':')?;
+    if path.is_empty()
+        || path.contains(char::is_whitespace)
+        || !(path.contains('/') || path.contains('.'))
+        || digits == 0
+        || !rest[..digits].bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
     }
-
-    let mut result = Vec::new();
-    result.push(format!("{} files found:", lines.len()));
-    for (dir, files) in &by_dir {
-        if files.len() > 5 {
-            result.push(format!("  {}/ ({} files)", dir, files.len()));
-        } else {
-            result.push(format!("  {}/ {}", dir, files.join(", ")));
-        }
-    }
-    result.join("\n")
-}
-
-pub fn format_grep(output: &str) -> String {
-    let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() <= CAP_LIST { return output.to_string(); }
-
-    // Group by file
-    let mut by_file: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-    let mut total = 0;
-
-    for line in &lines {
-        total += 1;
-        // grep output: "file:line:content" or "file:content"
-        if let Some(colon_pos) = line.find(':') {
-            let file = line[..colon_pos].to_string();
-            let content = line[colon_pos + 1..].to_string();
-            by_file.entry(file).or_default().push(content);
-        } else {
-            by_file.entry("".to_string()).or_default().push(line.to_string());
-        }
-    }
-
-    let mut result = format!("{} matches in {} files:\n", total, by_file.len());
-    let mut shown = 0;
-    for (file, matches) in &by_file {
-        if shown >= CAP_LIST { break; }
-        if file.is_empty() {
-            for m in matches.iter().take(5) {
-                result.push_str(&format!("  {}\n", m));
-                shown += 1;
-            }
-        } else {
-            result.push_str(&format!("  {} ({} matches):\n", file, matches.len()));
-            for m in matches.iter().take(3) {
-                result.push_str(&format!("    {}\n", m));
-                shown += 1;
-            }
-            if matches.len() > 3 {
-                result.push_str(&format!("    ...+{} more\n", matches.len() - 3));
-            }
-        }
-    }
-    if total > CAP_LIST {
-        result.push_str(&format!("...+{} more matches\n", total - CAP_LIST));
-    }
-    result.trim().to_string()
+    Some((path, rest))
 }
 
 pub fn format_tree(output: &str) -> String {
@@ -138,71 +100,100 @@ pub fn format_tree(output: &str) -> String {
         result.push(format!("({} entries collapsed)", skipped));
     }
 
-    // Still too long? Truncate
-    if result.len() > 50 {
-        let mut truncated: Vec<String> = result[..50].to_vec();
-        truncated.push(format!("...+{} more entries", result.len() - 50));
-        return truncated.join("\n");
-    }
-
     result.join("\n")
 }
 
+/// Response body without curl's progress meter. Everything else, blank
+/// lines included, stays.
 pub fn format_curl(output: &str) -> String {
-    // Strip progress bar lines (curl uses \r for progress)
-    let lines: Vec<&str> = output.lines()
-        .filter(|l| {
-            let t = l.trim();
-            !t.starts_with('%') && !t.contains("Dload") && !t.contains("Upload")
-                && !t.contains("Xferd") && !t.is_empty()
-        })
-        .collect();
-
-    if lines.is_empty() {
+    let lines: Vec<&str> = output.lines().filter(|l| !is_curl_progress(l)).collect();
+    if lines.iter().all(|l| l.trim().is_empty()) {
         return output.to_string();
     }
     lines.join("\n")
+}
+
+fn is_curl_progress(line: &str) -> bool {
+    let t = line.trim();
+    if t.starts_with("% Total") && t.contains("% Received") {
+        return true;
+    }
+    if t.starts_with("Dload") && t.contains("Upload") {
+        return true;
+    }
+    // `100  1270  100  1270    0     0   6350      0 --:--:-- --:--:-- --:--:--  6350`
+    let fields: Vec<&str> = t.split_whitespace().collect();
+    let is_time = |f: &str| {
+        f == "--:--:--" || (f.len() >= 7 && f.split(':').count() == 3 && f.bytes().all(|b| b.is_ascii_digit() || b == b':'))
+    };
+    fields.len() == 12
+        && fields[0].bytes().all(|b| b.is_ascii_digit())
+        && fields[8..11].iter().all(|f| is_time(f))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_ls_short_passthrough() {
-        let output = "file1.rs\nfile2.rs\n";
-        assert_eq!(format_ls(output), output);
-    }
-
-    #[test]
-    fn test_grep_groups_by_file() {
-        let mut lines = Vec::new();
-        for i in 0..40 {
-            lines.push(format!("src/main.rs:{}:let x = {};", i + 1, i));
+    /// Reverse the heading layout back to `path:line:text` lines.
+    fn unheading(s: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut path: Option<&str> = None;
+        for line in s.lines() {
+            if line.is_empty() {
+                path = None;
+            } else if let Some(p) = path {
+                out.push(format!("{p}:{line}"));
+            } else if split_match(line).is_some() {
+                out.push(line.to_string());
+            } else {
+                path = Some(line);
+            }
         }
-        let output = lines.join("\n");
-        let result = format_grep(&output);
-        assert!(result.contains("40 matches"));
-        assert!(result.contains("src/main.rs (40 matches)"));
+        out
     }
 
     #[test]
-    fn test_grep_short_passthrough() {
-        let output = "src/lib.rs:10:fn foo()\n";
-        assert_eq!(format_grep(output), output);
+    fn test_grep_heading_keeps_every_match_in_order() {
+        let mut lines = Vec::new();
+        for (file, n) in [("src/main.rs", 30), ("src/lib.rs", 12), ("tests/it.rs", 8)] {
+            for i in 0..n {
+                lines.push(format!("{file}:{}:    let x = compute({i});", i * 3 + 1));
+            }
+        }
+        let output = lines.join("\n") + "\n";
+        let result = format_grep(&output).expect("heading layout saves here");
+        assert!(result.starts_with("src/main.rs\n1:    let x = compute(0);\n"), "{result}");
+        assert_eq!(unheading(&result), lines, "every match, same order");
     }
 
     #[test]
-    fn test_tree_collapses_noise() {
+    fn test_grep_one_match_per_file_passes_through() {
+        let output = (0..40).map(|i| format!("src/f{i}.rs:3:hit\n")).collect::<String>();
+        assert!(format_grep(&output).is_none(), "no repeated paths to save");
+    }
+
+    #[test]
+    fn test_grep_other_shapes_pass_through() {
+        assert!(format_grep("src/lib.rs\nsrc/main.rs\n").is_none(), "-l");
+        assert!(format_grep("src/lib.rs:4\nsrc/main.rs:9\n").is_none(), "-c");
+        let log = "2026-09-14 10:22:03 INFO start\n2026-09-14 10:22:04 INFO next\n".repeat(20);
+        assert!(format_grep(&log).is_none(), "timestamps are not paths");
+    }
+
+    #[test]
+    fn test_tree_collapses_noise_and_keeps_the_rest() {
         let mut lines = vec![
             ".".to_string(),
             "├── src".to_string(),
             "│   └── main.rs".to_string(),
             "├── node_modules".to_string(),
         ];
-        // Add many node_modules entries
         for i in 0..50 {
             lines.push(format!("│   ├── package_{}", i));
+        }
+        for i in 0..60 {
+            lines.push(format!("├── doc_{}.md", i));
         }
         lines.push("└── Cargo.toml".to_string());
         let output = lines.join("\n");
@@ -210,6 +201,8 @@ mod tests {
         assert!(result.contains("[collapsed]"));
         assert!(result.contains("entries collapsed"));
         assert!(!result.contains("package_49"));
+        assert!(result.contains("doc_59.md"), "entries outside noise dirs all stay");
+        assert!(result.contains("Cargo.toml"));
     }
 
     #[test]
@@ -219,9 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn test_curl_strips_progress() {
-        let output = "  % Total    % Received % Xferd\n  Dload  Upload   Total\n{\"key\": \"value\"}\n";
+    fn test_curl_strips_progress_only() {
+        let output = "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n100  1270  100  1270    0     0   6350      0 --:--:-- --:--:-- --:--:--  6350\n# Title\n\n%PDF-like line stays\nsecond paragraph\n";
         let result = format_curl(output);
-        assert_eq!(result, "{\"key\": \"value\"}");
+        assert_eq!(result, "# Title\n\n%PDF-like line stays\nsecond paragraph");
     }
 }

@@ -210,6 +210,10 @@ fn format_cargo_test(output: &str) -> String {
 
     let mut result = Vec::new();
     result.push(format!("FAILURES ({}):", failures.len()));
+    // One line per failing test, so the list survives the block cap.
+    for line in output.lines().filter(|l| l.starts_with("test ") && l.trim_end().ends_with("... FAILED")) {
+        result.push(line.to_string());
+    }
     for f in failures.iter().take(CAP_WARNINGS) {
         result.push(f.clone());
     }
@@ -218,6 +222,10 @@ fn format_cargo_test(output: &str) -> String {
     }
     if !summary_lines.is_empty() {
         result.push(summary_lines.last().unwrap().clone());
+    }
+    // `error: test failed, to rerun pass ...`
+    for line in output.lines().filter(|l| l.starts_with("error: test failed")) {
+        result.push(line.to_string());
     }
     result.join("\n")
 }

@@ -240,7 +240,10 @@ impl CompressionPipeline {
         // kicks in, since dropping detail from a success costs more than
         // it saves.
         let entropy_threshold = if looks_benign(&content.raw) { 1000 } else { 500 };
-        if !lossless && !is_json && !is_code && content.raw.len() > entropy_threshold {
+        let record_list = content.raw.len() <= RECORD_LIST_MAX_CHARS
+            && (stages_applied.iter().any(|s| s == "table_compact")
+                || looks_like_record_list(&content.raw));
+        if !lossless && !is_json && !is_code && !record_list && content.raw.len() > entropy_threshold {
             if let Ok(trunc_result) = self.entropy_truncator.truncate_string(&content.raw) {
                 if trunc_result.segments_dropped > 0 {
                     content.raw = trunc_result.text;
@@ -477,6 +480,54 @@ fn stage_config_from_preset(name: &str, preset: &Preset) -> StageConfig {
 /// collapse_arrays, git_diff_fold, keep_fields) is skipped when `lossless`.
 fn stage_is_lossless(name: &str) -> bool {
     matches!(name, "ansi_strip" | "custom_transforms")
+}
+
+/// Record lists at or under this size are never entropy-truncated.
+const RECORD_LIST_MAX_CHARS: usize = 16_000;
+
+/// One fact per line: grep matches, file lists, `ls -l`, commit lists.
+fn looks_like_record_list(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect();
+    if lines.len() < 8 {
+        return false;
+    }
+    let unique: std::collections::HashSet<&str> = lines.iter().copied().collect();
+    if unique.len() * 10 < lines.len() * 9 {
+        return false;
+    }
+    let records = lines.iter().filter(|l| is_record_line(l)).count();
+    records * 10 >= lines.len() * 8
+}
+
+fn is_record_line(line: &str) -> bool {
+    let t = line.trim_start();
+    let pathish = |s: &str| {
+        (s.contains('/') || s.contains('.')) && s.bytes().any(|b| b.is_ascii_alphanumeric())
+    };
+    // `path:12:text` (grep -n, compiler diagnostics)
+    if let Some((path, rest)) = t.split_once(':') {
+        let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits > 0 && rest.as_bytes().get(digits) == Some(&b':')
+            && !path.contains(char::is_whitespace) && pathish(path)
+        {
+            return true;
+        }
+    }
+    // A bare path (find, ls -1, git ls-files, diff --name-only)
+    if !t.contains(char::is_whitespace) && pathish(t) {
+        return true;
+    }
+    // `ls -l`: drwxr-xr-x ...
+    let b = t.as_bytes();
+    if b.len() > 10
+        && b"-dlcbps".contains(&b[0])
+        && b[1..10].iter().all(|c| b"rwxsStT-".contains(c))
+    {
+        return true;
+    }
+    // `git log --oneline`: abc1234 subject
+    let sha = t.bytes().take_while(|b| b.is_ascii_hexdigit()).count();
+    sha >= 7 && sha <= 40 && t.as_bytes().get(sha).map_or(true, |b| *b == b' ')
 }
 
 /// True when the output carries no error markers — a clean build, passing
