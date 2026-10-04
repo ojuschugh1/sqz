@@ -32,6 +32,7 @@ pub struct CompressionPipeline {
     stages: Vec<Box<dyn crate::stages::CompressionStage>>,
     toon_encoder: ToonEncoder,
     token_counter: TokenCounter,
+    token_counts: std::cell::RefCell<CountCache>,
     token_pruner: TokenPruner,
     dict_compressor: std::cell::RefCell<DictCompressor>,
     entropy_truncator: EntropyTruncator,
@@ -62,6 +63,7 @@ impl CompressionPipeline {
             stages,
             toon_encoder: ToonEncoder,
             token_counter: TokenCounter::new(),
+            token_counts: std::cell::RefCell::new(CountCache::default()),
             token_pruner: TokenPruner::new(),
             dict_compressor: std::cell::RefCell::new(DictCompressor::new()),
             entropy_truncator: EntropyTruncator::new(),
@@ -79,7 +81,27 @@ impl CompressionPipeline {
         ctx: &SessionContext,
         preset: &Preset,
     ) -> Result<CompressedContent> {
+        let mut result = self.compress_inner(input, ctx, preset, false)?;
+        self.count_output(&mut result, preset);
+        Ok(result)
+    }
+
+    pub(crate) fn compress_uncounted(
+        &self,
+        input: &str,
+        ctx: &SessionContext,
+        preset: &Preset,
+    ) -> Result<CompressedContent> {
         self.compress_inner(input, ctx, preset, false)
+    }
+
+    pub(crate) fn count_output(&self, result: &mut CompressedContent, preset: &Preset) {
+        result.tokens_compressed = self.count_tokens(&result.data, preset);
+        result.compression_ratio = if result.tokens_original == 0 {
+            1.0
+        } else {
+            result.tokens_compressed as f64 / result.tokens_original as f64
+        };
     }
 
     /// Byte-faithful compression for file reads (`sqz_read_file`, `sqz_grep`,
@@ -99,14 +121,25 @@ impl CompressionPipeline {
         ctx: &SessionContext,
         preset: &Preset,
     ) -> Result<CompressedContent> {
-        self.compress_inner(input, ctx, preset, true)
+        let mut result = self.compress_inner(input, ctx, preset, true)?;
+        self.count_output(&mut result, preset);
+        Ok(result)
     }
 
     /// Token count with the same tokenizer `compress` used for
     /// `tokens_original`, so callers that post-process the output can report
     /// comparable numbers.
     pub fn count_tokens(&self, text: &str, preset: &Preset) -> u32 {
-        self.token_counter.count(text, &model_family_from_preset(preset))
+        let family = model_family_from_preset(preset);
+        if text.len() < COUNT_CACHE_MIN_BYTES || matches!(family, ModelFamily::Local(_)) {
+            return self.token_counter.count(text, &family);
+        }
+        if let Some(n) = self.token_counts.borrow().get(&family, text) {
+            return n;
+        }
+        let n = self.token_counter.count(text, &family);
+        self.token_counts.borrow_mut().insert(family, text, n);
+        n
     }
 
     fn compress_inner(
@@ -116,8 +149,7 @@ impl CompressionPipeline {
         preset: &Preset,
         lossless: bool,
     ) -> Result<CompressedContent> {
-        let model_family = model_family_from_preset(preset);
-        let tokens_original = self.token_counter.count(input, &model_family);
+        let tokens_original = self.count_tokens(input, preset);
 
         let mut content = Content {
             raw: input.to_owned(),
@@ -302,19 +334,12 @@ impl CompressionPipeline {
             content.raw
         };
 
-        let tokens_compressed = self.token_counter.count(&data, &model_family);
-        let compression_ratio = if tokens_original == 0 {
-            1.0
-        } else {
-            tokens_compressed as f64 / tokens_original as f64
-        };
-
         Ok(CompressedContent {
             data,
-            tokens_compressed,
+            tokens_compressed: 0,
             tokens_original,
             stages_applied,
-            compression_ratio,
+            compression_ratio: 1.0,
             provenance: crate::types::Provenance::default(),
             verify: None,
         })
@@ -347,6 +372,38 @@ impl CompressionPipeline {
         // Reset session-level state in dict compressor
         self.dict_compressor.borrow_mut().reset();
         Ok(())
+    }
+}
+
+const COUNT_CACHE_MIN_BYTES: usize = 4 * 1024;
+const COUNT_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Default)]
+struct CountCache {
+    entries: std::collections::VecDeque<(ModelFamily, String, u32)>,
+    bytes: usize,
+}
+
+impl CountCache {
+    fn get(&self, family: &ModelFamily, text: &str) -> Option<u32> {
+        self.entries
+            .iter()
+            .find(|(f, t, _)| t.len() == text.len() && f == family && t == text)
+            .map(|(_, _, n)| *n)
+    }
+
+    fn insert(&mut self, family: ModelFamily, text: &str, tokens: u32) {
+        if text.len() > COUNT_CACHE_MAX_BYTES {
+            return;
+        }
+        self.bytes += text.len();
+        self.entries.push_back((family, text.to_owned(), tokens));
+        while self.bytes > COUNT_CACHE_MAX_BYTES {
+            let Some((_, old, _)) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes -= old.len();
+        }
     }
 }
 

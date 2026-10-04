@@ -222,7 +222,7 @@ impl SqzEngine {
         }
 
         // Step 3: Compress with the configured pipeline
-        let mut result = pipeline.compress(input, &ctx, &preset)?;
+        let mut result = pipeline.compress_uncounted(input, &ctx, &preset)?;
 
         // Step 4: Verify invariants
         let verify = Verifier::verify(input, &result.data);
@@ -239,6 +239,7 @@ impl SqzEngine {
             return Ok(safe_result);
         }
 
+        pipeline.count_output(&mut result, &preset);
         Ok(result)
     }
 
