@@ -19,6 +19,7 @@
 ///    by caveman-compress's validate.py, but the scan mechanism, inputs,
 ///    and integration point are sqz-specific.
 
+use crate::text_search;
 use crate::types::VerifyResult;
 
 /// Confidence threshold below which fallback is triggered.
@@ -63,17 +64,17 @@ impl Verifier {
         if error_lines.is_empty() {
             passed.push("error_lines".to_string());
         } else {
-            let missing: Vec<&str> = error_lines
+            let trimmed: Vec<&str> = error_lines.iter().map(|l| l.trim()).collect();
+            let missing = text_search::present(compressed, &trimmed)
                 .iter()
-                .filter(|&&line| !compressed.contains(line.trim()))
-                .copied()
-                .collect();
-            if missing.is_empty() {
+                .filter(|&&p| !p)
+                .count();
+            if missing == 0 {
                 passed.push("error_lines".to_string());
             } else {
                 failed.push((
                     "error_lines".to_string(),
-                    format!("{} error/warning line(s) missing from output", missing.len()),
+                    format!("{missing} error/warning line(s) missing from output"),
                 ));
             }
         }
@@ -158,9 +159,9 @@ impl Verifier {
         if hunk_headers.is_empty() {
             passed.push("diff_hunks".to_string());
         } else {
-            let missing_hunks = hunk_headers
+            let missing_hunks = text_search::present(compressed, &hunk_headers)
                 .iter()
-                .filter(|&&h| !compressed.contains(h))
+                .filter(|&&p| !p)
                 .count();
             if missing_hunks == 0 {
                 passed.push("diff_hunks".to_string());
@@ -210,20 +211,20 @@ impl Verifier {
         if preservation_tokens.is_empty() {
             passed.push("preservation".to_string());
         } else {
-            let present = preservation_tokens
-                .iter()
-                .filter(|t| compressed.contains(t.as_str()))
-                .count();
+            let tokens: Vec<&str> = preservation_tokens.iter().map(String::as_str).collect();
+            let hits = text_search::present(compressed, &tokens);
+            let present = hits.iter().filter(|&&p| p).count();
             let total = preservation_tokens.len();
             let ratio = present as f64 / total as f64;
             if ratio >= 0.85 {
                 passed.push("preservation".to_string());
             } else {
-                let missing: Vec<&str> = preservation_tokens
+                let missing: Vec<&str> = tokens
                     .iter()
-                    .filter(|t| !compressed.contains(t.as_str()))
+                    .zip(&hits)
+                    .filter(|(_, &p)| !p)
                     .take(5)
-                    .map(|t| t.as_str())
+                    .map(|(&t, _)| t)
                     .collect();
                 failed.push((
                     "preservation".to_string(),
@@ -876,5 +877,44 @@ mod tests {
             "preservation failure alone must trigger fallback (confidence={:.2})",
             result.confidence
         );
+    }
+
+    #[test]
+    fn verify_is_linear_on_error_dense_input() {
+        let input = |bytes: usize| {
+            let mut s = String::new();
+            let mut i = 0;
+            while s.len() < bytes {
+                s.push_str(&format!(
+                    "worker {i}: error: request {i} timed out after 30s\n"
+                ));
+                s.push_str(&format!("@@ -{i},7 +{i},8 @@ fn handler_{i}()\n"));
+                i += 1;
+            }
+            s
+        };
+        let quote = |s: &str| s.lines().map(|l| format!("> {l}\n")).collect::<String>();
+        let (small, large) = (input(100 << 10), input(1 << 20));
+        let (small_quoted, large_quoted) = (quote(&small), quote(&large));
+        for compressed in [&large, &large_quoted] {
+            let result = Verifier::verify(&large, compressed);
+            assert!(result.checks_passed.contains(&"error_lines".to_string()));
+            assert!(result.checks_passed.contains(&"diff_hunks".to_string()));
+        }
+        let dropped = large_quoted.replace("request 9999 timed", "request timed");
+        let result = Verifier::verify(&large, &dropped);
+        assert!(result
+            .checks_failed
+            .iter()
+            .any(|(k, m)| k == "error_lines" && m.starts_with("1 ")));
+        let check = |input: &str, quoted: &str| {
+            std::hint::black_box(Verifier::verify(input, input));
+            std::hint::black_box(Verifier::verify(input, quoted));
+        };
+        let ratio = crate::text_search::time_ratio(
+            || check(&small, &small_quoted),
+            || check(&large, &large_quoted),
+        );
+        assert!(ratio < 25.0, "1 MB took {ratio:.1}x as long as 100 KB");
     }
 }

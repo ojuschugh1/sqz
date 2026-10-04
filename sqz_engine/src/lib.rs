@@ -115,6 +115,7 @@ pub mod kiro_integration;
 pub mod stages;
 pub mod structural_summary;
 pub mod text_boundary;
+mod text_search;
 pub mod zed_integration;
 pub mod tee_mode;
 pub mod terse_mode;

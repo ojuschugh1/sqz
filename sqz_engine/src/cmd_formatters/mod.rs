@@ -41,14 +41,16 @@ fn drops_error_lines(input: &str, formatted: &str) -> bool {
     }
     let lower = formatted.to_ascii_lowercase();
     let says_failed = lower.contains("fail") || lower.contains("error");
-    input.lines().filter(|l| is_error_line(l)).any(|l| {
+    let mut must_keep = Vec::new();
+    for l in input.lines().filter(|l| is_error_line(l)) {
         let t = l.trim();
-        if is_failure_summary(t) {
-            !says_failed
-        } else {
-            !formatted.contains(t)
+        if !is_failure_summary(t) {
+            must_keep.push(t);
+        } else if !says_failed {
+            return true;
         }
-    })
+    }
+    crate::text_search::present(formatted, &must_keep).contains(&false)
 }
 
 fn is_failure_summary(line: &str) -> bool {
@@ -192,6 +194,39 @@ mod tests {
         let build = "x.cs(1,1): error CS0103: nope\nBuild FAILED.\n";
         assert!(!drops_error_lines(build, "dotnet build: FAILED\n  x.cs(1,1): error CS0103: nope"));
         assert!(drops_error_lines("Build FAILED.\n", "done"));
+    }
+
+    #[test]
+    fn test_error_line_guard_is_linear() {
+        let input = |bytes: usize| {
+            let mut s = String::new();
+            let mut i = 0;
+            while s.len() < bytes {
+                s.push_str(&format!(
+                    "src/m{i}.rs:{i}: error: mismatched types in item {i}\n"
+                ));
+                i += 1;
+            }
+            s
+        };
+        let quote = |s: &str| s.lines().map(|l| format!("> {l}\n")).collect::<String>();
+        let (small, large) = (input(100 << 10), input(1 << 20));
+        let (small_quoted, large_quoted) = (quote(&small), quote(&large));
+        assert!(!drops_error_lines(&large, &large));
+        assert!(!drops_error_lines(&large, &large_quoted));
+        assert!(drops_error_lines(
+            &large,
+            &large_quoted.replace("item 9999\n", "item\n")
+        ));
+        let check = |input: &str, quoted: &str| {
+            std::hint::black_box(drops_error_lines(input, input));
+            std::hint::black_box(drops_error_lines(input, quoted));
+        };
+        let ratio = crate::text_search::time_ratio(
+            || check(&small, &small_quoted),
+            || check(&large, &large_quoted),
+        );
+        assert!(ratio < 25.0, "1 MB took {ratio:.1}x as long as 100 KB");
     }
 
     #[test]
