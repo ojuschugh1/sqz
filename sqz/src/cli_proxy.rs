@@ -150,6 +150,17 @@ fn quiet() -> bool {
     sqz_engine::SqzEngine::quiet_stderr()
 }
 
+/// `formatted` is `output` up to trailing whitespace, so it saves under 16 tokens.
+fn only_trailing_space_differs(output: &str, formatted: &str) -> bool {
+    let body = output.trim_end();
+    let punct = body.len()
+        - body
+            .trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && !c.is_whitespace())
+            .len();
+    formatted == output
+        || (output.len() - body.len() < 8 && punct <= 8 && formatted.trim_end() == body)
+}
+
 pub struct CliProxy {
     engine: SqzEngine,
     /// In-memory L1 dedup cache (fast hash → seen).
@@ -283,7 +294,9 @@ impl CliProxy {
         // pipeline path: the stats header costs the agent ~12 tokens, so a
         // formatter that trims a few blank lines is a net loss.
         const NET_WIN_MIN_TOKENS: u32 = 16;
-        if let Some(formatted) = format_command(cmd, output) {
+        let formatted =
+            format_command(cmd, output).filter(|f| !only_trailing_space_differs(output, f));
+        if let Some(formatted) = formatted {
             // Real token counts, as on the pipeline path: collapsing column
             // padding shrinks chars/4 a lot and BPE tokens hardly at all.
             let tokens_original = self.engine.count_tokens(output);
@@ -998,6 +1011,55 @@ mod tests {
         let opts = InterceptOptions { no_cache: true, abbreviate: true };
         let result = proxy.intercept_output_with_options("build", &output, opts);
         assert_eq!(result, output, "sub-threshold savings must pass through verbatim");
+    }
+
+    #[test]
+    fn net_win_gate_is_only_skipped_where_it_fails() {
+        let (proxy, _dir) = isolated_proxy();
+        let bodies = [
+            "ok",
+            "value 123",
+            "x }",
+            "a.b",
+            "日本",
+            "})]};:,!",
+            "  {\"a\": [1, 2]}}}}}}}",
+        ];
+        let tails = [
+            "",
+            " ",
+            "\n",
+            "\r\n",
+            "\n\n\n\n\n\n\n",
+            " \t \n\r\n ",
+            "\u{3000}\n",
+            "\u{a0}\u{a0}\n",
+        ];
+        let mut skipped = 0;
+        for body in bodies {
+            for tail in tails {
+                for formatted_tail in tails {
+                    let output = format!("{body}{tail}");
+                    let formatted = format!("{body}{formatted_tail}");
+                    if only_trailing_space_differs(&output, &formatted) {
+                        skipped += 1;
+                        let saved = proxy
+                            .engine
+                            .count_tokens(&output)
+                            .saturating_sub(proxy.engine.count_tokens(&formatted));
+                        assert!(saved < 16, "{output:?} -> {formatted:?} saves {saved}");
+                    }
+                }
+            }
+        }
+        assert_eq!(skipped, bodies.len() * tails.len() * tails.len());
+        assert!(!only_trailing_space_differs("ok\n\n\n\n\n\n\n\n", "ok"));
+        assert!(!only_trailing_space_differs("x }}}}}}}}}\n", "x }}}}}}}}}"));
+        assert!(!only_trailing_space_differs("ok\n", "ok then\n"));
+        assert!(only_trailing_space_differs(
+            "x }}}}}}}}}\n\n\n\n\n\n\n\n",
+            "x }}}}}}}}}\n\n\n\n\n\n\n\n"
+        ));
     }
 
     #[test]
