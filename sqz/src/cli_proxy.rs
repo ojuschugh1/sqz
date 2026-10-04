@@ -1016,7 +1016,7 @@ mod tests {
 
     #[test]
     fn net_win_gate_is_only_skipped_where_it_fails() {
-        let (proxy, _dir) = isolated_proxy();
+        let dir = tempfile::tempdir().expect("tempdir");
         let bodies = [
             "ok",
             "value 123",
@@ -1037,23 +1037,31 @@ mod tests {
             "\u{a0}\u{a0}\n",
         ];
         let mut skipped = 0;
-        for body in bodies {
-            for tail in tails {
-                for formatted_tail in tails {
-                    let output = format!("{body}{tail}");
-                    let formatted = format!("{body}{formatted_tail}");
-                    if only_trailing_space_differs(&output, &formatted) {
-                        skipped += 1;
-                        let saved = proxy
-                            .engine
-                            .count_tokens(&output)
-                            .saturating_sub(proxy.engine.count_tokens(&formatted));
-                        assert!(saved < 16, "{output:?} -> {formatted:?} saves {saved}");
+        for family in ["anthropic", "openai"] {
+            let mut preset = sqz_engine::Preset::default();
+            preset.model.family = family.to_string();
+            let store = dir.path().join(format!("{family}.db"));
+            let engine = SqzEngine::with_preset_and_store(preset, &store).expect("engine init");
+            for body in bodies {
+                for tail in tails {
+                    for formatted_tail in tails {
+                        let output = format!("{body}{tail}");
+                        let formatted = format!("{body}{formatted_tail}");
+                        if only_trailing_space_differs(&output, &formatted) {
+                            skipped += 1;
+                            let saved = engine
+                                .count_tokens(&output)
+                                .saturating_sub(engine.count_tokens(&formatted));
+                            assert!(
+                                saved < NET_WIN_MIN_TOKENS,
+                                "{family}: {output:?} -> {formatted:?} saves {saved}"
+                            );
+                        }
                     }
                 }
             }
         }
-        assert_eq!(skipped, bodies.len() * tails.len() * tails.len());
+        assert_eq!(skipped, 2 * bodies.len() * tails.len() * tails.len());
         assert!(!only_trailing_space_differs("ok\n\n\n\n\n\n\n\n", "ok"));
         assert!(!only_trailing_space_differs("x }}}}}}}}}\n", "x }}}}}}}}}"));
         assert!(!only_trailing_space_differs("ok\n", "ok then\n"));
