@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 use crate::ansi_strip::AnsiStripper;
 use crate::dict_compressor::DictCompressor;
 use crate::entropy_truncator::EntropyTruncator;
@@ -134,11 +136,16 @@ impl CompressionPipeline {
         if text.len() < COUNT_CACHE_MIN_BYTES || matches!(family, ModelFamily::Local(_)) {
             return self.token_counter.count(text, &family);
         }
-        if let Some(n) = self.token_counts.borrow().get(&family, text) {
+        let key: CountKey = (
+            std::mem::discriminant(&family),
+            text.len(),
+            Sha256::digest(text.as_bytes()).into(),
+        );
+        if let Some(n) = self.token_counts.borrow().get(&key) {
             return n;
         }
         let n = self.token_counter.count(text, &family);
-        self.token_counts.borrow_mut().insert(family, text, n);
+        self.token_counts.borrow_mut().insert(key, n);
         n
     }
 
@@ -376,34 +383,25 @@ impl CompressionPipeline {
 }
 
 const COUNT_CACHE_MIN_BYTES: usize = 4 * 1024;
-const COUNT_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+const COUNT_CACHE_MAX_ENTRIES: usize = 64;
+
+type CountKey = (std::mem::Discriminant<ModelFamily>, usize, [u8; 32]);
 
 #[derive(Default)]
 struct CountCache {
-    entries: std::collections::VecDeque<(ModelFamily, String, u32)>,
-    bytes: usize,
+    entries: std::collections::VecDeque<(CountKey, u32)>,
 }
 
 impl CountCache {
-    fn get(&self, family: &ModelFamily, text: &str) -> Option<u32> {
-        self.entries
-            .iter()
-            .find(|(f, t, _)| t.len() == text.len() && f == family && t == text)
-            .map(|(_, _, n)| *n)
+    fn get(&self, key: &CountKey) -> Option<u32> {
+        self.entries.iter().find(|(k, _)| k == key).map(|(_, n)| *n)
     }
 
-    fn insert(&mut self, family: ModelFamily, text: &str, tokens: u32) {
-        if text.len() > COUNT_CACHE_MAX_BYTES {
-            return;
+    fn insert(&mut self, key: CountKey, tokens: u32) {
+        if self.entries.len() == COUNT_CACHE_MAX_ENTRIES {
+            self.entries.pop_front();
         }
-        self.bytes += text.len();
-        self.entries.push_back((family, text.to_owned(), tokens));
-        while self.bytes > COUNT_CACHE_MAX_BYTES {
-            let Some((_, old, _)) = self.entries.pop_front() else {
-                break;
-            };
-            self.bytes -= old.len();
-        }
+        self.entries.push_back((key, tokens));
     }
 }
 
@@ -1021,6 +1019,27 @@ fn main() {
         let result = pipeline.compress(&input, &ctx(), &preset).unwrap();
         assert!(result.tokens_original > 0);
         assert!(result.tokens_compressed > 0);
+    }
+
+    #[test]
+    fn count_cache_holds_no_text() {
+        let preset = default_preset();
+        let pipeline = CompressionPipeline::new(&preset);
+        let texts: Vec<String> = (0..COUNT_CACHE_MAX_ENTRIES + 8)
+            .map(|i| format!("token=secret-{i:03} in a tool result\n").repeat(150))
+            .collect();
+        let family = model_family_from_preset(&preset);
+        for (i, text) in texts.iter().enumerate() {
+            let n = pipeline.token_counter.count(text, &family);
+            assert_eq!(pipeline.count_tokens(text, &preset), n);
+            assert_eq!(pipeline.count_tokens(text, &preset), n);
+            let held = pipeline.token_counts.borrow().entries.len();
+            assert_eq!(held, (i + 1).min(COUNT_CACHE_MAX_ENTRIES));
+        }
+        assert!(!std::mem::needs_drop::<(CountKey, u32)>());
+        let cache = pipeline.token_counts.borrow();
+        let bytes = cache.entries.capacity() * std::mem::size_of::<(CountKey, u32)>();
+        assert!(bytes < texts[0].len(), "cache holds {bytes} bytes");
     }
 
     #[test]
