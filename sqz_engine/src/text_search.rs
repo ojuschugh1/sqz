@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use aho_corasick::AhoCorasick;
+use aho_corasick::{AhoCorasick, AhoCorasickKind};
 
 const FEW: usize = 8;
+const CHUNK_BYTES: usize = 64 << 10;
 
 pub(crate) fn present(haystack: &str, needles: &[&str]) -> Vec<bool> {
     if needles.len() <= FEW {
@@ -26,7 +27,18 @@ pub(crate) fn present(haystack: &str, needles: &[&str]) -> Vec<bool> {
             open.push((i, p));
         }
     }
-    let hits = scan(haystack, &patterns);
+    let mut hits = Vec::with_capacity(patterns.len());
+    let mut start = 0;
+    let mut bytes = 0;
+    for (end, p) in patterns.iter().enumerate() {
+        if bytes + p.len() > CHUNK_BYTES && end > start {
+            hits.extend(scan(haystack, &patterns[start..end]));
+            start = end;
+            bytes = 0;
+        }
+        bytes += p.len();
+    }
+    hits.extend(scan(haystack, &patterns[start..]));
     for (i, p) in open {
         found[i] = hits[p];
     }
@@ -37,7 +49,10 @@ fn scan(haystack: &str, patterns: &[&str]) -> Vec<bool> {
     if patterns.len() <= FEW {
         return patterns.iter().map(|p| haystack.contains(p)).collect();
     }
-    let Ok(ac) = AhoCorasick::new(patterns) else {
+    let Ok(ac) = AhoCorasick::builder()
+        .kind(Some(AhoCorasickKind::ContiguousNFA))
+        .build(patterns)
+    else {
         return patterns.iter().map(|p| haystack.contains(p)).collect();
     };
     let mut hits = vec![false; patterns.len()];
@@ -163,6 +178,26 @@ mod tests {
             })
             .collect();
         let needles: Vec<&str> = owned.iter().map(String::as_str).collect();
+        check(&hay, &needles);
+    }
+
+    #[test]
+    fn chunked_needles_match_contains() {
+        let hay: String = (0..3000)
+            .map(|i| format!("> {i}: error: request {} timed out\n", i * 13))
+            .collect();
+        let mut owned: Vec<String> = (0..3000)
+            .flat_map(|i| {
+                [
+                    format!("{i}: error: request {} timed out", i * 13),
+                    format!("{i}: error: request {} timed out", i * 13 + 1),
+                ]
+            })
+            .collect();
+        owned.push(hay[..CHUNK_BYTES + 1].to_string());
+        owned.push(format!("{}!", &hay[..CHUNK_BYTES]));
+        let needles: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert!(needles.iter().map(|n| n.len()).sum::<usize>() > 4 * CHUNK_BYTES);
         check(&hay, &needles);
     }
 
