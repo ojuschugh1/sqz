@@ -150,7 +150,9 @@ fn quiet() -> bool {
     sqz_engine::SqzEngine::quiet_stderr()
 }
 
-/// `formatted` is `output` up to trailing whitespace, so it saves under 16 tokens.
+const NET_WIN_MIN_TOKENS: u32 = 16;
+
+/// `formatted` is `output` up to trailing whitespace, so it saves under [`NET_WIN_MIN_TOKENS`].
 fn only_trailing_space_differs(output: &str, formatted: &str) -> bool {
     let body = output.trim_end();
     let punct = body.len()
@@ -293,7 +295,6 @@ impl CliProxy {
         // Step 3: Try per-command formatter. Same net-win gate as the
         // pipeline path: the stats header costs the agent ~12 tokens, so a
         // formatter that trims a few blank lines is a net loss.
-        const NET_WIN_MIN_TOKENS: u32 = 16;
         let formatted =
             format_command(cmd, output).filter(|f| !only_trailing_space_differs(output, f));
         if let Some(formatted) = formatted {
