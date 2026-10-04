@@ -107,6 +107,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   several commands. `python` and `node` running a script, `-c` code or
   `-m` module are rewritten too; bare REPLs, `-i` and dev servers still
   aren't.
+- **`sqz compress` is faster on large and error-heavy output.** The
+  checks that make sure no error line is lost searched the whole output
+  once per error line, so a 1 MB log where every line is an error took
+  1.5 s; they now find every line in one pass, and that log takes
+  0.38 s. The tokenizer also ran over the same text up to five times per
+  call and now counts each text once. At 1 MB an app log went from 604
+  to 404 ms and a `kubectl get` table piped in from 580 to 401 ms.
+  Output that now keeps all its data still costs more than in 1.9.0:
+  1 MB of JSON 378 to 490 ms, `cargo test` with failures 404 to 531 ms,
+  and `kubectl get` through the shell hook 65 to 397 ms. Calls under
+  10 KB are unchanged at about 40-45 ms.
 
 ### Fixed
 
@@ -262,6 +273,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`test_init_exits_zero` ran `sqz init` against the real HOME and this
   repository**, which rewrote the developer's shell rc during `cargo
   test`. It now runs in a throwaway HOME and project.
+- **The same input gives the same output.** The `§dict§` header listed
+  equal-length patterns in hash-map order, and abbreviations with tied
+  savings were picked and numbered (`«A1»`, `«A2»`) in hash-map order,
+  so the same output could come back different from one run to the next.
+  Ties are now broken on the text itself.
 
 ## [1.9.0] — 2026-09-23
 
