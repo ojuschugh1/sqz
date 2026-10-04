@@ -132,7 +132,7 @@ impl NgramAbbreviator {
         candidates.sort_by(|a, b| {
             let savings_a = estimate_savings(&a.0, a.1);
             let savings_b = estimate_savings(&b.0, b.1);
-            savings_b.cmp(&savings_a)
+            savings_b.cmp(&savings_a).then_with(|| a.0.cmp(&b.0))
         });
 
         // Take top N candidates

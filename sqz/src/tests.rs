@@ -137,6 +137,140 @@ mod cli_proxy_tests {
     fn test_unknown_command_not_recognised() {
         assert!(!CliProxy::is_known_command("my_totally_custom_tool_xyz"));
     }
+
+    fn words(seed: u64, n: usize) -> String {
+        const VOCAB: [&str; 12] = [
+            "cache", "hook", "proxy", "diff", "stats", "windows", "hint", "large", "search",
+            "cursor", "expand", "client",
+        ];
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                VOCAB[(x >> 33) as usize % VOCAB.len()]
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn samples() -> Vec<(&'static str, String)> {
+        let json = (0..40)
+            .map(|i| {
+                format!(
+                    r#"{{"id":{},"number":{i},"title":"{}","state":"{}","html_url":"https://github.com/acme/app/issues/{i}","user":{{"login":"dev{}","type":"User"}},"created_at":"2026-08-{:02}T10:00:00Z","body":"{}"}}"#,
+                    2_900_000_000u64 + i,
+                    words(i, 6),
+                    if i % 3 == 0 { "closed" } else { "open" },
+                    i % 5,
+                    i % 28 + 1,
+                    words(i + 100, 25),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let pods: Vec<serde_json::Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": format!("web-{i}"),
+                        "namespace": "default",
+                        "labels": {"app": "web", "pod-template-hash": "5d8f7c9b4", "tier": "frontend"},
+                    },
+                    "spec": {
+                        "containers": [{
+                            "name": "web",
+                            "image": "nginx:1.27",
+                            "ports": [{"containerPort": 8080, "protocol": "TCP"}],
+                        }],
+                        "nodeName": format!("node-{}", i % 3),
+                    },
+                    "status": {
+                        "phase": "Running",
+                        "conditions": [{"type": "Ready", "status": "True"}],
+                        "containerStatuses": [{"name": "web", "ready": true, "restartCount": i % 2}],
+                    },
+                })
+            })
+            .collect();
+        let kubectl = serde_json::to_string_pretty(&serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "List",
+            "items": pods,
+        }))
+        .unwrap();
+        let mut cargo_test = String::from("running 120 tests\n");
+        for i in 0..120 {
+            let status = if i % 15 == 0 { "FAILED" } else { "ok" };
+            cargo_test.push_str(&format!("test engine::tests::case_{i} ... {status}\n"));
+        }
+        cargo_test.push_str("\nfailures:\n\n");
+        for i in (0..120).step_by(15) {
+            cargo_test.push_str(&format!(
+                "---- engine::tests::case_{i} stdout ----\nthread 'engine::tests::case_{i}' panicked at src/engine.rs:{}:9:\nassertion `left == right` failed\n  left: {i}\n right: {}\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n",
+                100 + i,
+                i + 1,
+            ));
+        }
+        cargo_test.push_str("test result: FAILED. 112 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s\n");
+        let git_diff: String = (0..12)
+            .map(|i| {
+                format!(
+                    "diff --git a/src/handler_{i}.rs b/src/handler_{i}.rs\nindex 3f2a1b{i:x}..7c9d0e{i:x} 100644\n--- a/src/handler_{i}.rs\n+++ b/src/handler_{i}.rs\n@@ -{0},7 +{0},8 @@ fn handler_{i}(request: &Request) -> Response {{\n     let token = request.headers.get(\"Authorization\");\n     let scope = format!(\"handler_{i}\");\n-    verify(token, &scope)\n+    let claims = verify(token, &scope)?;\n+    audit(&claims, &scope);\n+    Ok(respond(claims))\n }}\n",
+                    10 + i,
+                )
+            })
+            .collect();
+        let prose: String = (0..30)
+            .map(|i| {
+                format!(
+                    "## Section {i}\n\nThe proxy keeps the cache warm while the client expands every hint. {}\n\n",
+                    words(i, 40),
+                )
+            })
+            .collect();
+        let mut cargo_build: String = (0..25)
+            .map(|i| {
+                format!(
+                    "error[E0308]: mismatched types\n --> src/module_{i}.rs:{0}:18\n  |\n{0} |     let count: i32 = \"{i}\";\n  |                ---   ^^^ expected `i32`, found `&str`\n  |                |\n  |                expected due to this\n\n",
+                    10 + i,
+                )
+            })
+            .collect();
+        cargo_build
+            .push_str("error: could not compile `app` (bin \"app\") due to 25 previous errors\n");
+        vec![
+            ("json", format!("[{json}]")),
+            ("kubectl json", kubectl),
+            ("cargo test", cargo_test),
+            ("git diff", git_diff),
+            ("prose", prose),
+            ("cargo build", cargo_build),
+        ]
+    }
+
+    #[test]
+    fn test_output_is_identical_across_fresh_engines() {
+        let mut first = Vec::new();
+        for (name, input) in samples() {
+            let outputs: Vec<String> = (0..5)
+                .map(|_| {
+                    let (proxy, _dir) = isolated_proxy();
+                    proxy.intercept_output("stdin", &input)
+                })
+                .collect();
+            assert!(
+                outputs.iter().all(|o| *o == outputs[0]),
+                "{name}: output differs between runs"
+            );
+            first.push(outputs[0].clone());
+        }
+        assert!(first.iter().any(|o| o.contains("§dict§")));
+        assert!(first.iter().any(|o| o.contains("[Abbreviations]")));
+    }
 }
 
 #[cfg(test)]

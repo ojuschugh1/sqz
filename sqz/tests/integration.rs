@@ -215,6 +215,56 @@ fn test_compress_empty_input() {
 }
 
 #[test]
+fn test_compress_output_is_identical_across_runs() {
+    let pods: Vec<serde_json::Value> = (0..20)
+        .map(|i| {
+            serde_json::json!({
+                "kind": "Pod",
+                "metadata": {
+                    "name": format!("web-{i}"),
+                    "namespace": "default",
+                    "labels": {"app": "web", "pod-template-hash": "5d8f7c9b4", "tier": "frontend"},
+                },
+                "spec": {
+                    "containers": [{"name": "web", "image": "nginx:1.27", "ports": [{"containerPort": 8080}]}],
+                    "nodeName": format!("node-{}", i % 3),
+                },
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "containerStatuses": [{"name": "web", "ready": true, "restartCount": i % 2}],
+                },
+            })
+        })
+        .collect();
+    let kubectl =
+        serde_json::to_string_pretty(&serde_json::json!({"kind": "List", "items": pods})).unwrap();
+    let cargo_test: String = (0..12)
+        .map(|i| {
+            format!(
+                "---- engine::tests::case_{i} stdout ----\nthread 'engine::tests::case_{i}' panicked at src/engine.rs:{}:9:\nassertion `left == right` failed\n  left: {i}\n right: {}\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n",
+                100 + i,
+                i + 1,
+            )
+        })
+        .collect();
+    for input in [kubectl, cargo_test] {
+        let outputs: Vec<Vec<u8>> = (0..4)
+            .map(|_| {
+                let dir = tempfile::tempdir().unwrap();
+                let o = run_with_db(&dir.path().join("sqz.db"), &["compress"], Some(&input));
+                assert!(o.status.success());
+                o.stdout
+            })
+            .collect();
+        assert!(
+            outputs.iter().all(|o| *o == outputs[0]),
+            "output differs between runs"
+        );
+    }
+}
+
+#[test]
 fn test_compress_large_json_reduces_tokens() {
     // Build a JSON array with 20 objects
     let items: Vec<String> = (0..20)

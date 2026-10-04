@@ -154,7 +154,12 @@ impl DictCompressor {
 
         // Sort entries by pattern length (longest first) to avoid partial matches
         let mut sorted_entries: Vec<&DictEntry> = self.entries.values().collect();
-        sorted_entries.sort_by(|a, b| b.pattern.len().cmp(&a.pattern.len()));
+        sorted_entries.sort_by(|a, b| {
+            b.pattern
+                .len()
+                .cmp(&a.pattern.len())
+                .then_with(|| a.pattern.cmp(&b.pattern))
+        });
 
         for entry in &sorted_entries {
             // Only substitute in JSON key positions: "field_name":
