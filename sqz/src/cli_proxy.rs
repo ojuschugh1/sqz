@@ -305,8 +305,7 @@ impl CliProxy {
             if tokens_original.saturating_sub(tokens_compressed) >= NET_WIN_MIN_TOKENS {
                 // Persist to L2 cache — but skip if content contains secrets
                 // (confidence router detected high-risk patterns like API keys)
-                let mode = self.engine.route_compression_mode(output);
-                if mode != sqz_engine::CompressionMode::Safe {
+                if !self.engine.never_store(output) {
                     if let Ok(compressed) = self.engine.compress(&formatted) {
                         let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
                     }
@@ -326,10 +325,10 @@ impl CliProxy {
                     .stages_applied
                     .iter()
                     .any(|s| s == "entropy_truncate");
-                // Persist to L2 cache — skip if content was routed to Safe mode
-                // (may contain secrets, API keys, passwords)
-                let mode = self.engine.route_compression_mode(output);
-                let stored = if mode != sqz_engine::CompressionMode::Safe {
+                // Persist to L2 cache, but never content that may contain
+                // secrets, API keys, passwords
+                let safe = self.engine.route_compression_mode(output) == sqz_engine::CompressionMode::Safe;
+                let stored = if !self.engine.never_store(output) {
                     self.engine
                         .cache_manager()
                         .store_compressed(output.as_bytes(), &compressed)
@@ -358,7 +357,7 @@ impl CliProxy {
                 // `abbreviator_opt_out_preserves_repeated_identifiers` and
                 // `abbreviator_default_on_still_abbreviates` below.
                 let is_source = compressed.stages_applied.iter().any(|s| s == "source_code");
-                let abbreviated = if opts.abbreviate && !is_source {
+                let abbreviated = if opts.abbreviate && !is_source && !safe {
                     let mut abbr = self.abbreviator.borrow_mut();
                     abbr.observe(&compressed.data);
                     match abbr.abbreviate(&compressed.data) {
@@ -399,11 +398,11 @@ impl CliProxy {
                 // resolves to a dedup ref.
                 let tokens_final = self.engine.count_tokens(&abbreviated);
                 if tokens_original.saturating_sub(tokens_final) < NET_WIN_MIN_TOKENS {
-                    return self.apply_context_refs(output);
+                    return if safe { output.to_owned() } else { self.apply_context_refs(output) };
                 }
 
                 self.log_compression(cmd, tokens_original, tokens_final.min(tokens_compressed));
-                self.apply_context_refs(&abbreviated)
+                if safe { abbreviated } else { self.apply_context_refs(&abbreviated) }
             }
             Err(e) => {
                 eprintln!("[sqz] fallback: compression error for command '{cmd}': {e}");
@@ -606,6 +605,9 @@ impl CliProxy {
             if resolved.exists() && resolved.is_file() {
                 // Read and hash the file content
                 if let Ok(dep_content) = std::fs::read_to_string(&resolved) {
+                    if self.engine.never_store(&dep_content) {
+                        continue;
+                    }
                     // Check if already in persistent cache
                     if let Ok(Some(_)) = self.engine.cache_manager().check_dedup(dep_content.as_bytes()) {
                         continue; // Already cached
@@ -869,6 +871,75 @@ mod tests {
         let error = "error[E0308]: mismatched types\n --> src/unknown.rs:42:5\n";
         let result = proxy.apply_context_refs(error);
         assert!(!result.contains("[in context]"), "should not annotate unknown file");
+    }
+
+    fn high_risk_outputs() -> Vec<(&'static str, String)> {
+        let hex = |s: &str| sqz_engine::CacheManager::sha256_hex(s.as_bytes());
+        let frames: String = (0..40)
+            .map(|i| format!("  {i:>2}: myapp::scheduler::step_{i}\n             at ./src/scheduler/mod_{}.rs:{}:5\n", i % 7, 40 + 7 * i))
+            .collect();
+        let tables: String = ["customers", "orders", "refunds", "payments", "shipments", "invoices"]
+            .iter()
+            .map(|t| format!("CREATE TABLE {t} (\n    id BIGSERIAL PRIMARY KEY,\n    status TEXT NOT NULL DEFAULT 'pending',\n    created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\nCREATE INDEX idx_{t}_created_at ON {t} (created_at);\n"))
+            .collect();
+        let pem: String = (0..20).map(|i| hex(&format!("pem {i}")) + "\n").collect();
+        let creds: String = ["stripe", "sendgrid", "github", "datadog", "sentry"]
+            .iter()
+            .map(|s| format!("{s}_api_key: sk_test_{}\n{s}_endpoint: https://{s}.example.com/v1\n", &hex(s)[..32]))
+            .collect();
+        vec![
+            ("cargo run", format!("thread 'main' panicked at src/scheduler/queue.rs:217:31:\ncalled `Option::unwrap()` on a `None` value\nstack backtrace:\n{frames}")),
+            ("cat migrations/0042_orders.sql", format!("BEGIN;\n{tables}ALTER TABLE refunds ADD COLUMN reason TEXT;\nCOMMIT;\n")),
+            ("cat deploy/secrets.env", format!("-----BEGIN RSA PRIVATE KEY-----\n{pem}-----END RSA PRIVATE KEY-----\n{creds}")),
+        ]
+    }
+
+    #[test]
+    fn high_risk_output_passes_through_unchanged_and_unstored() {
+        let (proxy, _dir) = isolated_proxy();
+        let _ = proxy.engine.session_store().add_known_file("./src/scheduler/mod_0.rs");
+        for (cmd, output) in high_risk_outputs() {
+            assert!(output.len() > 500, "{cmd}");
+            assert_eq!(proxy.intercept_output(cmd, &output), output, "{cmd}");
+            assert_eq!(proxy.intercept_output(cmd, &output), output, "{cmd}, second run");
+            let stored = proxy.engine.cache_manager().check_dedup_with_meta(output.as_bytes()).unwrap();
+            assert!(stored.is_none(), "{cmd} was stored");
+        }
+    }
+
+    #[test]
+    fn verifier_fallback_output_keeps_its_spill_ref() {
+        let (proxy, _dir) = isolated_proxy();
+        let output = (0..24)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("SEG{i} /srv/app/mod_{i}.py llllllllllllllllllllllllllllllllllllllll")
+                } else {
+                    format!("SEG{i} the quick brown fox jumps over {i} lazy dogs by silver rivers")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let fallback = proxy.engine.compress(&output).unwrap();
+        assert_eq!(fallback.provenance.label.as_deref(), Some("safe-fallback"));
+        let result = proxy.intercept_output("tail app.log", &output);
+        let hash = sqz_engine::CacheManager::sha256_hex(output.as_bytes());
+        assert!(result.ends_with(&format!("[full output: sqz expand {}]", &hash[..16])), "{result}");
+        assert!(result.contains("low-information segments omitted"), "{result}");
+    }
+
+    #[test]
+    fn credential_mentions_are_compressed_but_never_stored() {
+        let (proxy, _dir) = isolated_proxy();
+        let mut log: String = (0..120)
+            .map(|i| format!("2026-10-05T12:{:02}:{:02}Z INFO  GET /healthz 200 1ms\n", i / 60, i % 60))
+            .collect();
+        log.push_str("2026-10-05T12:30:00Z DEBUG db config host=db.internal user=app password=hunter2\n");
+        let first = proxy.intercept_output("tail -n 200 app.log", &log);
+        assert!(first.len() < log.len() && first.contains("password=hunter2"), "{first}");
+        assert!(!first.contains("sqz expand"), "{first}");
+        assert!(!proxy.intercept_output("tail -n 200 app.log", &log).starts_with("§ref:"));
+        assert!(proxy.engine.cache_manager().check_dedup_with_meta(log.as_bytes()).unwrap().is_none());
     }
 
     // ── Regression tests for Reddit bug report ────────────────────────────

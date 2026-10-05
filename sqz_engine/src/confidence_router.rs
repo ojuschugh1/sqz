@@ -13,7 +13,7 @@ use crate::entropy_analyzer::EntropyAnalyzer;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionMode {
     /// Safe mode: minimal compression, preserve all structure.
-    /// Used for stack traces, configs, migration files, legal text.
+    /// Used for stack traces, migrations and credentials.
     Safe,
     /// Default mode: balanced compression.
     Default,
@@ -80,13 +80,27 @@ impl ConfidenceRouter {
         CompressionMode::Default
     }
 
+    /// Whether content must stay out of the persistent cache.
+    pub fn never_store(&self, content: &str) -> bool {
+        content.len() >= 100 && (self.mentions_high_risk(content) || self.is_high_risk(content))
+    }
+
     /// Returns true if content contains high-risk patterns that should
     /// never be aggressively compressed.
     ///
     /// These checks require structural context — not just keyword presence.
     /// A commit message saying "fix: password reset" is NOT a secret.
-    /// A stack trace saying "panicked at" IS high-risk.
+    /// A stack trace with its frames IS high-risk.
     fn is_high_risk(&self, content: &str) -> bool {
+        let lines: Vec<&str> = content.lines().map(str::trim).collect();
+        lines.iter().enumerate().any(|(i, &line)| {
+            let next = lines.get(i + 1).copied().unwrap_or("");
+            let after = lines.get(i + 2).copied().unwrap_or("");
+            starts_trace(line, next, after) || is_ddl(line) || is_pem(line) || is_secret_line(line)
+        })
+    }
+
+    fn mentions_high_risk(&self, content: &str) -> bool {
         let lower = content.to_lowercase();
 
         // Stack traces — require structural markers, not just keywords.
@@ -126,13 +140,6 @@ impl ConfidenceRouter {
         if lower.contains("password")
             && (lower.contains("password:") || lower.contains("password=") || lower.contains("password \""))
             && !self.looks_like_commit_log(&lower)
-        {
-            return true;
-        }
-
-        // Legal/compliance text
-        if lower.contains("terms of service") || lower.contains("privacy policy")
-            || lower.contains("license agreement") || lower.contains("gdpr")
         {
             return true;
         }
@@ -178,6 +185,78 @@ impl ConfidenceRouter {
     }
 }
 
+fn starts_trace(line: &str, next: &str, after: &str) -> bool {
+    (line.eq_ignore_ascii_case("stack backtrace:") && next.starts_with("0: "))
+        || (line.starts_with("Traceback (most recent call last)") && next.starts_with("File \""))
+        || (["Error", "Exception", "Throwable"].iter().any(|w| line.contains(w)) && is_frame(next))
+        || (is_goroutine_header(line) && next.ends_with(')') && after.contains(".go:"))
+}
+
+fn is_frame(line: &str) -> bool {
+    line.strip_prefix("at ").is_some_and(|call| {
+        (call.contains('(') && call.contains(')')) || ends_with_line_col(call)
+    })
+}
+
+fn ends_with_line_col(call: &str) -> bool {
+    let mut parts = call.rsplitn(3, ':');
+    let (Some(col), Some(row), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    [col, row].iter().all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn is_goroutine_header(line: &str) -> bool {
+    line.strip_prefix("goroutine ")
+        .and_then(|rest| rest.split_once(" ["))
+        .is_some_and(|(id, state)| {
+            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && state.ends_with("]:")
+        })
+}
+
+fn is_ddl(line: &str) -> bool {
+    const DDL: &[&str] = &[
+        "create table ", "alter table ", "drop table ", "create index ", "create unique index ",
+        "drop index ",
+    ];
+    DDL.iter()
+        .any(|k| line.get(..k.len()).is_some_and(|head| head.eq_ignore_ascii_case(k)))
+}
+
+fn is_pem(line: &str) -> bool {
+    line.starts_with("-----BEGIN ") && line.ends_with("-----")
+}
+
+fn is_secret_line(line: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "password", "passwd", "passphrase", "secret", "apikey", "privatekey", "secretkey",
+        "accesskey", "token", "authorization",
+    ];
+    const NOT_SECRET: &[&str] = &["nexttoken", "pagetoken", "continuationtoken"];
+    let line = line.strip_prefix("export ").unwrap_or(line);
+    let Some(at) = line.find(['=', ':']) else { return false };
+    let key = line[..at].trim_end().trim_matches(['"', '\'']);
+    let rest = line[at + 1..].trim();
+    let value = rest.trim_end_matches(',').trim_matches(['"', '\'']);
+    let code = !rest.starts_with(['"', '\''])
+        && (rest.ends_with([',', ';']) || rest.contains(['(', ')', '[', ']', '{', '}', '<', '>', '&']));
+    if key.is_empty()
+        || key.len() > 64
+        || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+        || rest.starts_with(':')
+        || code
+        || matches!(value, "" | "null")
+    {
+        return false;
+    }
+    let key: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    NAMES.iter().any(|n| key.ends_with(n)) && !NOT_SECRET.iter().any(|n| key.ends_with(n))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -219,6 +298,7 @@ mod tests {
         // High-risk (password) content routes to Safe; the point of the
         // test is that `route` returns at all instead of panicking.
         assert_eq!(router.route(content), CompressionMode::Safe);
+        assert!(router.never_store(content));
     }
 
     /// Same class, CJK + emoji: no byte offset in these strings may be
@@ -231,6 +311,7 @@ mod tests {
                    日本語のテキストの行がもう一つあります";
         assert!(cjk.len() >= 100);
         let _ = router.route(cjk);
+        let _ = router.never_store(cjk);
     }
 
     #[test]
@@ -297,5 +378,69 @@ mod tests {
         // PEM key must be > 100 chars to trigger routing
         let key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP\nQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz==\n-----END RSA PRIVATE KEY-----\n";
         assert_eq!(router.route(key), CompressionMode::Safe);
+    }
+
+    #[test]
+    fn routes_every_trace_format_to_safe() {
+        let router = ConfidenceRouter::new();
+        let padding = "worker started, waiting for jobs on the default queue\n".repeat(2);
+        for trace in [
+            "Traceback (most recent call last):\n  File \"/srv/app/main.py\", line 42, in <module>\n    main()\nValueError: bad refund amount\n",
+            "Exception in thread \"main\" java.lang.IllegalStateException: queue closed\n\tat com.acme.Queue.pop(Queue.java:88)\n\tat com.acme.Main.main(Main.java:12)\n",
+            "TypeError: Cannot read properties of undefined (reading 'id')\n    at refund (/srv/app/refund.js:14:22)\n    at /srv/app/index.js:3:9\n",
+            "panic: runtime error: index out of range [5] with length 3\n\ngoroutine 1 [running]:\nmain.main()\n\t/srv/app/main.go:8 +0x1d\nexit status 2\n",
+            "Error: config missing\n\nStack backtrace:\n   0: anyhow::error::object_drop\n   1: app::main\n",
+        ] {
+            let content = format!("{padding}{trace}");
+            assert_eq!(router.route(&content), CompressionMode::Safe, "{trace}");
+            assert!(router.never_store(&content), "{trace}");
+        }
+    }
+
+    #[test]
+    fn routes_credential_lines_to_safe() {
+        let router = ConfidenceRouter::new();
+        let padding = "service: billing\nregion: us-east-1\nreplicas: 3\nlog_level: info\n";
+        for line in [
+            "export STRIPE_SECRET_KEY=sk_test_51Pq9AbCd",
+            "    \"apiKey\": \"ak_live_0123456789\",",
+            "db_password = \"hunter2\"",
+            "GITHUB_TOKEN=ghp_0123456789abcdef",
+            "aws_secret_access_key: wJalrXUtnFEMI",
+        ] {
+            let content = format!("{padding}{line}\n{padding}");
+            assert_eq!(router.route(&content), CompressionMode::Safe, "{line}");
+        }
+        for line in ["password:", "next_token: eyJvZmZzZXQiOjEwfQ", "secretName: db-creds", "\"token\": null,"] {
+            let content = format!("{padding}{line}\n{padding}");
+            assert_ne!(router.route(&content), CompressionMode::Safe, "{line}");
+        }
+    }
+
+    #[test]
+    fn markers_outside_their_structure_are_not_routed_but_never_stored() {
+        let router = ConfidenceRouter::new();
+        let log: String = (0..20)
+            .map(|i| format!("2026-10-05T12:00:{i:02}Z INFO  GET /api/orders/{i} 200 3ms\n"))
+            .collect();
+        for content in [
+            format!("{log}2026-10-05T12:30:00Z DEBUG db config host=db.internal user=app password=hunter2\n{log}"),
+            format!("commit 1a2b3c4\n\n    fix(router): no panic on a marker that panicked at byte 7, which ran\n    at a momentarily-invalid home path.\n{log}"),
+            format!("+    conn.execute(\"CREATE TABLE sessions (id TEXT PRIMARY KEY)\")\n{log}"),
+            format!("let api_key = env::var(\"API_KEY\")?;\n{log}"),
+        ] {
+            assert_ne!(router.route(&content), CompressionMode::Safe, "{content}");
+            assert!(router.never_store(&content), "{content}");
+        }
+    }
+
+    #[test]
+    fn legal_text_is_routed_and_stored_like_any_page() {
+        let router = ConfidenceRouter::new();
+        let page = "<div class=\"row\"><a href=\"/item/1\">Item 1</a></div>\n".repeat(8)
+            + "<footer><a href=\"/privacy\">Privacy Policy</a> <a href=\"/terms\">Terms of Service</a></footer>\n";
+        assert_ne!(router.route(&page), CompressionMode::Safe);
+        assert!(!router.never_store(&page));
+        assert!(!router.never_store("password=hunter2"));
     }
 }

@@ -1839,6 +1839,47 @@ mod tests {
         assert!(resp.output.contains("disk full"), "{head}");
     }
 
+    fn high_risk_texts() -> Vec<(&'static str, String)> {
+        let hex = |s: &str| sqz_engine::CacheManager::sha256_hex(s.as_bytes());
+        let frames: String = (0..40)
+            .map(|i| format!("  {i:>2}: myapp::scheduler::step_{i}\n             at ./src/scheduler/mod_{}.rs:{}:5\n", i % 7, 40 + 7 * i))
+            .collect();
+        let tables: String = ["customers", "orders", "refunds", "payments", "shipments", "invoices"]
+            .iter()
+            .map(|t| format!("CREATE TABLE {t} (\n    id BIGSERIAL PRIMARY KEY,\n    status TEXT NOT NULL DEFAULT 'pending',\n    created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\nCREATE INDEX idx_{t}_created_at ON {t} (created_at);\n"))
+            .collect();
+        let pem: String = (0..20).map(|i| hex(&format!("pem {i}")) + "\n").collect();
+        let creds: String = ["stripe", "sendgrid", "github", "datadog", "sentry"]
+            .iter()
+            .map(|s| format!("{s}_api_key: sk_test_{}\n{s}_endpoint: https://{s}.example.com/v1\n", &hex(s)[..32]))
+            .collect();
+        vec![
+            ("panic", format!("thread 'main' panicked at src/scheduler/queue.rs:217:31:\ncalled `Option::unwrap()` on a `None` value\nstack backtrace:\n{frames}")),
+            ("migration", format!("BEGIN;\n{tables}ALTER TABLE refunds ADD COLUMN reason TEXT;\nCOMMIT;\n")),
+            ("keys", format!("-----BEGIN RSA PRIVATE KEY-----\n{pem}-----END RSA PRIVATE KEY-----\n{creds}")),
+        ]
+    }
+
+    #[test]
+    fn test_compress_tool_returns_high_risk_text_unchanged() {
+        let (mut server, _dir) = make_server();
+        for (name, text) in high_risk_texts() {
+            assert!(text.len() > 500, "{name}");
+            for run in ["first", "second"] {
+                let resp = server
+                    .handle_tool_call(ToolCallRequest {
+                        tool_id: "compress".to_string(),
+                        input: serde_json::json!({ "text": text }),
+                        intent: None,
+                    })
+                    .unwrap();
+                assert_eq!(resp.output, text, "{name}, {run} call");
+            }
+            let stored = server.engine.cache_manager().check_dedup_with_meta(text.as_bytes()).unwrap();
+            assert!(stored.is_none(), "{name} was stored");
+        }
+    }
+
     /// Test list_tools returns all tools when no intent is provided.
     /// Validates: Requirements 3.1
     #[test]
@@ -2729,6 +2770,29 @@ complexity_threshold = 0.4
             "dedup ref should be ~13 tokens, got {}",
             second.tokens_compressed
         );
+    }
+
+    #[test]
+    fn test_sqz_read_file_never_stores_credential_mentions() {
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("app.log");
+        let mut content: String = (0..40)
+            .map(|i| format!("2026-10-05T12:00:{i:02}Z INFO  GET /healthz 200 1ms\n"))
+            .collect();
+        content.push_str("2026-10-05T12:30:00Z DEBUG db config host=db.internal user=app password=hunter2\n");
+        std::fs::write(&file_path, &content).expect("write test file");
+        for run in ["first", "second"] {
+            let resp = server
+                .handle_tool_call(ToolCallRequest {
+                    tool_id: "sqz_read_file".to_string(),
+                    input: serde_json::json!({ "path": file_path.to_string_lossy() }),
+                    intent: None,
+                })
+                .unwrap();
+            assert!(resp.output.contains(&content), "{run} read: {}", resp.output);
+        }
+        let stored = server.engine.cache_manager().check_dedup_with_meta(content.as_bytes()).unwrap();
+        assert!(stored.is_none());
     }
 
     fn python_module(fns: usize) -> String {

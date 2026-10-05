@@ -124,7 +124,7 @@ enum Command {
     Compress {
         /// Text to compress. If omitted, reads from stdin.
         text: Option<String>,
-        /// Compression mode: safe (preserve everything), default (balanced), aggressive (max reduction).
+        /// Compression mode: safe (no JSON field stages), default (balanced), aggressive (max reduction).
         #[arg(long, default_value = "auto")]
         mode: String,
         /// Show verifier confidence score alongside token reduction.
@@ -1256,7 +1256,11 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
     // Apply mode override if specified
     let result = match mode {
         "safe" => {
-            eprintln!("[sqz] mode: safe (preserving all content)");
+            if engine.route_compression_mode(&input) == sqz_engine::CompressionMode::Safe {
+                eprintln!("[sqz] mode: safe (preserving all content)");
+            } else {
+                eprintln!("[sqz] mode: safe");
+            }
             engine.compress_with_mode(&input, sqz_engine::CompressionMode::Safe)
         }
         "aggressive" => {
@@ -3344,7 +3348,12 @@ fn cmd_pin_add(input: String) {
     };
 
     let engine = require_engine();
-    if let Err(e) = engine.compress_with_cache(&content) {
+    let stored = engine.cache_manager().get_or_compress_with(
+        std::path::Path::new(""),
+        content.as_bytes(),
+        &|text| engine.compress(text),
+    );
+    if let Err(e) = stored {
         eprintln!("[sqz pin] compress: {e}");
         std::process::exit(1);
     }

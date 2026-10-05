@@ -465,6 +465,68 @@ fn test_compress_multiline_cli_output() {
         "errors/warnings should be preserved or dedup ref returned: {out}");
 }
 
+fn high_risk_outputs() -> Vec<(&'static str, String)> {
+    let hex = |s: &str| sqz_engine::CacheManager::sha256_hex(s.as_bytes());
+    let frames: String = (0..40)
+        .map(|i| format!("  {i:>2}: myapp::scheduler::step_{i}\n             at ./src/scheduler/mod_{}.rs:{}:5\n", i % 7, 40 + 7 * i))
+        .collect();
+    let tables: String = ["customers", "orders", "refunds", "payments", "shipments", "invoices"]
+        .iter()
+        .map(|t| format!("CREATE TABLE {t} (\n    id BIGSERIAL PRIMARY KEY,\n    status TEXT NOT NULL DEFAULT 'pending',\n    created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\nCREATE INDEX idx_{t}_created_at ON {t} (created_at);\n"))
+        .collect();
+    let pem: String = (0..20).map(|i| hex(&format!("pem {i}")) + "\n").collect();
+    let creds: String = ["stripe", "sendgrid", "github", "datadog", "sentry"]
+        .iter()
+        .map(|s| format!("{s}_api_key: sk_test_{}\n{s}_endpoint: https://{s}.example.com/v1\n", &hex(s)[..32]))
+        .collect();
+    vec![
+        ("cargo run", format!("thread 'main' panicked at src/scheduler/queue.rs:217:31:\ncalled `Option::unwrap()` on a `None` value\nstack backtrace:\n{frames}")),
+        ("cat migrations/0042_orders.sql", format!("BEGIN;\n{tables}ALTER TABLE refunds ADD COLUMN reason TEXT;\nCOMMIT;\n")),
+        ("cat deploy/secrets.env", format!("-----BEGIN RSA PRIVATE KEY-----\n{pem}-----END RSA PRIVATE KEY-----\n{creds}")),
+    ]
+}
+
+#[test]
+fn test_high_risk_output_passes_through_every_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    for (cmd, output) in high_risk_outputs() {
+        for args in [
+            vec!["compress", "--cmd", cmd],
+            vec!["compress"],
+            vec!["compress", "--mode", "safe"],
+            vec!["compress", "--mode", "default"],
+            vec!["compress", "--mode", "aggressive"],
+        ] {
+            let o = run_with_db(&db, &args, Some(&output));
+            assert!(o.status.success(), "{args:?}: {}", stderr(&o));
+            assert_eq!(stdout(&o), output, "{args:?}");
+        }
+        let payload = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": cmd},
+            "tool_response": {"stdout": output, "stderr": "", "interrupted": false, "isImage": false},
+        });
+        let o = run_with_db(&db, &["hook", "claude-post"], Some(&payload.to_string()));
+        assert!(o.status.success(), "{cmd}: {}", stderr(&o));
+        assert_eq!(stdout(&o), "", "{cmd}: the original result must stay");
+    }
+}
+
+#[test]
+fn test_json_values_survive_safe_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    let pretty = "[\n  0,\n  0,\n  0,\n  0,\n  0,\n  0,\n  1\n]\n";
+    for args in [vec!["compress", "--mode", "safe"], vec!["compress", "--mode", "default"], vec!["compress"]] {
+        let o = run_with_db(&db, &args, Some(pretty));
+        assert!(o.status.success(), "{args:?}: {}", stderr(&o));
+        let out = stdout(&o);
+        assert!(out.contains("[0,0,0,0,0,0,1]") || out == pretty, "{args:?}: {out}");
+    }
+}
+
 // ── TOON round-trip via compress ──────────────────────────────────────────────
 
 #[test]

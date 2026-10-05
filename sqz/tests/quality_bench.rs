@@ -423,7 +423,7 @@ fn fixtures() -> Vec<Fixture> {
             &["class RefundService", "def refund(self, charge: Charge, amount_cents: int) -> Refund", "def partial(self, charge: Charge, fraction: float) -> Refund", "from .errors import RefundError", "raise RefundError(\"invalid refund amount\")"],
             &[],
         ),
-        verbatim(
+        sensitive(
             "python traceback",
             "python app.py",
             "Traceback (most recent call last):\n  File \"/work/api/app.py\", line 42, in <module>\n    main()\n  File \"/work/api/app.py\", line 38, in main\n    svc.refund(charge, 9000)\n  File \"/work/api/src/billing/refund.py\", line 15, in refund\n    raise RefundError(\"invalid refund amount\")\nbilling.errors.RefundError: invalid refund amount\n",

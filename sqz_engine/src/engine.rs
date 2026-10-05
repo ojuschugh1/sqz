@@ -218,7 +218,7 @@ impl SqzEngine {
             if std::env::var_os("SQZ_VERBOSE").is_some() {
                 eprintln!("[sqz] safe mode: high-risk content passed through unchanged");
             }
-            return self.compress_safe(input, &pipeline, &ctx);
+            return self.compress_safe(input, &pipeline, &ctx, true);
         }
 
         // Step 3: Compress with the configured pipeline
@@ -235,7 +235,7 @@ impl SqzEngine {
                 eprintln!("[sqz] fallback: verifier confidence {:.2} below threshold — re-compressing in safe mode",
                     result.verify.as_ref().map(|v| v.confidence).unwrap_or(0.0));
             }
-            let safe_result = self.compress_safe(input, &pipeline, &ctx)?;
+            let safe_result = self.compress_safe(input, &pipeline, &ctx, false)?;
             return Ok(safe_result);
         }
 
@@ -250,6 +250,7 @@ impl SqzEngine {
     /// 13-token `§ref:HASH§` token instead of re-compressing. On a
     /// near-duplicate, it returns a compact delta. On a cache miss, it
     /// runs the full pipeline, stores the result, and returns it.
+    /// Content [`never_store`](Self::never_store) flags skips the cache.
     ///
     /// This is the path the MCP `sqz_read_file` / `sqz_grep` /
     /// `sqz_list_dir` tools use — repeat reads in the same session
@@ -265,6 +266,9 @@ impl SqzEngine {
         // location differences (e.g. `./src/main.rs` vs
         // `/abs/path/to/src/main.rs`). Misses go through `compress`, so
         // the verifier's safe-mode fallback applies here too.
+        if self.never_store(input) {
+            return Ok(crate::cache_manager::CacheResult::Fresh { output: self.compress(input)? });
+        }
         self.cache_manager.get_or_compress_with(
             std::path::Path::new(""),
             input.as_bytes(),
@@ -280,6 +284,11 @@ impl SqzEngine {
     pub fn compress_with_cache_lossless(&self, input: &str) -> Result<crate::cache_manager::CacheResult> {
         let pipeline = self.pipeline.lock()
             .map_err(|_| SqzError::Other("pipeline lock poisoned".into()))?;
+        if self.never_store(input) {
+            let ctx = crate::pipeline::SessionContext { session_id: "cache".to_string() };
+            let output = pipeline.compress_lossless(input, &ctx, &Preset::default())?;
+            return Ok(crate::cache_manager::CacheResult::Fresh { output });
+        }
         self.cache_manager.get_or_compress_lossless(
             std::path::Path::new(""),
             input.as_bytes(),
@@ -301,6 +310,7 @@ impl SqzEngine {
         if self.route_compression_mode(text) == crate::confidence_router::CompressionMode::Safe {
             return None;
         }
+        let use_cache = use_cache && !self.never_store(text);
 
         let result = if use_cache {
             self.compress_with_cache(text).ok()
@@ -375,7 +385,9 @@ impl SqzEngine {
 
         match mode {
             crate::confidence_router::CompressionMode::Safe => {
-                self.compress_safe(input, &pipeline, &ctx)
+                let lossless = self.confidence_router.route(input)
+                    == crate::confidence_router::CompressionMode::Safe;
+                self.compress_safe(input, &pipeline, &ctx, lossless)
             }
             _ => {
                 // Default and Aggressive: run normal pipeline + verify
@@ -391,6 +403,7 @@ impl SqzEngine {
         input: &str,
         pipeline: &crate::pipeline::CompressionPipeline,
         ctx: &crate::pipeline::SessionContext,
+        lossless: bool,
     ) -> Result<CompressedContent> {
         use crate::preset::{
             CompressionConfig, CondenseConfig, CustomTransformsConfig, BudgetConfig,
@@ -436,7 +449,11 @@ impl SqzEngine {
             },
         };
 
-        let mut result = pipeline.compress(input, ctx, &safe_preset)?;
+        let mut result = if lossless {
+            pipeline.compress_lossless(input, ctx, &safe_preset)?
+        } else {
+            pipeline.compress(input, ctx, &safe_preset)?
+        };
         let verify = Verifier::verify(input, &result.data);
         result.verify = Some(verify);
         result.provenance = Provenance {
@@ -594,6 +611,11 @@ impl SqzEngine {
         self.confidence_router.route(content)
     }
 
+    /// Whether content must stay out of the persistent cache.
+    pub fn never_store(&self, content: &str) -> bool {
+        self.confidence_router.never_store(content)
+    }
+
     /// Count tokens the way `compress` counts `tokens_original`.
     pub fn count_tokens(&self, text: &str) -> u32 {
         let preset = self.preset.lock().unwrap();
@@ -724,6 +746,105 @@ mod tests {
         assert!(second.text.starts_with("§ref:") && second.repeat, "{}", second.text);
         let uncached = engine.compress_tool_result(&rows, false).expect("no cache");
         assert!(!uncached.text.starts_with("§ref:") && !uncached.text.contains("sqz_expand"));
+    }
+
+    fn high_risk_inputs() -> Vec<(&'static str, String)> {
+        let frames: String = (0..40)
+            .map(|i| format!("  {i:>2}: myapp::scheduler::step_{i}\n             at ./src/scheduler/mod_{}.rs:{}:5\n", i % 7, 40 + 7 * i))
+            .collect();
+        let tables: String = ["customers", "orders", "refunds", "payments", "shipments", "invoices"]
+            .iter()
+            .map(|t| format!("CREATE TABLE {t} (\n    id BIGSERIAL PRIMARY KEY,\n    status TEXT NOT NULL DEFAULT 'pending',\n    created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\nCREATE INDEX idx_{t}_created_at ON {t} (created_at);\n"))
+            .collect();
+        let pem: String = (0..20).map(|i| CacheManager::sha256_hex(format!("pem {i}").as_bytes()) + "\n").collect();
+        let creds: String = ["stripe", "sendgrid", "github", "datadog", "sentry"]
+            .iter()
+            .map(|s| format!("{s}_api_key: sk_test_{}\n{s}_endpoint: https://{s}.example.com/v1\n", &CacheManager::sha256_hex(s.as_bytes())[..32]))
+            .collect();
+        vec![
+            ("panic", format!("thread 'main' panicked at src/scheduler/queue.rs:217:31:\ncalled `Option::unwrap()` on a `None` value\nstack backtrace:\n{frames}")),
+            ("migration", format!("BEGIN;\n{tables}ALTER TABLE refunds ADD COLUMN reason TEXT;\nCOMMIT;\n")),
+            ("keys", format!("-----BEGIN RSA PRIVATE KEY-----\n{pem}-----END RSA PRIVATE KEY-----\n{creds}")),
+        ]
+    }
+
+    #[test]
+    fn high_risk_content_passes_through_unchanged() {
+        use crate::confidence_router::CompressionMode;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
+        let inputs = high_risk_inputs();
+        for (name, input) in &inputs {
+            assert!(input.len() > 500, "{name}");
+            assert_eq!(engine.route_compression_mode(input), CompressionMode::Safe, "{name}");
+            assert_eq!(&engine.compress(input).unwrap().data, input, "{name}");
+            for mode in [CompressionMode::Safe, CompressionMode::Default, CompressionMode::Aggressive] {
+                assert_eq!(&engine.compress_with_mode(input, mode).unwrap().data, input, "{name} {mode:?}");
+            }
+        }
+        let colored = format!("\x1b[31m{}\x1b[0m", inputs[0].1);
+        assert_eq!(engine.compress(&colored).unwrap().data, inputs[0].1);
+    }
+
+    #[test]
+    fn verifier_fallback_still_compresses() {
+        use crate::confidence_router::CompressionMode;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
+        let input = (0..24)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("SEG{i} /srv/app/mod_{i}.py llllllllllllllllllllllllllllllllllllllll")
+                } else {
+                    format!("SEG{i} the quick brown fox jumps over {i} lazy dogs by silver rivers")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_ne!(engine.route_compression_mode(&input), CompressionMode::Safe);
+        let result = engine.compress(&input).unwrap();
+        assert_eq!(result.provenance.label.as_deref(), Some("safe-fallback"));
+        assert!(result.data.contains("low-information segments omitted"), "{}", result.data);
+        assert_eq!(result.data, engine.compress_with_mode(&input, CompressionMode::Safe).unwrap().data);
+    }
+
+    #[test]
+    fn json_values_survive_every_mode() {
+        use crate::confidence_router::CompressionMode;
+        let engine = SqzEngine::new().unwrap();
+        let pretty = "[\n  0,\n  0,\n  0,\n  0,\n  0,\n  0,\n  1\n]\n";
+        let expected = serde_json::json!([0, 0, 0, 0, 0, 0, 1]);
+        let mut outputs = vec![engine.compress(pretty).unwrap().data];
+        for mode in [CompressionMode::Safe, CompressionMode::Default, CompressionMode::Aggressive] {
+            outputs.push(engine.compress_with_mode(pretty, mode).unwrap().data);
+        }
+        for data in outputs {
+            assert_eq!(crate::toon::ToonEncoder.decode(&data).unwrap(), expected, "{data}");
+        }
+    }
+
+    #[test]
+    fn never_stored_content_skips_every_cache() {
+        use crate::cache_manager::CacheResult;
+        use crate::confidence_router::CompressionMode;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
+        let mut log: String = (0..120)
+            .map(|i| format!("2026-10-05T12:{:02}:{:02}Z INFO  GET /healthz 200 1ms\n", i / 60, i % 60))
+            .collect();
+        log.push_str("2026-10-05T12:30:00Z DEBUG db config host=db.internal user=app password=hunter2\n");
+        assert_ne!(engine.route_compression_mode(&log), CompressionMode::Safe);
+        assert!(engine.never_store(&log));
+        let stored = || engine.cache_manager().check_dedup_with_meta(log.as_bytes()).unwrap().is_some();
+
+        let CacheResult::Fresh { output } = engine.compress_with_cache(&log).unwrap() else { panic!("not fresh") };
+        assert!(output.data.len() < log.len());
+        let CacheResult::Fresh { output } = engine.compress_with_cache_lossless(&log).unwrap() else { panic!("not fresh") };
+        assert_eq!(output.data, log);
+        let result = engine.compress_tool_result(&log, true).expect("compresses");
+        assert!(!result.repeat && !result.text.contains("sqz_expand"), "{}", result.text);
+        assert!(!stored());
+        assert!(matches!(engine.compress_with_cache(&log).unwrap(), CacheResult::Fresh { .. }));
     }
 
     #[test]
