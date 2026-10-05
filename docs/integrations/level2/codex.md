@@ -17,7 +17,7 @@ sqz init --only codex
 
 What it writes:
 
-- `./AGENTS.md`: appends (or creates) a block between `<!-- BEGIN sqz-agents-guidance -->` and `<!-- END sqz-agents-guidance -->` markers. Anything else in the file is left alone, and re-running `sqz init` replaces only that block.
+- `./AGENTS.md`: appends (or creates) a block between `<!-- BEGIN sqz-guidance -->` and `<!-- END sqz-guidance -->` markers, the same block the Zed integration uses. Anything else in the file is left alone. Re-running `sqz init` (or `sqz doctor --fix`) replaces only that block, and folds the separate `sqz-agents-guidance` and `sqz-zed-guidance` blocks older versions wrote into it.
 - `~/.codex/config.toml` (or `$CODEX_HOME/config.toml` if set): adds
 
   ```toml
@@ -41,11 +41,11 @@ Then start Codex in the project and ask it to run a noisy command (`npm install`
 - Shell output compressed when Codex follows the AGENTS.md guidance and pipes through `sqz compress` (per-command formatters for 45+ commands, dedup references on repeats, safe mode for stack traces and secrets).
 - Compressed file reads, greps and directory listings through the `sqz_*` MCP tools, with 13-token references on repeat reads and line-level deltas after small edits.
 - `sqz_recall` for recovering exact tool output after Codex compacts its context.
-- `expand` / `passthrough` as escape hatches, and `SQZ_NO_DEDUP=1` / `SQZ_NO_ABBREV=1` as per-command opt-outs, all documented in the block Codex reads.
+- `expand` for getting back what a `§ref:HASH§` stands for, and `SQZ_NO_DEDUP=1` / `SQZ_NO_ABBREV=1` as per-command opt-outs, all documented in the block Codex reads.
 
 ## Limits
 
-Because the shell side depends on guidance rather than a hook, compression is only as consistent as Codex's adherence to AGENTS.md. In practice it follows the block well for the commands listed in it. If `sqz stats --breakdown` shows a command you run often with no savings, add it to the examples in the AGENTS.md block, or use the MCP tools for that operation instead.
+Because the shell side depends on guidance rather than a hook, compression is only as consistent as Codex's adherence to AGENTS.md. In practice it follows the block well for the commands listed in it. If `sqz stats --breakdown` shows a command you run often with no savings, mention it in your own part of AGENTS.md (sqz rewrites what is between its markers), or use the MCP tools for that operation instead.
 
 Codex's `features.codex_hooks` flag is documented as experimental and off by default. sqz will target it once the `hooks.json` schema is stable.
 
