@@ -256,28 +256,55 @@ fn is_secret_line(line: &str) -> bool {
         "accesskey", "token", "authorization",
     ];
     const NOT_SECRET: &[&str] = &["nexttoken", "pagetoken", "continuationtoken"];
+    const WORDS: &[&str] = &["null", "none", "nil", "true", "false", "read", "write", "str", "string"];
+    let norm = |s: &str| -> String {
+        s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
+    };
     let line = line.strip_prefix("export ").unwrap_or(line);
     let Some(at) = line.find(['=', ':']) else { return false };
     let key = line[..at].trim_end().trim_matches(['"', '\'']);
-    let rest = line[at + 1..].trim();
-    let value = rest.trim_end_matches(',').trim_matches(['"', '\'']);
-    let code = !rest.starts_with(['"', '\''])
-        && (rest.ends_with([',', ';']) || rest.contains(['(', ')', '[', ']', '{', '}', '<', '>', '&']));
     if key.is_empty()
         || key.len() > 64
         || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
-        || rest.starts_with(':')
-        || code
-        || matches!(value, "" | "null")
     {
         return false;
     }
-    let key: String = key
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    NAMES.iter().any(|n| key.ends_with(n)) && !NOT_SECRET.iter().any(|n| key.ends_with(n))
+    let name = norm(key);
+    if !NAMES.iter().any(|n| name.ends_with(n)) || NOT_SECRET.iter().any(|n| name.ends_with(n)) {
+        return false;
+    }
+    let rest = line[at + 1..].trim();
+    let assigned = match rest.split_once(" = ") {
+        Some((_, v)) if !rest.starts_with(['"', '\'']) => v.trim(),
+        _ => rest,
+    };
+    let value = assigned.trim_end_matches(',').trim_matches(['"', '\'']);
+    let code = !rest.starts_with(['"', '\''])
+        && (rest.ends_with([',', ';']) || rest.contains(['(', ')', '[', ']', '{', '}', '<', '>', '&']));
+    let bare = value.trim_start_matches(['^', '~', '=', '>', '<']);
+    let bare = bare.strip_prefix('v').unwrap_or(bare);
+    let numbers = bare.split(['-', '+']).next().unwrap_or(bare);
+    let version = numbers.contains('.')
+        && numbers.split('.').all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        && bare.bytes().all(|b| b.is_ascii_alphanumeric() || b"-+.".contains(&b));
+    if rest.starts_with(':')
+        || code
+        || value.is_empty()
+        || WORDS.iter().any(|w| value.eq_ignore_ascii_case(w))
+        || version
+    {
+        return false;
+    }
+    let last = norm(value.rsplit('.').next().unwrap_or(value));
+    let reference = (line.as_bytes()[at] == b'=' || assigned.len() < rest.len())
+        && !assigned.starts_with(['"', '\''])
+        && value.split('.').all(|s| {
+            s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+        && (last == norm(key.rsplit('.').next().unwrap_or(key))
+            || (value.contains('.') && NAMES.iter().any(|n| last.ends_with(n))));
+    !reference
 }
 
 // ---------------------------------------------------------------------------
@@ -430,11 +457,38 @@ mod tests {
             "db_password = \"hunter2\"",
             "GITHUB_TOKEN=ghp_0123456789abcdef",
             "aws_secret_access_key: wJalrXUtnFEMI",
+            "POSTGRES_PASSWORD: password",
+            "password: password",
+            "token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            "api_key: str = \"sk_live_0123456789\"",
+            "token: v4.public.eyJzdWIiOiIxMjM0In0",
+            "token: 07401b.f395accd246ae52d",
+            "api_key = \"sk-proj-0123456789abcdef\"",
         ] {
             let content = format!("{padding}{line}\n{padding}");
             assert_eq!(router.route(&content), CompressionMode::Safe, "{line}");
         }
-        for line in ["password:", "next_token: eyJvZmZzZXQiOjEwfQ", "secretName: db-creds", "\"token\": null,"] {
+        for line in [
+            "password:",
+            "next_token: eyJvZmZzZXQiOjEwfQ",
+            "secretName: db-creds",
+            "\"token\": null,",
+            "self.token = token",
+            "self._api_key = api_key",
+            "token = None",
+            "password = password",
+            "secret = secret",
+            "api_key = settings.STRIPE_API_KEY",
+            "id-token: write",
+            "\"jsonwebtoken\": \"^9.0.0\",",
+            "\"jsonwebtoken\": \"~1.2\",",
+            "\"jsonwebtoken\": \">=2.0.1\",",
+            "\"jsonwebtoken\": \"v1.2.3-beta.1\",",
+            "\"jsonwebtoken\": \"1.2.3+build.5\",",
+            "token: str = \"\"",
+            "token: str = \"\", grant_json: str | None = None,",
+            "password: str",
+        ] {
             let content = format!("{padding}{line}\n{padding}");
             assert_ne!(router.route(&content), CompressionMode::Safe, "{line}");
         }
