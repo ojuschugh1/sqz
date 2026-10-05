@@ -17,7 +17,7 @@ Across 3,003 real compressions sqz saved 178,442 tokens, a 24.7% average reducti
 
 What the data shows instead:
 
-- **Command output dominates.** Build logs, test runs, `git status`, package installs. A 366-token `cargo test` with one failure becomes the failure, the assertion and the `file:line`, 185 tokens including sqz's own stderr line (cl100k). Commands such as `git`, `cargo`, `npm`, `pytest`, `go`, `docker ps` and `terraform` have purpose-built formatters; other output goes through a generic pipeline that folds repeated lines, leaves source code alone, and passes short stack traces and secrets through unchanged.
+- **Command output dominates.** Build logs, test runs, `git status`, package installs. A 366-token `cargo test` with one failure becomes the failure, the assertion and the `file:line`, 185 tokens including sqz's own stderr line (cl100k). Commands such as `git`, `cargo`, `npm`, `pytest`, `go`, `docker ps` and `terraform` have purpose-built formatters; other output goes through a generic pipeline that folds repeated lines, leaves source code alone, and passes stack traces, migrations and credential lines through unchanged.
 - **Identical file re-reads are rare.** Measured on 92 Claude Code sessions by a user who counted: 1 in 542 reads. What repeats is unchanged command output (a 13-token `§ref§`), line ranges of a file already read in full (a `§ref:HASH:L40-80§`), and files re-read after a small edit (a line-level delta through the sqz MCP tools).
 - **Over-compression is tracked, not hidden.** `sqz stats` reports how often the agent re-ran a command whose output had not changed, or asked for an original back. Those regret signals sit next to the savings so you can discount the number yourself.
 

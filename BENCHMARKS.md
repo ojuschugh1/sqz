@@ -40,8 +40,10 @@ TOON encoding, and entropy truncation on long text), so it does not keep everyth
 shell hook the original is cached, and when segments were dropped a
 `[full output: sqz expand ...]` line points at it. Stack traces, SQL migrations, PEM blocks
 and credential lines are routed to safe mode up front and pass through unchanged at any
-size; they are never cached. Output that only mentions a credential, trace or migration is
-compressed as usual but is not cached either, so what it loses cannot be expanded.
+size; they are never cached. On the shell hook a per-command formatter may still summarize
+the rest of a test run around them, but only when it keeps every line of their paragraphs.
+Output that only mentions a credential, trace or migration is compressed as usual but is
+not cached either, so what it loses cannot be expanded.
 
 Use `sqz compress --mode default --verify` to see both metrics together (repeated log input
 below; the CLI counts cl100k tokens, not chars/4):

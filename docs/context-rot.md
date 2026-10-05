@@ -47,7 +47,7 @@ And when compaction has already lost something, `sqz recall` searches everything
 
 Any tool in this space, sqz included, should be judged on what it drops, not on its reduction percentage. A compressor that hits 90% by removing the line the agent needed has made the session more expensive, because the agent re-runs the command, retries in circles, or produces a worse answer. sqz publishes a [quality benchmark](quality-benchmark.md) that measures fact retention alongside reduction, fails its own build when a fact goes missing, and tracks regret signals (quick re-runs and reference expands) in normal use so over-compression is visible in `sqz stats` rather than hidden in a headline number.
 
-The honest summary of the measured effect: about 25% average token reduction across real sessions, rising to 90%+ on the repeat reads that dedup catches, with no change to source files or to short stack traces and secrets. Compaction still happens. It happens later, on a transcript that was never allowed to rot as fast.
+The honest summary of the measured effect: about 25% average token reduction across real sessions, rising to 90%+ on the repeat reads that dedup catches, with no change to source files or to stack traces, migrations and credential lines. Compaction still happens. It happens later, on a transcript that was never allowed to rot as fast.
 
 ## See also
 

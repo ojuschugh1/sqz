@@ -14,7 +14,7 @@ If you want numbers, the last section describes how to run any tool through the 
 
 **Limits.** Only sees shell output. File reads that go through a client's built-in Read tool never pass through Bash and are invisible to it ([anthropics/claude-code#4544](https://github.com/anthropics/claude-code/issues/4544)). Coverage is per command: unknown commands fall back to generic heuristics, which is where over-compression risk lives. Quality depends entirely on how strict the formatters are about dropping content.
 
-**Where sqz sits.** This is sqz's shell hook on Claude Code, Gemini CLI and Copilot CLI (and OpenCode's plugin): per-command formatters, a generic pipeline that folds repeated log lines and table padding but leaves source code alone and passes short stack traces and secrets through unchanged, and a 16-token net-win gate that returns the original when a compression saves less than that. Its exit-status trailer protocol preserves the command's real exit code through the pipe, which a naive `cmd | compress` loses.
+**Where sqz sits.** This is sqz's shell hook on Claude Code, Gemini CLI and Copilot CLI (and OpenCode's plugin): per-command formatters, a generic pipeline that folds repeated log lines and table padding but leaves source code alone and passes stack traces, migrations and credential lines through unchanged, and a 16-token net-win gate that returns the original when a compression saves less than that. Its exit-status trailer protocol preserves the command's real exit code through the pipe, which a naive `cmd | compress` loses.
 
 ### 2. Session-level deduplication
 
@@ -54,7 +54,7 @@ If you want numbers, the last section describes how to run any tool through the 
 
 **Limits.** Costs a model call per compression, which can exceed the tokens saved on small outputs. Non-deterministic: the same output compresses differently each run, so behaviour is hard to test and regressions are hard to catch. Lossy in ways that cannot be audited or reversed; the exact line number, the branch name, the precise error string survive only if the summarising model decided they mattered. Adds latency to every tool call. Requires network access and a provider.
 
-**Where sqz sits.** sqz makes zero LLM calls, by design. Every transform is deterministic Rust, runs offline, and is reversible. That rules out the highest headline reductions on prose, and sqz accepts that trade: its measured average across real sessions is about 25%, with 90%+ on the repeats dedup catches, and 0% on source files and on short stack traces and secrets. The [quality benchmark](quality-benchmark.md) exists because a compressor should be graded on what it drops, not on its percentage.
+**Where sqz sits.** sqz makes zero LLM calls, by design. Every transform is deterministic Rust, runs offline, and is reversible. That rules out the highest headline reductions on prose, and sqz accepts that trade: its measured average across real sessions is about 25%, with 90%+ on the repeats dedup catches, and 0% on source files and on stack traces and credential lines. The [quality benchmark](quality-benchmark.md) exists because a compressor should be graded on what it drops, not on its percentage.
 
 ## Summary
 

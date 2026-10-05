@@ -310,7 +310,7 @@ What gets compressed:
 
 What doesn't get compressed:
 - Source code: served in full on first read
-- Stack traces, SQL migrations, PEM blocks and credential lines: routed to safe mode and passed through unchanged at any size, and never cached
+- Stack traces, SQL migrations, PEM blocks and credential lines: routed to safe mode and passed through unchanged at any size, and never cached; on the shell hook a per-command formatter may still summarize the rest of a test run around them
 - Your prompts and the AI's responses — controlled by the AI tool, not sqz
 
 ## Supported Tools
@@ -563,7 +563,7 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 3. **Structural summaries**: the engine has an API that reduces a code file to imports, function signatures and a call graph. The hook and MCP paths do not use it; they serve source in full.
 4. **Dedup cache**: SHA-256 content hash, persistent across sessions. Byte-identical output the model already has = 13-token reference. A line range of a file the model already has in full (`sed -n '40,80p'`, `sqz_read_file` with `offset`/`limit`) = `§ref:HASH:L40-80§`. A re-read after a small edit = only the changed lines, through the sqz MCP tools (the shell hook sends the edited file again). References are only served while the original is still in context (30-minute window, tunable via `SQZ_REF_TTL_SECS`, reset on compaction).
 5. **JSON pipeline**: strip nulls → drop bookkeeping fields (`__v`, `etag`, request and correlation ids) → flatten → collapse arrays → TOON encoding (lossless compact format)
-6. **Safe mode**: stack traces (a trace header followed by its frames), SQL DDL at the start of a line, PEM blocks and credential lines (`key=value` or `key: value` with a secret-looking key) skip the pipeline and pass through unchanged at any size, with only ANSI codes stripped, and are never cached. On the shell hook a per-command formatter still runs first, so `cargo test` output with a panic keeps the panic and drops the passing tests. Output that only mentions a password, key, trace or migration outside those structures is compressed as usual but is not cached either, so anything a lossy stage drops from it cannot be expanded.
+6. **Safe mode**: stack traces (a trace header followed by its frames), SQL DDL at the start of a line, PEM blocks and credential lines (`key=value` or `key: value` with a secret-looking key) skip the pipeline and pass through unchanged at any size, with only ANSI codes stripped, and are never cached. On the shell hook a per-command formatter still runs first. Its summary is used only when it keeps every line of each paragraph that holds one of them unchanged, so it may summarize the rest of a test run around a trace; otherwise the whole output passes through. Output that only mentions a password, key, trace or migration outside those structures is compressed as usual but is not cached either, so anything a lossy stage drops from it cannot be expanded.
 
 Measured quality, including what each stage drops and what it never touches: [quality benchmark](docs/quality-benchmark.md). For the full technical details, see [docs/](docs/README.md).
 
