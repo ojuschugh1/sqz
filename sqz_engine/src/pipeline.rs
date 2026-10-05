@@ -901,11 +901,12 @@ fn main() {
     fn repeated_lines_report_the_real_count() {
         let preset = default_preset();
         let pipeline = CompressionPipeline::new(&preset);
-        let head = "2024-01-01 09:59:59 [INFO] Server started\n";
+        let head = "2024-01-01 09:59:59 [INFO] Server started on 0.0.0.0:8080\n";
         let line = "2024-01-01 10:00:00 [INFO] Connected to database";
         let tail = "2024-01-01 10:00:11 [ERROR] Connection timeout after 30s\n";
         for n in [2, 3, 4, 10, 100] {
             let input = format!("{head}{}{tail}", format!("{line}\n").repeat(n));
+            assert!(input.len() > 200, "n={n}");
             let result = pipeline.compress(&input, &ctx(), &preset).unwrap();
             let expected = if n < 3 { input.clone() } else { format!("{head}{line} [×{n}]\n{tail}") };
             assert_eq!(result.data, expected, "n={n}");
