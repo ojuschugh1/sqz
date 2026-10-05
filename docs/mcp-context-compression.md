@@ -1,6 +1,6 @@
 # MCP Context Compression for AI Coding Agents
 
-Every MCP tool result an agent receives is billed as input tokens, on every turn, for the rest of the session. A verbose `tools/list` alone can cost 10-40k tokens before the agent has done anything. `sqz-mcp` is a compression layer for that traffic: an MCP server with compressed file, grep and directory tools, and a proxy that wraps any other MCP server and compresses what comes back. No LLM calls, deterministic, offline, and every compressed result is recoverable byte-exact.
+Every MCP tool result an agent receives is billed as input tokens, on every turn, for the rest of the session. A verbose `tools/list` alone can cost 10-40k tokens before the agent has done anything. `sqz-mcp` is a compression layer for that traffic: an MCP server with compressed file, grep and directory tools, and a proxy that wraps any other MCP server and compresses what comes back. No LLM calls, deterministic, offline, and every compressed result is recoverable byte-exact unless it mentions credentials, a stack trace or a migration, which sqz never caches.
 
 Install (`sqz init` registers it with Claude Code, Kiro, Codex, Zed and OpenCode; other clients take the config below by hand):
 
@@ -24,7 +24,7 @@ Agents burn most of their context on three operations: reading files, grepping, 
 | `sqz_list_dir` | Directory listing that skips `.git`, `node_modules`, `target`, `dist`, `build`, `vendor`, `__pycache__`. `max_depth` 1 (the default) is the immediate children; stops at 1000 entries (`max_entries`). | No permission/owner/date columns, no bulk directories, repeat listings dedupe. |
 | `compress` | Run arbitrary text through the generic pipeline (log folding, JSON compaction, dedup). Per-command formatters run only on the shell path. | For output the agent already holds and wants to shrink before re-sending. |
 | `passthrough` | Return text unchanged. | Escape hatch for models that cannot parse `§ref§` tokens. |
-| `expand` | Resolve a `§ref:HASH§` token (or bare hex prefix) to the original bytes. | Makes every compression reversible. |
+| `expand` | Resolve a `§ref:HASH§` token (or bare hex prefix) to the original bytes. | Makes every cached compression reversible. |
 | `sqz_recall` | Full-text search (SQLite FTS5) over everything sqz has compressed in past sessions. | Recovers context lost to compaction without re-running commands. |
 
 The read, grep and list tools are lossless by design ([issue #32](https://github.com/ojuschugh1/sqz/issues/32)): a file read that silently dropped lines would break edits. Their token savings come from dedup and from not fetching what the agent does not need, not from summarising. When a size cap cuts output, the header says what was cut.
@@ -48,9 +48,9 @@ The tool descriptions themselves are kept short and tell the agent when to prefe
 
 On the way back to the client the proxy:
 
-- compresses `tools/call` text results through the generic sqz pipeline: dedup `§ref` on repeats, stack traces, credentials and migrations passed through unchanged, a 16-token net-win gate so small results are never made worse. With the cache on (the default), originals are persisted, so any result is recoverable; `--no-cache` turns that off.
+- compresses `tools/call` text results through the generic sqz pipeline: dedup `§ref` on repeats, stack traces, credential lines and migrations passed through unchanged, a 16-token net-win gate so small results are never made worse. With the cache on (the default), originals are persisted and recoverable, except results that mention credentials, a stack trace or a migration, which are never cached; `--no-cache` turns caching off.
 - compacts `tools/list` descriptions (whitespace collapsed, capped at 400 characters, input schemas untouched). With `--lazy-tools` the cap drops to one sentence (160 characters) and an injected `sqz_tool_help` tool serves the full original documentation for any tool on demand.
-- appends an `sqz_expand` tool to the upstream tool list and answers calls to it locally, so the agent can recover any compressed or referenced result byte-exact.
+- appends an `sqz_expand` tool to the upstream tool list and answers calls to it locally, so the agent can recover any cached or referenced result byte-exact.
 - adds a short note to the `initialize` instructions explaining what `§ref:HASH§` means.
 
 Error results, non-text content, notifications, and every client-to-server message pass through verbatim.
@@ -95,9 +95,9 @@ For Claude Code, Gemini CLI and Copilot CLI, `sqz init` also installs a hook tha
 ## Guarantees
 
 - **Zero LLM calls.** Every transform is deterministic Rust. Same input, same output, no model in the loop, works offline.
-- **Recoverable.** Every compressed or deduplicated result can be expanded back to the original bytes with `expand` (server) or `sqz_expand` (proxy).
+- **Recoverable.** Every cached or deduplicated result can be expanded back to the original bytes with `expand` (server) or `sqz_expand` (proxy). Results that mention credentials, a stack trace or a migration are never cached, so a lossy compression of one cannot be expanded.
 - **Never worse.** A 16-token net-win gate returns the original when compression would not pay for its own header.
-- **Safe mode.** The proxy passes stack traces, secrets and migration-like content through unchanged and does not cache them. The `compress` tool routes them to safe mode: short ones come back unchanged, longer ones can lose low-information segments to entropy truncation.
+- **Safe mode.** Stack traces, migrations, PEM blocks and credential lines come back unchanged at any size from the proxy and from the `compress` tool. No tool caches content that mentions credentials, a stack trace or a migration, so a repeat read of such a file is sent in full.
 - **No telemetry.** The dedup cache and stats live in a local SQLite file you own.
 
 Measured quality, including what compression drops and what it never touches, is in the [quality benchmark](quality-benchmark.md).

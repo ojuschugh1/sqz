@@ -50,7 +50,7 @@
 
 sqz compresses command output before it reaches your LLM. Single Rust binary, zero config.
 
-Per-command formatters keep what an agent acts on (the failing test, the assertion, the `file:line`) and drop what it does not. Anything the model already has in context comes back as a short reference instead of the content. Source code passes through unchanged, and so do short stack traces and secrets.
+Per-command formatters keep what an agent acts on (the failing test, the assertion, the `file:line`) and drop what it does not. Anything the model already has in context comes back as a short reference instead of the content. Source code passes through unchanged, and so do stack traces, migrations and credential lines.
 
 ```
 Without sqz:                              With sqz:
@@ -68,7 +68,7 @@ Total:                     2,092 tokens    1,557 tokens  (26% saved, nothing dro
 > **24.7%** average reduction across 3,003 real compressions ·
 > **13-token** refs for output the model already has ·
 > **100%** of agent-critical facts kept in the [quality benchmark](https://github.com/ojuschugh1/sqz/blob/main/docs/quality-benchmark.md) ·
-> **0%** on source code, and on short stack traces and secrets
+> **0%** on source code, and on stack traces and credential lines
 
 One developer's week, measured from actual `sqz gain` output:
 
@@ -239,7 +239,7 @@ What gets compressed:
 
 What doesn't get compressed:
 - Source code: served in full on first read
-- Short stack traces, credentials and SQL migrations: routed to safe mode and passed through unchanged. Longer ones can lose low-information segments to entropy truncation, and since the shell hook never caches this content, those segments cannot be expanded
+- Stack traces, SQL migrations, PEM blocks and credential lines: routed to safe mode and passed through unchanged at any size, and never cached
 - Your prompts and the AI's responses — controlled by the AI tool, not sqz
 
 ## Supported Tools
@@ -377,7 +377,7 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 2. **Structural summaries**: the engine has an API that reduces a code file to imports, function signatures and a call graph. The hook and MCP paths do not use it; they serve source in full.
 3. **Dedup cache** — SHA-256 content hash, persistent across sessions. Second read = 13-token reference.
 4. **JSON pipeline**: strip nulls → drop bookkeeping fields (`__v`, `etag`, request and correlation ids) → flatten → collapse arrays → TOON encoding (lossless compact format)
-5. **Safe mode**: stack traces, credentials and SQL migrations, detected by pattern checks, pass through unchanged when short. Above about 500 characters they can lose low-information segments to entropy truncation (marked `[N low-information segments omitted]`), and because the shell hook never caches them, those segments cannot be expanded. The MCP proxy passes them through unchanged.
+5. **Safe mode**: stack traces (a trace header followed by its frames), SQL DDL at the start of a line, PEM blocks and credential lines (`key=value` or `key: value` with a secret-looking key) skip the pipeline and pass through unchanged at any size, with only ANSI codes stripped, and are never cached. On the shell hook a per-command formatter still runs first, so `cargo test` output with a panic keeps the panic and drops the passing tests. Output that only mentions a password, key, trace or migration outside those structures is compressed as usual but is not cached either, so anything a lossy stage drops from it cannot be expanded.
 
 For the full technical details, see [docs/](docs/).
 

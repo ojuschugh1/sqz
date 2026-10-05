@@ -82,7 +82,7 @@ Not all content should be compressed. Stack traces contain exact line numbers th
 
 sqz classifies content into risk tiers with pattern checks, plus an entropy measure that separates boilerplate from normal content:
 
-- **Safe mode**: stack traces with frame markers (a Rust `stack backtrace:`, `at` frames), PEM blocks, key and password assignments, SQL DDL. Short inputs pass through unchanged. Above about 500 characters the generic entropy truncation still runs and can drop low-information segments, and because high-risk content is never cached on the shell hook path, those segments cannot be expanded. The MCP proxy passes safe-mode content through unchanged.
+- **Safe mode**: stack traces with their frames (a Rust `stack backtrace:` with numbered frames, a Python `Traceback` with `File` lines, JVM and JavaScript `at` frames, Go goroutine dumps), PEM blocks, credential lines (`key=value` or `key: value` with a secret-looking key), SQL DDL at the start of a line. These checks match whole lines, so a log line or commit message that only mentions a password or a panic does not qualify. Safe-mode content passes through unchanged at any size and is never cached. Output that only mentions such markers is compressed as usual but is not cached either, so anything a lossy stage drops from it cannot be expanded.
 - **Default mode**: Normal code, git output, build logs
 - **Aggressive mode**: content with very low average entropy, such as repetitive logs and boilerplate; it currently runs the same pipeline as default mode
 
@@ -122,7 +122,7 @@ Unlike prompt compression tools that require API interception or model-specific 
 
 A single `sqz init` command detects installed frameworks and configures each one. On Claude Code, Gemini CLI, Copilot CLI and OpenCode the integration is transparent: the hook or plugin rewrites shell commands, and the agent receives compressed output without doing anything. On Kiro, Codex, Zed, Cursor, Windsurf and Cline it is advisory: sqz saves tokens only when the agent pipes output through `sqz compress` or calls the sqz MCP tools, and the client's built-in shell and file tools bypass it. `sqz doctor` reports each client's tier.
 
-Since 1.6.0 the MCP proxy provides a framework-independent integration surface: `sqz-mcp proxy -- <upstream command>` wraps any stdio MCP server, compresses its tool results through the full pipeline (dedup references on repeats, safe mode for stack traces and secrets, error results untouched), optionally compacts verbose tool descriptions in `tools/list`, and injects an `sqz_expand` tool so the agent can recover any original byte-exact. The client sees a normal MCP server, so this works with every MCP client regardless of whether it supports hooks.
+Since 1.6.0 the MCP proxy provides a framework-independent integration surface: `sqz-mcp proxy -- <upstream command>` wraps any stdio MCP server, compresses its tool results through the full pipeline (dedup references on repeats, safe mode for stack traces and secrets, error results untouched), optionally compacts verbose tool descriptions in `tools/list`, and injects an `sqz_expand` tool so the agent can recover any cached original byte-exact. The client sees a normal MCP server, so this works with every MCP client regardless of whether it supports hooks.
 
 ---
 

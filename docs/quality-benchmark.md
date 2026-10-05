@@ -53,11 +53,11 @@ sqz main after 1.9.0, October 2026, default settings (dedup on, abbreviation on)
 | JSON API response | `curl https://api.example.com/v1/orders/ord_8812` | 129 | 130 | -0.8% | 11/11 | 1/1 | byte-exact |
 | app log with repeats | `tail -n 200 app.log` | 1025 | 135 | 86.8% | 3/3 | 2/2 | byte-exact |
 | source file read | `cat src/billing/refund.py` | 221 | 221 | 0.0% | 5/5 | n/a | byte-exact |
-| python traceback | `python app.py` | 82 | 82 | 0.0% | 4/4 | n/a | byte-exact |
+| python traceback | `python app.py` | 82 | 82 | 0.0% | 4/4 | n/a | passthrough, never cached |
 | dotenv with secrets | `cat .env` | 78 | 78 | 0.0% | 4/4 | n/a | passthrough, never cached |
 | **Aggregate** | | **12,264** | **5,932** | **51.6%** | **359/359** | | |
 
-Regression gates enforced by the test: 100% fact recall on every fixture, output identical to the input (up to trailing whitespace) for the `git show rev:path`, traceback and secrets fixtures, byte-exact recovery for everything else, no persistence of the secrets fixture, and at least 40% aggregate reduction across the other fixtures.
+Regression gates enforced by the test: 100% fact recall on every fixture, output identical to the input (up to trailing whitespace) for the `git show rev:path`, traceback and secrets fixtures, byte-exact recovery for everything else, no persistence of the traceback and secrets fixtures, and at least 40% aggregate reduction across the other fixtures.
 
 ### Reading the zeros
 
@@ -69,8 +69,8 @@ The 0.0% rows are deliberate and are the point of the benchmark. In each of them
 - **git show rev:path.** The `git show` formatter passes file contents through, and the pipeline treats them as source code, like the source file read below.
 - **git diff.** Every changed line is a fact. sqz's diff formatter found nothing safe to remove, and the generic pipeline agreed, so the output passed through untouched with no stats header. An earlier build reported this same fixture as a 15% reduction because it compared a BPE token count for the input against a bytes/4 estimate for the output. That mismatch inflated every pipeline-path number in `sqz stats` and is fixed.
 - **source file read.** An agent that runs `cat` on a file is usually about to edit it. The pipeline now detects source code and skips every line-dropping stage. Before this, the entropy truncator scored the imports and the `class` line as "low information" and removed them. The saving on file reads comes from dedup instead: the second read is 13 tokens.
-- **python traceback.** Not routed to safe mode: the router does that only for stack traces with frame markers such as a Rust `stack backtrace:` or `at` lines. The traceback is short, so no stage finds 16 tokens to save. A long chained Python traceback does get compressed (abbreviations and `[→L..]` back-references), with the original recoverable through `sqz expand`.
-- **dotenv.** The key assignments route it to safe mode, and short safe-mode content passes through unchanged. Safe-mode content is also never written to the cache on this path, which the test proves by checking that a repeat run does not produce a dedup reference. Longer safe-mode content (above about 500 characters) can lose low-information segments to entropy truncation, and since it is not cached those segments cannot be expanded.
+- **python traceback.** The `Traceback (most recent call last):` line followed by `File` lines routes it to safe mode, which passes it through unchanged at any size, a long chained traceback included. Like the dotenv fixture it is never written to the cache.
+- **dotenv.** The key assignments route it to safe mode, and safe-mode content passes through unchanged at any size. Safe-mode content is also never written to the cache on this path, which the test proves by checking that a repeat run does not produce a dedup reference.
 
 The **JSON API** row is the one where the agent sees more than the raw output. Null stripping, flattening and TOON encoding cut the payload from 165 to 138 cl100k tokens, enough to pass the net-win gate, but the `[sqz]` header line, which repeats the full `curl` URL, costs more than that saving, so the total in this table comes out one token larger.
 

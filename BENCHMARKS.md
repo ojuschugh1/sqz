@@ -38,10 +38,10 @@ confidence score. Below 0.6, sqz re-compresses the input with the safe preset. T
 skips the configured lossy JSON stages but still runs the generic stages (JSON projection,
 TOON encoding, and entropy truncation on long text), so it does not keep everything; on the
 shell hook the original is cached, and when segments were dropped a
-`[full output: sqz expand ...]` line points at it. Stack traces, credentials and SQL
-migrations are routed to safe mode up front: short ones pass through unchanged, longer ones
-(above about 500 characters) can lose low-information segments, and because the shell hook
-never caches this content those segments cannot be expanded.
+`[full output: sqz expand ...]` line points at it. Stack traces, SQL migrations, PEM blocks
+and credential lines are routed to safe mode up front and pass through unchanged at any
+size; they are never cached. Output that only mentions a credential, trace or migration is
+compressed as usual but is not cached either, so what it loses cannot be expanded.
 
 Use `sqz compress --mode default --verify` to see both metrics together (repeated log input
 below; the CLI counts cl100k tokens, not chars/4):
@@ -74,11 +74,11 @@ below; the CLI counts cl100k tokens, not chars/4):
 **Output** (39 tokens, **73.6% reduction**):
 ```
 2024-01-01 09:59:59 [INFO] Server started
-2024-01-01 10:00:00 [INFO] Connected to database [×3]
+2024-01-01 10:00:00 [INFO] Connected to database [×10]
 2024-01-01 10:00:11 [ERROR] Connection timeout after 30s
 ```
 
-Method: `condense` cuts the run of identical lines to 3, then `rle` folds those 3 into one line marked `[×3]`. The marker counts the condensed lines, not the 10 lines of the input.
+Method: `condense` cuts the run of identical lines to 3, then `rle` folds them into one line marked `[×10]`, the number of times the line appeared in the input.
 Critical info preserved: ✅ ERROR line retained verbatim.
 
 ---
@@ -241,5 +241,5 @@ Being honest about limitations:
 |---|---|---|
 | Short messages (< 100 chars) | 0% | Below minimum threshold |
 | Prose | 1.6% on the benchmark paragraph | Token pruning removes a few filler words; no other stage changes it |
-| Stack traces | 0% when short (safe mode) | Routed to safe mode; longer ones can lose low-information segments that cannot be expanded |
-| Database migrations | 0% when short (safe mode) | Same safe-mode routing as stack traces |
+| Stack traces | 0% (safe mode) | Routed to safe mode and passed through unchanged at any size |
+| Database migrations | 0% (safe mode) | Same safe-mode routing as stack traces |
