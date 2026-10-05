@@ -43,6 +43,14 @@ fn collect_build_blocks(output: &str) -> BuildBlocks {
             compiled += 1;
             continue;
         }
+        if let Some(n) = trimmed
+            .strip_prefix("...+")
+            .and_then(|rest| rest.strip_suffix(" more downloads"))
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            compiled += n;
+            continue;
+        }
         if trimmed.starts_with("Finished") {
             finished_line = Some(trimmed.to_string());
             continue;
@@ -421,6 +429,17 @@ mod tests {
         assert!(result.contains("src/main.rs:10:5"));
         assert!(!result.contains("Compiling"));
         assert!(!result.contains("aborting due to"));
+    }
+
+    #[test]
+    fn test_cargo_build_counts_every_crate() {
+        let compiling: String = (0..30).map(|i| format!("   Compiling crate_{i} v0.1.0\n")).collect();
+        let ok = format!("{compiling}    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.2s\n");
+        let result = crate::format_command("cargo build", &ok).unwrap();
+        assert!(result.starts_with("ok (30 crates compiled)"), "{result}");
+        let failed = format!("{compiling}error[E0308]: mismatched types\n  --> src/main.rs:10:5\n\nerror: could not compile `app` (bin \"app\") due to 1 previous error\n");
+        let result = crate::format_command("cargo build", &failed).unwrap();
+        assert!(result.starts_with("cargo build: 1 errors, 0 warnings (30 crates)"), "{result}");
     }
 
     #[test]

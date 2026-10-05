@@ -152,6 +152,9 @@ impl CompressionStage for CondenseStage {
             ContentType::PlainText | ContentType::CliOutput { .. } => {}
             _ => return Ok(()),
         }
+        if ToonEncoder::is_json(&content.raw) || looks_like_diff(&content.raw) {
+            return Ok(());
+        }
 
         let max_repeated: u32 = config
             .options
@@ -679,17 +682,7 @@ impl CompressionStage for GitDiffFoldStage {
             _ => return Ok(()),
         }
 
-        // Real diff detection: require strong structural signals, not just
-        // lines starting with +/-. The old check (`contains("\n+") || contains("\n-")`)
-        // false-positived on ls -l output (regular files start with -rw-),
-        // Markdown bullet lists, CSV with negative numbers, etc.
-        let looks_like_diff = content.raw.starts_with("diff --git ")
-            || content.raw.starts_with("diff -")
-            || content.raw.contains("\n@@ ")       // hunk header
-            || content.raw.contains("\n--- a/")    // unified diff file header
-            || content.raw.contains("\n+++ b/");   // unified diff file header
-
-        if !looks_like_diff {
+        if !looks_like_diff(&content.raw) {
             return Ok(());
         }
 
@@ -759,6 +752,18 @@ impl CompressionStage for GitDiffFoldStage {
         }
         Ok(())
     }
+}
+
+fn looks_like_diff(raw: &str) -> bool {
+    // Real diff detection: require strong structural signals, not just
+    // lines starting with +/-. The old check (`contains("\n+") || contains("\n-")`)
+    // false-positived on ls -l output (regular files start with -rw-),
+    // Markdown bullet lists, CSV with negative numbers, etc.
+    raw.starts_with("diff --git ")
+        || raw.starts_with("diff -")
+        || raw.contains("\n@@ ")       // hunk header
+        || raw.contains("\n--- a/")    // unified diff file header
+        || raw.contains("\n+++ b/")    // unified diff file header
 }
 
 // ---------------------------------------------------------------------------
@@ -928,6 +933,18 @@ mod tests {
         let cfg = enabled_config(json!({"max_repeated_lines": 1}));
         CondenseStage.process(&mut c, &cfg).unwrap();
         assert_eq!(c.raw, raw);
+    }
+
+    #[test]
+    fn condense_leaves_json_text_and_diffs_alone() {
+        let cfg = enabled_config(json!({"max_repeated_lines": 3}));
+        let json = "[\n  0,\n  0,\n  0,\n  0,\n  0,\n  0,\n  1\n]\n";
+        let diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1,8 +1,8 @@\n \n \n \n \n \n-old()\n+new()\n";
+        for raw in [json, diff] {
+            let mut c = text_content(raw);
+            CondenseStage.process(&mut c, &cfg).unwrap();
+            assert_eq!(c.raw, raw);
+        }
     }
 
     // --- strip_nulls ---

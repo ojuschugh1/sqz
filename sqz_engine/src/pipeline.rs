@@ -170,6 +170,7 @@ impl CompressionPipeline {
         };
 
         let mut stages_applied: Vec<String> = Vec::new();
+        let mut condensed: Option<(String, String)> = None;
 
         for stage in &self.stages {
             // On the lossless (file-read) path, run only the reversible stages.
@@ -178,7 +179,11 @@ impl CompressionPipeline {
             }
             let config = stage_config_from_preset(stage.name(), preset);
             if config.enabled {
+                let before = (stage.name() == "condense").then(|| content.raw.clone());
                 stage.process(&mut content, &config)?;
+                if let Some(before) = before.filter(|before| *before != content.raw) {
+                    condensed = Some((before, content.raw.clone()));
+                }
                 stages_applied.push(stage.name().to_owned());
             }
         }
@@ -210,7 +215,13 @@ impl CompressionPipeline {
         // Skipped on the lossless path — even reversible `[×N]` markers make a
         // file read non-verbatim. Only apply when content is long enough.
         if !lossless && !is_json && !is_code && content.raw.len() > 200 {
-            if let Ok(rle_result) = crate::rle_compressor::rle_compress(&content.raw, 3) {
+            let original = condensed
+                .as_ref()
+                .filter(|(_, after)| *after == content.raw)
+                .map(|(before, _)| before.as_str());
+            if let Ok(rle_result) =
+                crate::rle_compressor::rle_compress_with_original(&content.raw, original, 3)
+            {
                 if rle_result.runs_collapsed > 0 {
                     // Safety check: verify critical markers are preserved
                     let has_error = content.raw.contains("ERROR") || content.raw.contains("error:");
@@ -884,6 +895,50 @@ fn main() {
         );
         assert!(!lossless.stages_applied.contains(&"entropy_truncate".to_owned()));
         assert!(!lossless.stages_applied.contains(&"token_prune".to_owned()));
+    }
+
+    #[test]
+    fn repeated_lines_report_the_real_count() {
+        let preset = default_preset();
+        let pipeline = CompressionPipeline::new(&preset);
+        let head = "2024-01-01 09:59:59 [INFO] Server started\n";
+        let line = "2024-01-01 10:00:00 [INFO] Connected to database";
+        let tail = "2024-01-01 10:00:11 [ERROR] Connection timeout after 30s\n";
+        for n in [2, 3, 4, 10, 100] {
+            let input = format!("{head}{}{tail}", format!("{line}\n").repeat(n));
+            let result = pipeline.compress(&input, &ctx(), &preset).unwrap();
+            let expected = if n < 3 { input.clone() } else { format!("{head}{line} [×{n}]\n{tail}") };
+            assert_eq!(result.data, expected, "n={n}");
+        }
+    }
+
+    #[test]
+    fn folded_and_collapsed_counts_are_exact() {
+        let preset = default_preset();
+        let pipeline = CompressionPipeline::new(&preset);
+        let context: String = (0..6).map(|i| format!(" context_{i:02}()\n")).collect();
+        let diff = format!(
+            "diff --git a/a.py b/a.py\nindex 1111111..2222222 100644\n--- a/a.py\n+++ b/a.py\n@@ -1,30 +1,30 @@\n-old_call()\n+new_call()\n{context}{}{context}-old_tail()\n+new_tail()\n",
+            " \n".repeat(10)
+        );
+        let result = pipeline.compress(&diff, &ctx(), &preset).unwrap();
+        assert!(result.data.contains("[18 unchanged lines]"), "{}", result.data);
+
+        let mut samples = vec![0; 20_000];
+        samples.push(1);
+        let pretty = serde_json::to_string_pretty(&serde_json::json!({ "samples": samples })).unwrap();
+        let result = pipeline.compress(&pretty, &ctx(), &preset).unwrap();
+        let decoded = ToonEncoder.decode(&result.data).unwrap();
+        let arr = decoded["samples"].as_array().unwrap();
+        let (summary, kept) = arr.split_last().unwrap();
+        let remaining: usize = summary
+            .as_str()
+            .and_then(|s| s.strip_prefix("... and "))
+            .and_then(|s| s.strip_suffix(" more items"))
+            .and_then(|n| n.parse().ok())
+            .unwrap();
+        assert_eq!(kept.len() + remaining, 20_001);
+        assert!(kept.iter().all(|v| v == 0));
     }
 
     /// The lossless path returns JSON byte-for-byte — no stripped nulls,

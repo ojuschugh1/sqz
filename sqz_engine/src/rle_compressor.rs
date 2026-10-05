@@ -25,6 +25,14 @@ pub struct RleResult {
 /// Detects repeated phrases/tokens and replaces runs with compact notation:
 /// `token [×N]` where N is the repeat count.
 pub fn rle_compress(text: &str, min_run_length: usize) -> Result<RleResult> {
+    rle_compress_with_original(text, None, min_run_length)
+}
+
+pub(crate) fn rle_compress_with_original(
+    text: &str,
+    original: Option<&str>,
+    min_run_length: usize,
+) -> Result<RleResult> {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() < 2 {
         return Ok(RleResult {
@@ -34,6 +42,7 @@ pub fn rle_compress(text: &str, min_run_length: usize) -> Result<RleResult> {
         });
     }
 
+    let mut original_runs = original.map(line_runs).unwrap_or_default().into_iter();
     let mut output = Vec::new();
     let mut runs_collapsed = 0usize;
     let mut tokens_saved = 0u32;
@@ -45,11 +54,15 @@ pub fn rle_compress(text: &str, min_run_length: usize) -> Result<RleResult> {
         while i + run_len < lines.len() && lines[i] == lines[i + run_len] {
             run_len += 1;
         }
+        let count = match original_runs.next() {
+            Some((line, n)) if line == lines[i] => n,
+            _ => run_len,
+        };
 
         if run_len >= min_run_length {
             // Collapse the run of identical lines. Lossless: N copies of the
             // same text can be recovered from "{text} [×N]".
-            output.push(format!("{} [×{}]", lines[i], run_len));
+            output.push(format!("{} [×{}]", lines[i], count));
             runs_collapsed += 1;
             let line_tokens = (lines[i].len() as u32 + 3) / 4;
             tokens_saved += line_tokens * (run_len as u32 - 1);
@@ -61,8 +74,8 @@ pub fn rle_compress(text: &str, min_run_length: usize) -> Result<RleResult> {
             // discarding real filenames from `ls -l` output. See Reddit
             // report #1 and the test_ls_output_preserves_all_filenames
             // regression test. Exact duplicates above are still collapsed.
-            output.push(lines[i].to_string());
-            i += 1;
+            output.extend(lines[i..i + run_len].iter().map(|line| line.to_string()));
+            i += run_len;
         }
     }
 
@@ -77,6 +90,17 @@ pub fn rle_compress(text: &str, min_run_length: usize) -> Result<RleResult> {
         runs_collapsed,
         tokens_saved,
     })
+}
+
+fn line_runs(text: &str) -> Vec<(&str, usize)> {
+    let mut runs: Vec<(&str, usize)> = Vec::new();
+    for line in text.lines() {
+        match runs.last_mut() {
+            Some((prev, n)) if *prev == line => *n += 1,
+            _ => runs.push((line, 1)),
+        }
+    }
+    runs
 }
 
 // ── Log-template compaction ──────────────────────────────────────────────────
@@ -431,6 +455,15 @@ done\n";
         let result_3 = rle_compress(input, 3).unwrap();
         assert!(result_2.runs_collapsed > 0, "run of 2 should collapse with min=2");
         assert_eq!(result_3.runs_collapsed, 0, "run of 2 should NOT collapse with min=3");
+    }
+
+    #[test]
+    fn test_rle_counts_runs_of_the_original() {
+        let original = format!("x\nx\n{}b\n{}", "a\n".repeat(10), "c\n".repeat(3));
+        let condensed = "x\nx\na\na\na\nb\nc\nc\nc\n";
+        let result = rle_compress_with_original(condensed, Some(&original), 3).unwrap();
+        assert_eq!(result.text, "x\nx\na [×10]\nb\nc [×3]\n");
+        assert_eq!(rle_compress(condensed, 3).unwrap().text, "x\nx\na [×3]\nb\nc [×3]\n");
     }
 
     // --- Sliding window dedup tests ---
