@@ -103,5 +103,5 @@ condense = true
 ## Notes
 
 - The proxy is entirely local — no data leaves your machine except the compressed request forwarded to the upstream API.
-- All compression happens in-process; latency overhead is typically under 5ms.
+- All compression happens in-process.
 - Use `sqz proxy --dry-run` to log what would be compressed without forwarding requests.

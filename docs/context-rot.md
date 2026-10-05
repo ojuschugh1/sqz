@@ -31,7 +31,7 @@ The alternative is to intervene at the point where tool output is about to enter
 
 1. **Is this a repeat?** If the same bytes were served earlier in the session and are still in the model's context, send a 13-token reference instead. This removes repetition at the source and does not depend on a model noticing the duplicate.
 2. **What in this output carries information?** For a known command, a purpose-built formatter keeps what an agent acts on (the failing test, the assertion, the `file:line`, the changed lines of a diff, the pod that is crashing) and drops what it does not (progress dots, passing tests, deprecation prose, alignment padding). For unknown output, generic stages fold repeated log lines and collapse table padding, and stop there.
-3. **Is this something that must not be touched?** Stack traces, secrets, migrations and source code an agent is about to edit pass through untouched. The rule is that a wrong drop costs more than any saving.
+3. **Is this something that must not be touched?** Source code an agent is about to edit passes through unchanged, and so do short stack traces, secrets and migrations; longer ones can lose low-information segments to entropy truncation, which sqz marks in the output. The rule is that a wrong drop costs more than any saving.
 
 This is what sqz does. It runs as a shell hook on Claude Code, Gemini CLI, Copilot CLI and OpenCode, as agent guidance on clients that can't let sqz rewrite tool calls (Kiro, Codex, Zed, Cursor, Windsurf, Cline), and as an MCP server for file reads, greps and directory listings, so the compression happens inside the tool call, before the result is appended to the transcript. There is no model in the loop: the transforms are deterministic Rust, so the same output compresses the same way every time, and everything that was compressed can be recovered byte-exact with `sqz expand`.
 
@@ -47,7 +47,7 @@ And when compaction has already lost something, `sqz recall` searches everything
 
 Any tool in this space, sqz included, should be judged on what it drops, not on its reduction percentage. A compressor that hits 90% by removing the line the agent needed has made the session more expensive, because the agent re-runs the command, retries in circles, or produces a worse answer. sqz publishes a [quality benchmark](quality-benchmark.md) that measures fact retention alongside reduction, fails its own build when a fact goes missing, and tracks regret signals (quick re-runs and reference expands) in normal use so over-compression is visible in `sqz stats` rather than hidden in a headline number.
 
-The honest summary of the measured effect: about 25% average token reduction across real sessions, rising to 90%+ on the repeat reads that dedup catches, with zero loss on error output, secrets and source files by construction. Compaction still happens. It happens later, on a transcript that was never allowed to rot as fast.
+The honest summary of the measured effect: about 25% average token reduction across real sessions, rising to 90%+ on the repeat reads that dedup catches, with no change to source files or to short stack traces and secrets. Compaction still happens. It happens later, on a transcript that was never allowed to rot as fast.
 
 ## See also
 

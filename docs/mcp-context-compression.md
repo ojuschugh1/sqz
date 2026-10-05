@@ -22,7 +22,7 @@ Agents burn most of their context on three operations: reading files, grepping, 
 | `sqz_read_file` | Read a file. Content is returned faithfully (every line, identifier and line number; only ANSI codes stripped). Output stops at 256 KB on a line boundary and the header gives `continue_with_offset` (`max_bytes` changes it, 0 lifts it). | A repeat read of unchanged content returns a 13-token `§ref:HASH§` reference instead of the file. Agents re-read the same file after every edit; this is where the savings are. |
 | `sqz_grep` | Literal or regex search under a path, `path:lineno:text` output, capped at `max_matches` (default 200) and 100 KB (`max_bytes`). A match line over 400 chars is clipped to a window around the hit (`max_line_chars`). | The caps stop one popular term or one minified bundle from flooding the context. Repeat searches dedupe. |
 | `sqz_list_dir` | Directory listing that skips `.git`, `node_modules`, `target`, `dist`, `build`, `vendor`, `__pycache__`. `max_depth` 1 (the default) is the immediate children; stops at 1000 entries (`max_entries`). | No permission/owner/date columns, no bulk directories, repeat listings dedupe. |
-| `compress` | Run arbitrary text through the full pipeline (per-command formatters, log folding, JSON compaction, dedup). | For output the agent already holds and wants to shrink before re-sending. |
+| `compress` | Run arbitrary text through the generic pipeline (log folding, JSON compaction, dedup). Per-command formatters run only on the shell path. | For output the agent already holds and wants to shrink before re-sending. |
 | `passthrough` | Return text unchanged. | Escape hatch for models that cannot parse `§ref§` tokens. |
 | `expand` | Resolve a `§ref:HASH§` token (or bare hex prefix) to the original bytes. | Makes every compression reversible. |
 | `sqz_recall` | Full-text search (SQLite FTS5) over everything sqz has compressed in past sessions. | Recovers context lost to compaction without re-running commands. |
@@ -48,7 +48,7 @@ The tool descriptions themselves are kept short and tell the agent when to prefe
 
 On the way back to the client the proxy:
 
-- compresses `tools/call` text results through the full sqz pipeline: dedup `§ref` on repeats, per-command formatters, safe mode for stack traces and secrets, a 16-token net-win gate so small results are never made worse. Originals are persisted, so any result is recoverable.
+- compresses `tools/call` text results through the generic sqz pipeline: dedup `§ref` on repeats, stack traces, credentials and migrations passed through unchanged, a 16-token net-win gate so small results are never made worse. With the cache on (the default), originals are persisted, so any result is recoverable; `--no-cache` turns that off.
 - compacts `tools/list` descriptions (whitespace collapsed, capped at 400 characters, input schemas untouched). With `--lazy-tools` the cap drops to one sentence (160 characters) and an injected `sqz_tool_help` tool serves the full original documentation for any tool on demand.
 - appends an `sqz_expand` tool to the upstream tool list and answers calls to it locally, so the agent can recover any compressed or referenced result byte-exact.
 - adds a short note to the `initialize` instructions explaining what `§ref:HASH§` means.
@@ -97,7 +97,7 @@ For Claude Code, Gemini CLI and Copilot CLI, `sqz init` also installs a hook tha
 - **Zero LLM calls.** Every transform is deterministic Rust. Same input, same output, no model in the loop, works offline.
 - **Recoverable.** Every compressed or deduplicated result can be expanded back to the original bytes with `expand` (server) or `sqz_expand` (proxy).
 - **Never worse.** A 16-token net-win gate returns the original when compression would not pay for its own header.
-- **Safe mode.** Stack traces, secrets and migration-like content pass through untouched, and secrets are never written to the cache.
+- **Safe mode.** The proxy passes stack traces, secrets and migration-like content through unchanged and does not cache them. The `compress` tool routes them to safe mode: short ones come back unchanged, longer ones can lose low-information segments to entropy truncation.
 - **No telemetry.** The dedup cache and stats live in a local SQLite file you own.
 
 Measured quality, including what compression drops and what it never touches, is in the [quality benchmark](quality-benchmark.md).

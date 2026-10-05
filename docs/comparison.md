@@ -10,11 +10,11 @@ If you want numbers, the last section describes how to run any tool through the 
 
 **How it works.** The tool rewrites the agent's shell commands (through a PreToolUse hook, a shell function, or a wrapper binary) so output is piped through a compressor before the agent's harness captures it. Per-command formatters know what `cargo test`, `git status` or `kubectl get pods` look like and keep the parts that matter.
 
-**Strengths.** Transparent: the agent does not know it is there. Deterministic and cheap: no model call, sub-millisecond latency. Highest reduction on verbose, repetitive output (build logs, passing tests, package installs). Precise about what it keeps because each formatter is written for one command's structure.
+**Strengths.** Transparent: the agent does not know it is there. Deterministic and cheap: no model call; for sqz a call takes about 39-43 ms on outputs up to 10 KB, mostly process start and tokenizer setup. Highest reduction on verbose, repetitive output (build logs, passing tests, package installs). Precise about what it keeps because each formatter is written for one command's structure.
 
 **Limits.** Only sees shell output. File reads that go through a client's built-in Read tool never pass through Bash and are invisible to it ([anthropics/claude-code#4544](https://github.com/anthropics/claude-code/issues/4544)). Coverage is per command: unknown commands fall back to generic heuristics, which is where over-compression risk lives. Quality depends entirely on how strict the formatters are about dropping content.
 
-**Where sqz sits.** This is sqz's shell hook on Claude Code, Gemini CLI and Copilot CLI (and OpenCode's plugin): per-command formatters, a generic pipeline that folds repeated log lines and table padding but refuses to touch source code, stack traces or secrets, and a 16-token net-win gate so nothing is ever made larger. Its exit-status trailer protocol preserves the command's real exit code through the pipe, which a naive `cmd | compress` loses.
+**Where sqz sits.** This is sqz's shell hook on Claude Code, Gemini CLI and Copilot CLI (and OpenCode's plugin): per-command formatters, a generic pipeline that folds repeated log lines and table padding but leaves source code alone and passes short stack traces and secrets through unchanged, and a 16-token net-win gate that returns the original when a compression saves less than that. Its exit-status trailer protocol preserves the command's real exit code through the pipe, which a naive `cmd | compress` loses.
 
 ### 2. Session-level deduplication
 
@@ -54,7 +54,7 @@ If you want numbers, the last section describes how to run any tool through the 
 
 **Limits.** Costs a model call per compression, which can exceed the tokens saved on small outputs. Non-deterministic: the same output compresses differently each run, so behaviour is hard to test and regressions are hard to catch. Lossy in ways that cannot be audited or reversed; the exact line number, the branch name, the precise error string survive only if the summarising model decided they mattered. Adds latency to every tool call. Requires network access and a provider.
 
-**Where sqz sits.** sqz makes zero LLM calls, by design. Every transform is deterministic Rust, runs offline, and is reversible. That rules out the highest headline reductions on prose, and sqz accepts that trade: its measured average across real sessions is about 25%, with 90%+ on the repeats dedup catches, and 0% by construction on error output, secrets and source files. The [quality benchmark](quality-benchmark.md) exists because a compressor should be graded on what it drops, not on its percentage.
+**Where sqz sits.** sqz makes zero LLM calls, by design. Every transform is deterministic Rust, runs offline, and is reversible. That rules out the highest headline reductions on prose, and sqz accepts that trade: its measured average across real sessions is about 25%, with 90%+ on the repeats dedup catches, and 0% on source files and on short stack traces and secrets. The [quality benchmark](quality-benchmark.md) exists because a compressor should be graded on what it drops, not on its percentage.
 
 ## Summary
 

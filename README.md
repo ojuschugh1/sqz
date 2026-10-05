@@ -54,7 +54,7 @@
 
 AI coding agents spend most of their input tokens on tool output: build logs, test runs, `git status`, the same file read again after every edit. All of it goes into the context window raw, and it is re-sent on every turn after that.
 
-sqz compresses tool output before it enters the context. Per-command formatters keep what an agent acts on (the failing test, the assertion, the `file:line`) and drop what it does not. Anything the model already has in context comes back as a short reference instead of the content. Source code, stack traces and secrets pass through untouched.
+sqz compresses tool output before it enters the context. Per-command formatters keep what an agent acts on (the failing test, the assertion, the `file:line`) and drop what it does not. Anything the model already has in context comes back as a short reference instead of the content. Source code passes through unchanged, and so do short stack traces and secrets.
 
 ```sh
 cargo install sqz-cli sqz-mcp     # or: brew install ojuschugh1/sqz/sqz · npm i -g sqz-cli · pipx install sqz
@@ -70,12 +70,12 @@ sqz init                          # hooks + MCP server + agent guidance for ever
 ```
 Without sqz:                              With sqz:
 
-cat auth.py (500 lines):   4,000 tokens    4,000 tokens  (source is served in full)
-cargo test (1 failure):    1,200 tokens      120 tokens  (failure, assertion, file:line)
-sed -n '40,80p' auth.py:     330 tokens       18 tokens  (§ref:…:L40-80§ to the read above)
-git status, unchanged:       160 tokens       13 tokens  (§ref:…§)
+cat auth.py (200 lines):   1,300 tokens    1,300 tokens  (source is served in full)
+cargo test (1 failure):      366 tokens      185 tokens  (failure, assertion, file:line)
+sed -n '41,80p' auth.py:     260 tokens       35 tokens  (§ref:…:L41-80§ to the read above)
+git status, unchanged:       166 tokens       37 tokens  (§ref:…§)
 ─────────────────────────────────────      ─────────────
-Total:                     5,690 tokens    4,151 tokens  (27% saved, nothing dropped)
+Total:                     2,092 tokens    1,557 tokens  (26% saved, nothing dropped)
 ```
 
 Single Rust binary, deterministic, no LLM calls, works offline. Every compressed result can be recovered byte-exact with `sqz expand`.
@@ -88,7 +88,7 @@ Single Rust binary, deterministic, no LLM calls, works offline. Every compressed
 > **24.7%** average reduction across 3,003 real compressions ·
 > **13-token** refs for output the model already has ·
 > **100%** of agent-critical facts kept in the [quality benchmark](docs/quality-benchmark.md) ·
-> **0%** by construction on source code, stack traces and secrets
+> **0%** on source code, and on short stack traces and secrets
 
 One developer's week, measured from actual `sqz gain` output:
 
@@ -114,22 +114,22 @@ Single-command compression (measured via `cargo test -p sqz-engine benchmarks`):
 
 | Content | Before | After | Saved |
 |---|---:|---:|---:|
-| Repeated log lines | 148 | 62 | **58%** |
-| Large JSON array | 259 | 142 | **45%** |
+| Repeated log lines | 148 | 39 | **74%** |
+| Large JSON array | 259 | 111 | **57%** |
 | JSON API response | 64 | 53 | **17%** |
 | Git diff | 61 | 54 | **12%** |
-| Prose/docs | 124 | 121 | **2%** |
+| Prose/docs | 124 | 122 | **2%** |
 | Stack trace (safe mode) | 82 | 82 | **0%** |
 
 ### Session-level with dedup
 
-Anything the model already has in its context comes back as a reference. Measured with the release binary against a throwaway database, using the fixtures in `sqz/tests/quality_bench.rs` and `demo/`:
+Anything the model already has in its context comes back as a reference. Measured with the release binary against a throwaway database, using the fixtures in `sqz/tests/quality_bench.rs` and `demo/`, in cl100k tokens of everything the agent sees (the reference plus sqz's one-line note on stderr):
 
 | Repeat | Without sqz | With sqz | Saved |
 |---|---:|---:|---:|
-| Unchanged `git status` run again | 155 | 13 | **92%** |
-| Lines 41-80 of a 200-line file read earlier | 305 | 16 | **95%** |
-| Same `cargo test` output, nothing changed | 303 | 13 | **96%** |
+| Unchanged `git status` run again | 166 | 37 | **78%** |
+| Lines 41-80 of a 200-line file read earlier | 260 | 35 | **87%** |
+| Same `cargo test` output, nothing changed | 366 | 39 | **89%** |
 
 A word on what actually repeats. A user who counted 92 of their own Claude Code sessions ([script](https://gist.github.com/harrison001/76250b61ad665bf9a377e7096dffdbe0)) found identical whole-file re-reads in 1 of 542 reads, and line-range re-reads in 8.4% of them. So sqz does not lead with "the same file read five times": the repeats that happen in practice are unchanged command output, line ranges of a file already read, and files re-read after a small edit, and each has its own reference type ([details](docs/stop-rereading-files.md)). Sessions with noisy command output and repeated commands see the biggest wins.
 
@@ -303,13 +303,14 @@ Claude → git status → [sqz hook rewrites] → compressed output
 ```
 
 What gets compressed:
-- **Shell output** — 45+ per-command formatters (git, cargo, npm/pnpm/yarn, pytest, ruff, go test, docker, kubectl, aws, terraform, gradle, xcodebuild, adb logcat, dotnet, gh, grep/rg, tree, curl, and more)
+- **Shell output**: per-command formatters (git, cargo, npm/pnpm/yarn/bun, pytest, ruff, mypy, go, docker ps/images, kubectl describe/apply, terraform, gradle, maven, xcodebuild, adb logcat, dotnet, grep/rg, tree, curl, and more)
 - **JSON** — strips nulls, compact encoding, TOON format
 - **Logs** — collapses repeated lines
 - **Test output** — shows failures only (state-machine parsers for Rust, Go, Python, JS, JVM)
 
 What doesn't get compressed:
-- Stack traces, error messages, secrets — routed to safe mode (0% compression)
+- Source code: served in full on first read
+- Short stack traces, credentials and SQL migrations: routed to safe mode and passed through unchanged. Longer ones can lose low-information segments to entropy truncation, and since the shell hook never caches this content, those segments cannot be expanded
 - Your prompts and the AI's responses — controlled by the AI tool, not sqz
 
 ## Supported Tools
@@ -536,30 +537,29 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 
 ## How Compression Works
 
-1. **Per-command formatters** — 45+ commands across 12 ecosystems get purpose-built compression:
+1. **Per-command formatters** for the commands below:
 
    | Ecosystem | Commands |
    |---|---|
-   | Git | status, log, diff, show, stash, remote, fetch, push, pull, commit |
+   | Git | status, log, diff, show, stash, remote, fetch, push, pull, add, commit |
    | Rust | cargo build/test/clippy/check/nextest |
-   | JavaScript | npm/pnpm/yarn/bun install/test/audit/outdated, tsc, eslint, vitest |
+   | JavaScript | npm/pnpm/yarn/bun install/audit/outdated (test and run when they fail), tsc, eslint, biome |
    | Python | pytest, ruff, mypy, pip |
    | Go | go test (incl. `-json` stream), go build, go vet, golangci-lint |
-   | Cloud | aws, terraform plan/apply/init, gcloud |
-   | Containers | docker/podman ps/images/build, kubectl get/describe/logs/apply |
+   | Cloud | terraform plan/apply/destroy/refresh/init |
+   | Containers | docker/podman ps/images, kubectl describe/apply |
    | JVM | gradle build/test, maven |
    | Mobile | xcodebuild (build + test), adb logcat |
    | .NET | dotnet build/publish/test |
-   | System | grep/rg, tree, find/fd, ls, curl/wget |
-   | GitHub | gh pr/issue/run (JSON + table) |
+   | System | grep/rg, tree, curl/wget |
 
-   Unknown commands fall through to the generic compression pipeline — no output is ever left uncompressed.
+   Other commands, including kubectl get and logs, gh, aws, gcloud, ls and find, go through the generic compression pipeline.
 
 2. **Table compactor** — aligned-column output from tools without a dedicated formatter (`ps aux`, `netstat`, database CLIs) collapses its padding runs to two-space separators. The detector is strict — indented lines, code, YAML, and JSON never match.
-3. **Structural summaries** — code files compressed to imports + function signatures + call graph (~70% reduction). The model sees the architecture, not implementation noise.
-4. **Dedup cache** — SHA-256 content hash, persistent across sessions. Byte-identical output the model already has = 13-token reference. A line range of a file the model already has in full (`sed -n '40,80p'`, `sqz_read_file` with `offset`/`limit`) = `§ref:HASH:L40-80§`. A re-read after a small edit = only the changed lines. References are only served while the original is still in context (30-minute window, tunable via `SQZ_REF_TTL_SECS`, reset on compaction).
-5. **JSON pipeline** — strip nulls → project out debug fields → flatten → collapse arrays → TOON encoding (lossless compact format)
-6. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
+3. **Structural summaries**: the engine has an API that reduces a code file to imports, function signatures and a call graph. The hook and MCP paths do not use it; they serve source in full.
+4. **Dedup cache**: SHA-256 content hash, persistent across sessions. Byte-identical output the model already has = 13-token reference. A line range of a file the model already has in full (`sed -n '40,80p'`, `sqz_read_file` with `offset`/`limit`) = `§ref:HASH:L40-80§`. A re-read after a small edit = only the changed lines, through the sqz MCP tools (the shell hook sends the edited file again). References are only served while the original is still in context (30-minute window, tunable via `SQZ_REF_TTL_SECS`, reset on compaction).
+5. **JSON pipeline**: strip nulls → drop bookkeeping fields (`__v`, `etag`, request and correlation ids) → flatten → collapse arrays → TOON encoding (lossless compact format)
+6. **Safe mode**: stack traces, credentials and SQL migrations, detected by pattern checks, pass through unchanged when short. Above about 500 characters they can lose low-information segments to entropy truncation (marked `[N low-information segments omitted]`), and because the shell hook never caches them, those segments cannot be expanded. The MCP proxy passes them through unchanged.
 
 Measured quality, including what each stage drops and what it never touches: [quality benchmark](docs/quality-benchmark.md). For the full technical details, see [docs/](docs/README.md).
 

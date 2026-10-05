@@ -50,24 +50,25 @@
 
 sqz compresses command output before it reaches your LLM. Single Rust binary, zero config.
 
-The real win is dedup: when the same file gets read 5 times in a session, sqz sends it once and returns a 13-token reference for every repeat.
+Per-command formatters keep what an agent acts on (the failing test, the assertion, the `file:line`) and drop what it does not. Anything the model already has in context comes back as a short reference instead of the content. Source code passes through unchanged, and so do short stack traces and secrets.
 
 ```
-Without sqz:                    With sqz:
+Without sqz:                              With sqz:
 
-File read #1:  2,000 tokens     File read #1:  ~800 tokens (compressed)
-File read #2:  2,000 tokens     File read #2:  ~13 tokens  (dedup ref)
-File read #3:  2,000 tokens     File read #3:  ~13 tokens  (dedup ref)
-───────────────────────         ───────────────────────
-Total:         6,000 tokens     Total:         ~826 tokens (86% saved)
+cat auth.py (200 lines):   1,300 tokens    1,300 tokens  (source is served in full)
+cargo test (1 failure):      366 tokens      185 tokens  (failure, assertion, file:line)
+sed -n '41,80p' auth.py:     260 tokens       35 tokens  (§ref:…:L41-80§ to the read above)
+git status, unchanged:       166 tokens       37 tokens  (§ref:…§)
+─────────────────────────────────────      ─────────────
+Total:                     2,092 tokens    1,557 tokens  (26% saved, nothing dropped)
 ```
 
 ## Token Savings
 
 > **24.7%** average reduction across 3,003 real compressions ·
-> **92%** saved on repeated file reads ·
-> **86%** on shell/git output ·
-> **13-token** refs for cached content
+> **13-token** refs for output the model already has ·
+> **100%** of agent-critical facts kept in the [quality benchmark](https://github.com/ojuschugh1/sqz/blob/main/docs/quality-benchmark.md) ·
+> **0%** on source code, and on short stack traces and secrets
 
 One developer's week, measured from actual `sqz gain` output:
 
@@ -93,24 +94,24 @@ Single-command compression (measured via `cargo test -p sqz-engine benchmarks`):
 
 | Content | Before | After | Saved |
 |---|---:|---:|---:|
-| Repeated log lines | 148 | 62 | **58%** |
-| Large JSON array | 259 | 142 | **45%** |
+| Repeated log lines | 148 | 39 | **74%** |
+| Large JSON array | 259 | 111 | **57%** |
 | JSON API response | 64 | 53 | **17%** |
 | Git diff | 61 | 54 | **12%** |
-| Prose/docs | 124 | 121 | **2%** |
+| Prose/docs | 124 | 122 | **2%** |
 | Stack trace (safe mode) | 82 | 82 | **0%** |
 
 ### Session-level with dedup
 
-Where the real savings live — the cache sends each file once, repeats cost 13 tokens:
+Anything the model already has in its context comes back as a reference. Measured with the release binary against a throwaway database, using the fixtures in `sqz/tests/quality_bench.rs` and `demo/`, in cl100k tokens of everything the agent sees (the reference plus sqz's one-line note on stderr):
 
-| Scenario | Without sqz | With sqz | Saved |
+| Repeat | Without sqz | With sqz | Saved |
 |---|---:|---:|---:|
-| Same file read 5× | 10,000 | 826 | **92%** |
-| Same JSON response 3× | 192 | 79 | **59%** |
-| Test-fix-test cycle (3 runs) | 15,000 | 5,186 | **65%** |
+| Unchanged `git status` run again | 166 | 37 | **78%** |
+| Lines 41-80 of a 200-line file read earlier | 260 | 35 | **87%** |
+| Same `cargo test` output, nothing changed | 366 | 39 | **89%** |
 
-Single-command compression ranges from 2–58% depending on content. Repeated reads drop to 13 tokens each. Your mileage will vary with how repetitive your tool calls are — agentic sessions with many file re-reads see the biggest wins.
+Single-command compression in the table above ranges from 0% (stack trace) to 74% (repeated log lines) depending on content. Your mileage will vary with how repetitive your tool calls are: sessions with noisy command output and repeated commands see the biggest wins.
 
 ## Install
 
@@ -231,13 +232,14 @@ Claude → git status → [sqz hook rewrites] → compressed output
 ```
 
 What gets compressed:
-- **Shell output** — git, cargo, npm, docker, kubectl, ls, grep, etc.
+- **Shell output**: git, cargo, npm, docker ps, kubectl describe/apply, grep, etc.
 - **JSON** — strips nulls, compact encoding
 - **Logs** — collapses repeated lines
 - **Test output** — shows failures only
 
 What doesn't get compressed:
-- Stack traces, error messages, secrets — routed to safe mode (0% compression)
+- Source code: served in full on first read
+- Short stack traces, credentials and SQL migrations: routed to safe mode and passed through unchanged. Longer ones can lose low-information segments to entropy truncation, and since the shell hook never caches this content, those segments cannot be expanded
 - Your prompts and the AI's responses — controlled by the AI tool, not sqz
 
 ## Supported Tools
@@ -372,10 +374,10 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 ## How Compression Works
 
 1. **Per-command formatters** — `git status` → compact summary, `cargo test` → failures only, `docker ps` → name/image/status table
-2. **Structural summaries** — code files compressed to imports + function signatures + call graph (~70% reduction). The model sees the architecture, not implementation noise.
+2. **Structural summaries**: the engine has an API that reduces a code file to imports, function signatures and a call graph. The hook and MCP paths do not use it; they serve source in full.
 3. **Dedup cache** — SHA-256 content hash, persistent across sessions. Second read = 13-token reference.
-4. **JSON pipeline** — strip nulls → project out debug fields → flatten → collapse arrays → TOON encoding (lossless compact format)
-5. **Safe mode** — stack traces, secrets, migrations detected by entropy analysis and routed through with 0% compression
+4. **JSON pipeline**: strip nulls → drop bookkeeping fields (`__v`, `etag`, request and correlation ids) → flatten → collapse arrays → TOON encoding (lossless compact format)
+5. **Safe mode**: stack traces, credentials and SQL migrations, detected by pattern checks, pass through unchanged when short. Above about 500 characters they can lose low-information segments to entropy truncation (marked `[N low-information segments omitted]`), and because the shell hook never caches them, those segments cannot be expanded. The MCP proxy passes them through unchanged.
 
 For the full technical details, see [docs/](docs/).
 
