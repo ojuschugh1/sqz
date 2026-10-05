@@ -181,6 +181,22 @@ fn test_compress_reports_token_reduction() {
 }
 
 #[test]
+fn test_discover_suggestions_carry_no_figures() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    let json = r#"{"name":"Alice","age":30,"email":"alice@example.com","status":"active","error":null,"debug_info":"verbose debug data here that should be stripped"}"#;
+    let c = run_with_db(&db, &["compress", json], None);
+    assert!(c.status.success(), "{}", stderr(&c));
+
+    let o = run_with_db(&db, &["discover"], None);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("High-value commands"), "{out}");
+    assert!(!out.contains("kubectl"), "{out}");
+    assert!(!out.contains("% reduction"), "{out}");
+}
+
+#[test]
 fn test_compress_stdin() {
     // Large enough that compression clears the net-win gate — tiny inputs
     // now pass through verbatim by design.

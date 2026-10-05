@@ -3007,7 +3007,7 @@ fn cmd_discover(days: u32) {
         println!("  sqz hasn't intercepted any commands yet.");
         println!();
         println!("  To start saving tokens:");
-        println!("    sqz init          # install shell hooks");
+        println!("    sqz init          # configure hooks, MCP and guidance");
         println!("    # then restart your AI tool");
         println!();
         return;
@@ -3058,7 +3058,7 @@ fn cmd_discover(days: u32) {
             );
         }
         println!();
-        println!("  A per-command formatter usually turns these into 60-90% reductions.");
+        println!("  These are where a new per-command formatter would help most.");
         println!("  Recognize one? File it: https://github.com/ojuschugh1/sqz/issues");
         println!();
         return;
@@ -3066,11 +3066,11 @@ fn cmd_discover(days: u32) {
 
     // No measured gaps — fall back to the general adoption suggestions.
     println!("  High-value commands to route through sqz:");
-    println!("    git status/diff/log  → 70-80% reduction");
-    println!("    cargo test/build     → 80-90% reduction (failures only)");
-    println!("    docker ps/images     → 70-80% reduction");
-    println!("    npm test/install     → 60-90% reduction");
-    println!("    kubectl get          → 60-70% reduction");
+    println!("    git status");
+    println!("    cargo test/build");
+    println!("    docker ps");
+    println!("    npm install");
+    println!("    pytest");
     println!();
 }
 
