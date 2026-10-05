@@ -28,7 +28,31 @@ pub fn format_command(cmd: &str, output: &str) -> Option<String> {
     if drops_error_lines(input, &formatted) {
         return None;
     }
+    if drops_protected_lines(output, &formatted) {
+        return None;
+    }
     Some(formatted)
+}
+
+fn drops_protected_lines(output: &str, formatted: &str) -> bool {
+    let protected = crate::confidence_router::protected_lines(output);
+    if protected.is_empty() {
+        return false;
+    }
+    let mut kept: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for line in formatted.lines() {
+        *kept.entry(line).or_default() += 1;
+    }
+    protected.iter().any(|line| {
+        let line = crate::ansi_strip::strip_ansi(line);
+        match kept.get_mut(line.as_str()) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                false
+            }
+            _ => true,
+        }
+    })
 }
 
 /// A formatter may summarize success, but every line reporting a failure
@@ -194,6 +218,19 @@ mod tests {
         let build = "x.cs(1,1): error CS0103: nope\nBuild FAILED.\n";
         assert!(!drops_error_lines(build, "dotnet build: FAILED\n  x.cs(1,1): error CS0103: nope"));
         assert!(drops_error_lines("Build FAILED.\n", "done"));
+    }
+
+    #[test]
+    fn test_formatter_that_drops_a_protected_line_is_not_used() {
+        let trace = "thread 'main' panicked at src/main.rs:3:5:\nstack backtrace:\n   0: rust_begin_unwind\n   1: app::main\n             at ./src/main.rs:3:5";
+        let output = format!("{}\n{trace}\n", "   Compiling app v0.1.0\n".repeat(4));
+        assert!(!drops_protected_lines(&output, &format!("ok (4 crates)\n{trace}")));
+        assert!(drops_protected_lines(&output, &format!("ok (4 crates)\n{}", trace.replace("   1: app::main\n", ""))));
+        assert!(drops_protected_lines(&output, &format!("ok (4 crates)\n{}", trace.replace('\n', "\n  "))));
+        assert!(drops_protected_lines(&format!("{output}\n{trace}\n"), &format!("ok (4 crates)\n{trace}")));
+        let colored = output.replace("thread 'main'", "\x1b[31mthread 'main'").replace(":3:5:\n", ":3:5:\x1b[0m\n");
+        assert!(!drops_protected_lines(&colored, &format!("ok (4 crates)\n{trace}")));
+        assert!(!drops_protected_lines(&output.replace("stack backtrace:", "note: run with `RUST_BACKTRACE=1`"), "ok (4 crates)"));
     }
 
     #[test]

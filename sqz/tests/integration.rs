@@ -514,6 +514,118 @@ fn test_high_risk_output_passes_through_every_path() {
     }
 }
 
+fn rust_backtrace(indent: &str, thread: &str, frames: usize) -> String {
+    let mut s = format!(
+        "{indent}thread '{thread}' panicked at src/ledger.rs:41:9:\n{indent}assertion `left == right` failed\n{indent}stack backtrace:\n{indent}   0: rust_begin_unwind\n{indent}             at /rustc/eeb90cda/library/std/src/panicking.rs:665:5\n"
+    );
+    for i in 1..=frames {
+        s += &format!("{indent}{i:>4}: ledger::step_{i:02}\n{indent}             at ./src/ledger.rs:{}:13\n", 90 + 9 * i);
+    }
+    s + &format!("{indent}note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.\n")
+}
+
+fn cargo_test_run(tests: usize, failing: usize, frames: usize) -> String {
+    let step = tests / failing;
+    let failed: Vec<usize> = (0..tests).filter(|i| i % step == 7 && i / step < failing).collect();
+    let mut s = format!("   Compiling ledger v0.3.1 (/work/ledger)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.42s\n     Running unittests src/lib.rs (target/debug/deps/ledger-5c1a2b3d)\n\nrunning {tests} tests\n");
+    for i in 0..tests {
+        s += &format!("test tests::case_{i:03} ... {}\n", if failed.contains(&i) { "FAILED" } else { "ok" });
+    }
+    s += "\nfailures:\n\n";
+    for i in &failed {
+        s += &format!("---- tests::case_{i:03} stdout ----\n{}\n", rust_backtrace("", &format!("tests::case_{i:03}"), frames));
+    }
+    s += "\nfailures:\n";
+    for i in &failed {
+        s += &format!("    tests::case_{i:03}\n");
+    }
+    s + &format!("\ntest result: FAILED. {} passed; {failing} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s\n\nerror: test failed, to rerun pass `--lib`\n", tests - failing)
+}
+
+fn build_script_panic() -> String {
+    let crates = ["libc", "cfg-if", "itoa", "ryu", "memchr", "once_cell", "log", "bitflags", "smallvec", "serde"];
+    let downloaded: String = crates.iter().map(|c| format!("  Downloaded {c} v1.0.0\n")).collect();
+    let compiling: String = crates.iter().map(|c| format!("   Compiling {c} v1.0.0\n")).collect();
+    format!(
+        "    Updating crates.io index\n{downloaded}  Downloaded 10 crates (1.9 MB) in 0.84s\n{compiling}   Compiling app v0.1.0 (/srv/app)\nerror: failed to run custom build command for `app v0.1.0 (/srv/app)`\n\nCaused by:\n  process didn't exit successfully: `/srv/app/target/debug/build/app-3f1c2d9e/build-script-build` (exit status: 101)\n  --- stderr\n{}",
+        rust_backtrace("  ", "main", 20)
+    )
+}
+
+fn junit_trace(exception: &str, frame: &str) -> String {
+    let frames: String = (0..16)
+        .map(|i| format!("{frame}at com.acme.billing.Step{i:02}.run(Step{i:02}.java:{})\n", 30 + i))
+        .collect();
+    format!("{exception}org.opentest4j.AssertionFailedError: expected: <1042> but was: <987>\n{frames}")
+}
+
+fn gradle_test_run() -> String {
+    let passed: String = (0..60).map(|i| format!("LedgerTest > case{i:02}() PASSED\n")).collect();
+    format!(
+        "> Task :compileJava UP-TO-DATE\n> Task :compileTestJava\n> Task :test\n\n{passed}\nLedgerTest > refundTotals() FAILED\n{}\n61 tests completed, 1 failed\n\n> Task :test FAILED\n\nFAILURE: Build failed with an exception.\n\nBUILD FAILED in 6s\n4 actionable tasks: 2 executed, 2 up-to-date\n",
+        junit_trace("    ", "        ")
+    )
+}
+
+fn mvn_test_run() -> String {
+    let runs: String = (0..30)
+        .map(|i| format!("[INFO] Running com.acme.billing.Case{i:02}Test\n[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.0{i:02} s - in com.acme.billing.Case{i:02}Test\n"))
+        .collect();
+    format!(
+        "[INFO] Scanning for projects...\n[INFO] Building billing 0.3.1\n{runs}[INFO] Running com.acme.billing.LedgerTest\n[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.041 s <<< FAILURE! - in com.acme.billing.LedgerTest\n[ERROR] com.acme.billing.LedgerTest.refundTotals  Time elapsed: 0.012 s  <<< FAILURE!\n{}\n[INFO] Results:\n[ERROR] Failures: \n[ERROR]   LedgerTest.refundTotals:41 expected: <1042> but was: <987>\n[ERROR] Tests run: 123, Failures: 1, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE\n",
+        junit_trace("", "\t")
+    )
+}
+
+#[test]
+fn test_formatters_keep_every_trace_line_or_pass_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    let o = run_with_db(&db, &["compress", "--cmd", "cat ./src/ledger.rs"], Some("pub fn step_01() {}\n"));
+    assert!(o.status.success(), "{}", stderr(&o));
+    let post = |cmd: &str, output: &str| {
+        let payload = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": cmd},
+            "tool_response": {"stdout": output, "stderr": "", "interrupted": false, "isImage": false},
+        });
+        let o = run_with_db(&db, &["hook", "claude-post"], Some(&payload.to_string()));
+        assert!(o.status.success(), "{cmd}: {}", stderr(&o));
+        stdout(&o)
+    };
+    for (cmd, output) in [
+        ("cargo build", build_script_panic()),
+        ("./gradlew test", gradle_test_run()),
+        ("mvn test", mvn_test_run()),
+        ("cargo test", cargo_test_run(200, 20, 3)),
+    ] {
+        assert!(output.len() < 30_000, "{cmd}");
+        let o = run_with_db(&db, &["compress", "--cmd", cmd], Some(&output));
+        assert!(o.status.success(), "{cmd}: {}", stderr(&o));
+        assert_eq!(stdout(&o), output, "{cmd}");
+        assert_eq!(post(cmd, &output), "", "{cmd}: the original result must stay");
+    }
+    for (cmd, output) in [("cargo test", cargo_test_run(300, 1, 2)), ("cargo test", cargo_test_run(200, 3, 8))] {
+        let formatted = sqz_engine::format_command(cmd, &output).expect(cmd);
+        assert!(formatted.len() * 3 < output.len(), "{formatted}");
+        let trace: Vec<&str> = output
+            .split("\n\n")
+            .filter(|p| p.contains("stack backtrace:"))
+            .flat_map(str::lines)
+            .collect();
+        assert!(trace.len() >= 9);
+        for line in &trace {
+            assert!(formatted.lines().any(|l| l == *line), "{line}");
+        }
+        let o = run_with_db(&db, &["compress", "--cmd", cmd], Some(&output));
+        assert!(o.status.success(), "{cmd}: {}", stderr(&o));
+        assert_eq!(stdout(&o), format!("{formatted}\n"));
+        let reply: serde_json::Value = serde_json::from_str(&post(cmd, &output)).unwrap();
+        assert_eq!(reply["hookSpecificOutput"]["updatedToolOutput"]["stdout"], formatted.as_str());
+    }
+}
+
 #[test]
 fn test_json_values_survive_safe_mode() {
     let dir = tempfile::tempdir().unwrap();

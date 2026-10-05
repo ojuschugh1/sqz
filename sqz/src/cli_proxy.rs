@@ -305,14 +305,19 @@ impl CliProxy {
             if tokens_original.saturating_sub(tokens_compressed) >= NET_WIN_MIN_TOKENS {
                 // Persist to L2 cache — but skip if content contains secrets
                 // (confidence router detected high-risk patterns like API keys)
-                if !self.engine.never_store(output) {
+                let never_store = self.engine.never_store(output);
+                if !never_store {
                     if let Ok(compressed) = self.engine.compress(&formatted) {
                         let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
                     }
                 }
                 self.l1_cache.borrow_mut().insert(fast_hash);
                 self.log_compression(cmd, tokens_original, tokens_compressed);
-                return self.apply_context_refs(&formatted);
+                let annotated = self.apply_context_refs(&formatted);
+                let safe = annotated != formatted
+                    && never_store
+                    && self.engine.route_compression_mode(output) == sqz_engine::CompressionMode::Safe;
+                return if safe { formatted } else { annotated };
             }
         }
 

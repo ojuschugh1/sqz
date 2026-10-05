@@ -93,11 +93,7 @@ impl ConfidenceRouter {
     /// A stack trace with its frames IS high-risk.
     fn is_high_risk(&self, content: &str) -> bool {
         let lines: Vec<&str> = content.lines().map(str::trim).collect();
-        lines.iter().enumerate().any(|(i, &line)| {
-            let next = lines.get(i + 1).copied().unwrap_or("");
-            let after = lines.get(i + 2).copied().unwrap_or("");
-            starts_trace(line, next, after) || is_ddl(line) || is_pem(line) || is_secret_line(line)
-        })
+        (0..lines.len()).any(|i| is_risk_line(&lines, i))
     }
 
     fn mentions_high_risk(&self, content: &str) -> bool {
@@ -185,10 +181,37 @@ impl ConfidenceRouter {
     }
 }
 
+pub(crate) fn protected_lines(content: &str) -> Vec<&str> {
+    if content.len() < 100 {
+        return Vec::new();
+    }
+    let raw: Vec<&str> = content.lines().collect();
+    let lines: Vec<&str> = raw.iter().map(|l| l.trim()).collect();
+    let mut protected = Vec::new();
+    let mut start = 0;
+    for end in 0..=lines.len() {
+        if lines.get(end).is_some_and(|l| !l.is_empty()) {
+            continue;
+        }
+        if (start..end).any(|i| is_risk_line(&lines, i)) {
+            protected.extend_from_slice(&raw[start..end]);
+        }
+        start = end + 1;
+    }
+    protected
+}
+
+fn is_risk_line(lines: &[&str], i: usize) -> bool {
+    let line = lines[i];
+    let next = lines.get(i + 1).copied().unwrap_or("");
+    let after = lines.get(i + 2).copied().unwrap_or("");
+    starts_trace(line, next, after) || is_ddl(line) || is_pem(line) || is_secret_line(line)
+}
+
 fn starts_trace(line: &str, next: &str, after: &str) -> bool {
     (line.eq_ignore_ascii_case("stack backtrace:") && next.starts_with("0: "))
         || (line.starts_with("Traceback (most recent call last)") && next.starts_with("File \""))
-        || (["Error", "Exception", "Throwable"].iter().any(|w| line.contains(w)) && is_frame(next))
+        || (is_frame(next) && ["Error", "Exception", "Throwable"].iter().any(|w| line.contains(w)))
         || (is_goroutine_header(line) && next.ends_with(')') && after.contains(".go:"))
 }
 
@@ -432,6 +455,19 @@ mod tests {
             assert_ne!(router.route(&content), CompressionMode::Safe, "{content}");
             assert!(router.never_store(&content), "{content}");
         }
+    }
+
+    #[test]
+    fn protected_lines_are_the_paragraphs_that_route_safe() {
+        let router = ConfidenceRouter::new();
+        let trace = "---- tests::refund stdout ----\nthread 'tests::refund' panicked at src/lib.rs:9:5:\nstack backtrace:\n   0: rust_begin_unwind\n   1: app::tests::refund\n             at ./src/lib.rs:9:5";
+        let output = format!("running 3 tests\ntest tests::a ... ok\ntest tests::b ... ok\n\nfailures:\n\n{trace}\n\n\ntest result: FAILED. 2 passed; 1 failed\n");
+        assert_eq!(protected_lines(&output), trace.lines().collect::<Vec<_>>());
+        assert_eq!(router.route(&output), CompressionMode::Safe);
+        let clean = output.replace("stack backtrace:", "note: run with `RUST_BACKTRACE=1`");
+        assert!(protected_lines(&clean).is_empty());
+        assert_ne!(router.route(&clean), CompressionMode::Safe);
+        assert!(protected_lines("password: hunter2\n").is_empty());
     }
 
     #[test]
