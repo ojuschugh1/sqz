@@ -62,10 +62,10 @@ This matters and most write-ups skip it.
 
 sqz intercepts file reads in two places:
 
-1. **Shell commands.** The PreToolUse hook that `sqz init` installs for Claude Code, Cursor, Windsurf, Cline, Gemini CLI and Copilot CLI rewrites every Bash call to pipe through `sqz compress`. So `cat src/auth.py`, `head -50 config.yaml`, `sed -n '10,40p' main.rs` are all deduplicated.
-2. **The `sqz_read_file` MCP tool.** Registered by `sqz init` alongside the hook.
+1. **Shell commands.** The hook that `sqz init` installs for Claude Code, Gemini CLI and Copilot CLI (and the OpenCode plugin) rewrites shell commands to pipe through `sqz compress`. So `cat src/auth.py`, `head -50 config.yaml`, `sed -n '10,40p' main.rs` are all deduplicated. On Kiro, Codex, Zed, Cursor, Windsurf and Cline there is no such hook, and the agent has to pipe the command itself.
+2. **The `sqz_read_file` MCP tool.** Registered by `sqz init` for Claude Code, Kiro, Codex, Zed and OpenCode; other clients add it by hand.
 
-What sqz cannot intercept is the client's **built-in Read tool**. Claude Code's `Read`, Cursor's file viewer and the equivalents in other clients do not go through Bash, and PostToolUse hooks can observe but not modify their output ([anthropics/claude-code#4544](https://github.com/anthropics/claude-code/issues/4544)). No shell-level tool can compress those reads.
+What sqz does not intercept is the client's **built-in Read tool**. Claude Code's `Read`, Cursor's file viewer and the equivalents in other clients do not go through Bash, and sqz does not rewrite their results. On Claude Code, sqz's PostToolUse hook covers Bash only: it replaces the output of commands the PreToolUse hook left alone.
 
 This is why `sqz init` also writes guidance into the agent's instructions (CLAUDE.md, AGENTS.md, Kiro steering) telling it to prefer `sqz_read_file` for anything over about 2 KB or anything it may read twice, and to keep using the built-in Read for tiny config files and byte-exact needs like lockfiles. The agent's file reads move to the tool that can dedupe them. In practice agents follow this well; when they do not, `sqz stats` shows it as a smaller-than-expected dedup share and you can strengthen the instruction.
 

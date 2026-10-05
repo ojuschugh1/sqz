@@ -159,6 +159,9 @@ so the sqz hook fires in every Claude Code session on this machine. This is
 the common case on first install. Your existing `permissions`, `env`,
 `statusLine`, and unrelated hooks in `~/.claude/settings.json` are
 preserved — sqz merges its entries rather than overwriting.
+The entries are its hooks and two allow rules, `Bash(set -o pipefail)` and
+`Bash(sqz compress --cmd *)`, which cover only the parts its rewrite adds.
+sqz does not approve commands; your own permission rules still decide.
 
 Plain `sqz init` (project scope) is useful when you want sqz active only
 inside one repo.
@@ -210,19 +213,21 @@ Comments in the rest of your file stay put. OpenCode auto-discovers
 the plugin file; no `plugin` array entry needed (adding one causes
 double-loading, see issue #10).
 
-**Other tools** — Claude Code, Cursor, Windsurf, Cline, Gemini CLI,
-and Codex use plain JSON configs without comment support, so the
-automated path is non-destructive there. Use `sqz init --only <tool>`
-for those.
+**Other tools**: Claude Code and Gemini CLI use plain JSON configs
+without comment support, Cursor, Windsurf and Cline get markdown rules
+files, and Codex gets a TOML entry in `~/.codex/config.toml` that keeps
+your comments, so the automated path is non-destructive there. Use
+`sqz init --only <tool>` for those.
 
-That's it. Shell hooks installed, AI tool hooks configured.
+Run `sqz doctor` afterwards to see what was configured for each client
+and which integration tier it is on.
 
 ## How It Works
 
-sqz installs a PreToolUse hook that intercepts bash commands before your AI tool runs them. The output gets compressed transparently — the AI tool never knows.
+On transparent clients (Claude Code, Gemini CLI, Copilot CLI, OpenCode) sqz installs a hook that rewrites shell commands so their output goes through sqz before it reaches the AI tool. On advisory clients the agent is told to pipe output through `sqz compress` or use the sqz MCP tools.
 
 ```
-Claude → git status → [sqz hook rewrites] → compressed output (85% smaller)
+Claude → git status → [sqz hook rewrites] → compressed output
 ```
 
 What gets compressed:
@@ -239,17 +244,23 @@ What doesn't get compressed:
 
 | Tool | Integration | Setup |
 |---|---|---|
-| Claude Code | PreToolUse hook (transparent) | `sqz init` |
-| Cursor | PreToolUse hook (transparent) | `sqz init` |
-| Windsurf | PreToolUse hook (transparent) | `sqz init` |
-| Cline | PreToolUse hook (transparent) | `sqz init` |
+| Claude Code | PreToolUse + PostToolUse hooks + MCP server (transparent) | `sqz init` |
+| Cursor | `.cursor/rules/sqz.mdc` guidance (advisory); MCP server added by hand | `sqz init` |
+| Windsurf | `.windsurf/rules/sqz.md` guidance (advisory); MCP server added by hand | `sqz init` |
+| Cline | `.clinerules` guidance (advisory); MCP server added by hand | `sqz init` |
 | Gemini CLI | BeforeTool hook (transparent) | `sqz init` |
-| Kiro | PreToolUse hook (transparent) | `sqz init` |
-| OpenCode | TypeScript plugin (transparent) | `sqz init` |
+| Kiro | Steering + MCP server (advisory) | `sqz init` |
+| OpenCode | TypeScript plugin + MCP server (transparent) | `sqz init` |
 | VS Code | [Extension](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz) | Install from Marketplace |
 | JetBrains | [Plugin](https://plugins.jetbrains.com/plugin/31240-sqz--context-intelligence/) | Install from Marketplace |
 | Chrome | Browser extension | ChatGPT, Claude.ai, Gemini, Grok, Perplexity |
 | [Firefox](https://addons.mozilla.org/en-US/firefox/addon/sqz-context-compression/) | Browser extension | Same sites |
+
+Transparent clients have a hook that routes shell commands through sqz on
+its own. On advisory clients sqz saves tokens only when the agent pipes
+output through `sqz compress` or calls the sqz MCP tools; the client's
+built-in shell and file tools bypass it. `sqz doctor` shows each client's
+tier.
 
 ## CLI
 
@@ -274,6 +285,7 @@ sqz discover                  # Find missed savings
 sqz resume                    # Re-inject session context after compaction
 sqz vizit                     # Live terminal dashboard (like htop for AI agents)
 sqz hook claude               # Process a PreToolUse hook (Claude Code)
+sqz hook claude-post          # Process a PostToolUse hook (Claude Code)
 sqz hook kiro                 # Legacy; Kiro now uses steering + MCP (sqz init)
 sqz print-opencode-plugin     # Print OpenCode plugin TS for manual install
 sqz proxy --port 8080         # API proxy (compresses full request payloads)

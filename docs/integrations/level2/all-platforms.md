@@ -1,14 +1,14 @@
 # Level 2 Platform Setup — All Platforms
 
-All Level 2 platforms follow the same two-step setup: install shell hooks, then add the MCP config.
+All Level 2 platforms follow the same two-step setup: run `sqz init`, then add the MCP config where `sqz init` does not.
 
-## Step 1 — Install shell hooks (all platforms)
+## Step 1: run `sqz init` (all platforms)
 
 ```sh
 sqz init
 ```
 
-This installs the sqz hook into your shell profile and creates default presets. Supports Bash, Zsh, Fish, and PowerShell.
+This writes a hook or plugin for Claude Code, Gemini CLI, Copilot CLI and OpenCode, agent guidance for Kiro, Codex, Zed, Cursor, Windsurf and Cline, and the MCP entry for Claude Code, Kiro, Codex, Zed and OpenCode. It also adds the `sqz_run` shell helpers to your shell profile and creates default presets. Goose, Aider and Amp are not configured by `sqz init`.
 
 ## Step 2 — Add MCP config
 
@@ -18,7 +18,7 @@ Find your platform below and paste the config into the appropriate file.
 
 ### Claude Code
 
-File: `.claude/mcp_servers.json` (project) or global Claude Code MCP config
+File: `~/.claude.json` (`sqz init` writes this entry for you)
 
 ```json
 {
@@ -128,9 +128,9 @@ File: `opencode.json` (project root) or `~/.config/opencode/opencode.json`
 {
   "mcp": {
     "sqz": {
-      "command": "sqz-mcp",
-      "args": ["--transport", "stdio"],
-      "env": {}
+      "type": "local",
+      "command": ["sqz-mcp", "--transport", "stdio"],
+      "enabled": true
     }
   }
 }
@@ -199,17 +199,13 @@ File: `~/.config/amp/mcp.json`
 After completing both steps, run:
 
 ```sh
-sqz status
+sqz doctor
 ```
 
-You should see:
-- Shell hook: active
-- MCP server: `sqz-mcp` registered
+It lists each client `sqz init` configured with its tier (transparent or advisory), checks the shell helpers, and reports whether anything was compressed recently.
 
 ## What you get on all Level 2 platforms
 
-- CLI output compressed before it reaches the LLM context window
-- MCP tool responses filtered through the 8-stage compression pipeline
-- Semantic tool selection (3-5 relevant tools per task, not the full list)
-- Real-time token budget warnings
-- Cost tracking with per-tool breakdown
+- CLI output compressed before it reaches the LLM context window: on its own on transparent clients, when the agent pipes it through `sqz compress` on advisory ones
+- `sqz_read_file`, `sqz_grep` and `sqz_list_dir`, with repeat results replaced by a short reference
+- Per-command token usage with `sqz stats --breakdown`

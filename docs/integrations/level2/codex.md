@@ -1,6 +1,6 @@
 # Codex CLI
 
-OpenAI's Codex CLI has no per-tool-call hook (the only documented event hook, `notify`, fires at the end of a turn, after the model has already seen the tool output), so sqz cannot rewrite its shell commands transparently the way it does for Claude Code or Cursor. Two things Codex does support reliably carry the integration instead:
+OpenAI's Codex CLI has no per-tool-call hook (the only documented event hook, `notify`, fires at the end of a turn, after the model has already seen the tool output), so sqz cannot rewrite its shell commands transparently the way it does for Claude Code or Gemini CLI. Two things Codex does support reliably carry the integration instead:
 
 1. **`AGENTS.md`** at the project root, read at session start. `sqz init` writes a fenced block that tells Codex to pipe long-running commands through `sqz compress`, when not to, and how to recover from a `§ref:HASH§` token.
 2. **MCP servers** in `~/.codex/config.toml` under `[mcp_servers.<id>]`. `sqz init` merges an `sqz` entry so Codex gets `compress`, `passthrough`, `expand`, `sqz_recall`, `sqz_read_file`, `sqz_grep` and `sqz_list_dir`.
@@ -38,7 +38,7 @@ Then start Codex in the project and ask it to run a noisy command (`npm install`
 
 ## What you get
 
-- Shell output compressed when Codex follows the AGENTS.md guidance and pipes through `sqz compress` (per-command formatters for 45+ commands, dedup references on repeats, safe mode for stack traces and secrets).
+- Shell output compressed when Codex follows the AGENTS.md guidance and pipes through `sqz compress` (per-command formatters, dedup references on repeats, safe mode for stack traces and secrets).
 - Compressed file reads, greps and directory listings through the `sqz_*` MCP tools, with 13-token references on repeat reads and line-level deltas after small edits.
 - `sqz_recall` for recovering exact tool output after Codex compacts its context.
 - `expand` for getting back what a `§ref:HASH§` stands for, and `SQZ_NO_DEDUP=1` / `SQZ_NO_ABBREV=1` as per-command opt-outs, all documented in the block Codex reads.

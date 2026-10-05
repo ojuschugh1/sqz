@@ -2,7 +2,7 @@
 
 Every MCP tool result an agent receives is billed as input tokens, on every turn, for the rest of the session. A verbose `tools/list` alone can cost 10-40k tokens before the agent has done anything. `sqz-mcp` is a compression layer for that traffic: an MCP server with compressed file, grep and directory tools, and a proxy that wraps any other MCP server and compresses what comes back. No LLM calls, deterministic, offline, and every compressed result is recoverable byte-exact.
 
-Install (`sqz init` registers it with every client it finds):
+Install (`sqz init` registers it with Claude Code, Kiro, Codex, Zed and OpenCode; other clients take the config below by hand):
 
 ```sh
 cargo install sqz-cli sqz-mcp      # or: brew install ojuschugh1/sqz/sqz, npm i -g sqz-cli, pipx install sqz
@@ -59,9 +59,9 @@ Flags: `--lazy-tools` (one-sentence descriptions plus `sqz_tool_help`), `--no-de
 
 ## Per-client configuration
 
-`sqz init` writes these for you. Shown here for manual setups and for checking what it did.
+`sqz init` writes these for Claude Code, Kiro, Codex, Zed and OpenCode. Shown here for manual setups and for checking what it did.
 
-Claude Code, Cursor, Windsurf, Cline, Gemini CLI, Copilot CLI, OpenCode and Kiro all take the same JSON shape (Kiro at the user level in `~/.kiro/settings/mcp.json`, applied to every workspace):
+Claude Code (`~/.claude.json`), Kiro (`.kiro/settings/mcp.json`, or `~/.kiro/settings/mcp.json` for every workspace), Cursor, Windsurf, Cline, Gemini CLI and Copilot CLI take the same JSON shape:
 
 ```json
 {
@@ -82,13 +82,15 @@ command = "sqz-mcp"
 args = ["--transport", "stdio"]
 ```
 
+OpenCode uses its own `mcp` object in `opencode.json`: `"sqz": {"type": "local", "command": ["sqz-mcp", "--transport", "stdio"], "enabled": true}`.
+
 Zed uses `context_servers` in `settings.json`; Continue uses `~/.continue/config.json`. Ready-to-paste snippets for every client are in [integrations/](integrations/).
 
 Server flags: `--transport stdio|sse` (default stdio), `--port PORT` (SSE, default 3000), `--preset-dir DIR`. Set `SQZ_DB_PATH` in the server's `env` block to keep the dedup cache and stats per project instead of in `~/.sqz/sessions.db`.
 
 ## How it relates to the shell hook
 
-For Claude Code, Cursor, Windsurf, Cline, Gemini CLI and Copilot CLI, `sqz init` also installs a PreToolUse hook that pipes Bash output through `sqz compress`. The hook covers shell commands; the MCP server covers file reads, greps and listings, which the hook cannot see because those go through the client's built-in tools rather than Bash. Use both. Kiro, Codex and Zed have no hook mechanism, so there `sqz init` installs steering or AGENTS.md guidance that tells the agent to pipe long commands through `sqz compress` and to prefer the `sqz_*` MCP tools.
+For Claude Code, Gemini CLI and Copilot CLI, `sqz init` also installs a hook that rewrites shell commands to pipe their output through `sqz compress`; on OpenCode a plugin does the same. The hook covers shell commands; the MCP server covers file reads, greps and listings, which the hook cannot see because those go through the client's built-in tools rather than Bash. Use both. Kiro, Codex, Zed, Cursor, Windsurf and Cline can't let sqz rewrite tool calls, so there `sqz init` installs steering, AGENTS.md guidance or a rules file that tells the agent to pipe long commands through `sqz compress` and to prefer the `sqz_*` MCP tools.
 
 ## Guarantees
 

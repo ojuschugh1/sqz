@@ -15,20 +15,22 @@ These platforms support MCP natively. Just add the `sqz-mcp` server to their con
 
 See [`level1/`](./level1/) for ready-to-paste config snippets.
 
-### Level 2 — Shell Hook + MCP
+### Level 2: `sqz init` + MCP
 
-These platforms benefit from both the CLI proxy (shell hook) and the MCP server. Run `sqz init` first to install the shell hooks, then add the MCP config.
+These platforms use the CLI proxy (`sqz compress`) and the MCP server. On transparent clients (Claude Code, Gemini CLI, Copilot CLI, OpenCode) `sqz init` installs a hook or plugin that routes shell commands through sqz on its own. On advisory clients (Kiro, Codex, Zed, Cursor, Windsurf, Cline) it writes agent guidance (steering, `AGENTS.md` or a rules file), and sqz saves tokens only when the agent pipes output through `sqz compress` or calls the sqz MCP tools. `sqz init` registers the MCP server for Claude Code, Kiro, Codex, Zed and OpenCode; for the other clients add the MCP config by hand. Goose, Aider and Amp are not configured by `sqz init`; they take the MCP config only.
 
 **Setup (all Level 2 platforms):**
 
 ```sh
-# Step 1: install shell hooks
+# Step 1: write hooks, guidance and MCP entries for the clients sqz init supports
 sqz init
 
-# Step 2: add MCP config (see platform-specific guide below)
+# Step 2: add MCP config where sqz init does not (see platform-specific guide below)
 ```
 
 Platforms: Claude Code, Cursor, Copilot, Windsurf, Gemini CLI, Codex, OpenCode, Goose, Aider, Amp
+
+`sqz doctor` shows what was configured for each client and its tier.
 
 See [`level2/`](./level2/) for platform-specific guides.
 

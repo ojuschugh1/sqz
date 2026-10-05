@@ -1,10 +1,10 @@
 # sqz: context compression for AI coding agents
 
-sqz compresses tool output before it enters the model's context window. It runs as a hook and an MCP server for Claude Code, Cursor, Windsurf, Cline, Gemini CLI, Codex, Kiro, Zed and Copilot CLI, and as a proxy in front of any other MCP server. Deterministic Rust, no LLM calls, offline, and every compressed result can be recovered byte-exact.
+sqz compresses tool output before it enters the model's context window. It runs as a shell hook on Claude Code, Gemini CLI, Copilot CLI and OpenCode, as agent guidance on Kiro, Codex, Zed, Cursor, Windsurf and Cline, as an MCP server, and as a proxy in front of any other MCP server. Deterministic Rust, no LLM calls, offline, and every compressed result can be recovered byte-exact.
 
 ```sh
 cargo install sqz-cli sqz-mcp     # or: brew install ojuschugh1/sqz/sqz · npm i -g sqz-cli · pipx install sqz
-sqz init                          # installs hooks, MCP server and agent guidance for every client it finds
+sqz init                          # installs a hook or agent guidance, and the MCP server where it can, for each client it finds
 ```
 
 Then work as usual. `sqz stats --breakdown` shows what it saved, per command, from your own sessions. `sqz doctor` verifies the whole chain: binary, database, shell hook, which clients are actually routed through sqz, and whether anything was compressed recently.

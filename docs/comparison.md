@@ -14,7 +14,7 @@ If you want numbers, the last section describes how to run any tool through the 
 
 **Limits.** Only sees shell output. File reads that go through a client's built-in Read tool never pass through Bash and are invisible to it ([anthropics/claude-code#4544](https://github.com/anthropics/claude-code/issues/4544)). Coverage is per command: unknown commands fall back to generic heuristics, which is where over-compression risk lives. Quality depends entirely on how strict the formatters are about dropping content.
 
-**Where sqz sits.** This is sqz's PreToolUse hook: 45+ formatters, a generic pipeline that folds repeated log lines and table padding but refuses to touch source code, stack traces or secrets, and a 16-token net-win gate so nothing is ever made larger. Its exit-status trailer protocol preserves the command's real exit code through the pipe, which a naive `cmd | compress` loses.
+**Where sqz sits.** This is sqz's shell hook on Claude Code, Gemini CLI and Copilot CLI (and OpenCode's plugin): per-command formatters, a generic pipeline that folds repeated log lines and table padding but refuses to touch source code, stack traces or secrets, and a 16-token net-win gate so nothing is ever made larger. Its exit-status trailer protocol preserves the command's real exit code through the pipe, which a naive `cmd | compress` loses.
 
 ### 2. Session-level deduplication
 

@@ -1,18 +1,20 @@
 # Cursor
 
-Cursor supports MCP servers and benefits from sqz shell hooks for CLI output compression.
+Cursor is an advisory client: it can't let sqz rewrite tool calls, so sqz saves tokens there only when the agent pipes output through `sqz compress` or calls the sqz MCP tools. Cursor's built-in terminal and file tools bypass sqz.
 
 ## Setup
 
-### 1. Install shell hooks
+### 1. Write the rules file
 
 ```sh
 sqz init
 ```
 
+This writes `.cursor/rules/sqz.mdc` (`alwaysApply: true`), which tells the agent to pipe long command output through `sqz compress` and to prefer the sqz MCP tools.
+
 ### 2. Add MCP config
 
-Open Cursor settings → MCP, or edit `~/.cursor/mcp.json`:
+`sqz init` does not register the MCP server for Cursor. Open Cursor settings → MCP, or edit `~/.cursor/mcp.json`:
 
 ```json
 {
@@ -28,10 +30,9 @@ Open Cursor settings → MCP, or edit `~/.cursor/mcp.json`:
 
 ### 3. Restart Cursor
 
-Cursor picks up MCP server changes on restart.
+Cursor picks up MCP server changes on restart. `sqz doctor` shows Cursor as configured, advisory.
 
 ## What you get
 
-- Compressed CLI output in Cursor's terminal context
-- MCP tool responses filtered through the compression pipeline
-- Token budget warnings in real time
+- CLI output compressed when the agent pipes it through `sqz compress`
+- `sqz_read_file`, `sqz_grep` and `sqz_list_dir`, with repeat results replaced by a short reference

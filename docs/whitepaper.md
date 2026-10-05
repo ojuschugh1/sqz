@@ -8,7 +8,7 @@
 
 ## Abstract
 
-Large Language Model (LLM) coding agents process tens of thousands of tokens per session through tool outputs — shell commands, file reads, test results, and build logs. These outputs enter the context window raw, consuming budget that could serve reasoning. We present **sqz**, a transparent compression layer that operates *before* tool outputs are injected into context. sqz combines domain-specific structural formatters, content-addressed deduplication, adaptive pressure-aware compression, and entropy-based safety routing to achieve a mean 24.7% reduction on first-pass content and up to 92% savings on repeated reads — without requiring model fine-tuning, prompt modification, or changes to the agent's workflow. Measured across 3,003 real compressions in production agentic sessions, sqz saved 178,442 tokens while maintaining full semantic fidelity on downstream tasks.
+Large Language Model (LLM) coding agents process tens of thousands of tokens per session through tool outputs: shell commands, file reads, test results, and build logs. These outputs enter the context window raw, consuming budget that could serve reasoning. We present **sqz**, a compression layer that operates *before* tool outputs are injected into context, transparently on agent frameworks with a rewrite hook and through agent guidance elsewhere. sqz combines domain-specific structural formatters, content-addressed deduplication, adaptive pressure-aware compression, and entropy-based safety routing to achieve a mean 24.7% reduction on first-pass content and up to 92% savings on repeated reads, without requiring model fine-tuning or prompt modification. Measured across 3,003 real compressions in production agentic sessions, sqz saved 178,442 tokens while maintaining full semantic fidelity on downstream tasks.
 
 ---
 
@@ -24,7 +24,7 @@ This distinction is architecturally significant. Pre-injection compression:
 - Preserves prompt cache validity (the message prefix never changes)
 - Operates independently of the LLM provider
 - Requires no model cooperation or fine-tuning
-- Works transparently across all agent frameworks
+- Works transparently on frameworks with a hook that can rewrite tool calls, and through agent guidance plus an MCP server elsewhere
 
 ---
 
@@ -36,7 +36,7 @@ This distinction is architecturally significant. Pre-injection compression:
   <em>Figure 1: sqz system architecture — integration surfaces, 8-stage compression pipeline, and supporting subsystems.</em>
 </p>
 
-sqz operates as a PreToolUse hook — a command that the agent framework invokes before delivering tool output to the model. The system comprises four integration surfaces (CLI Hook, MCP Server, Browser Extension, IDE Extension) feeding into a unified Rust core (`sqz_engine`) with an 8-stage compression pipeline. Three supporting subsystems handle persistence (SHA-256 cache, SQLite FTS5 store, CTX session graph), intelligence (TOON lossless encoder, AST parser supporting 18 languages, model router), and analytics (USD cost tracking, multi-agent budgets, correction log). The entire system operates with zero telemetry, fully offline, and is air-gap capable.
+On frameworks that have one, sqz operates as a PreToolUse hook: a command the agent framework invokes before a shell tool call runs, which rewrites the command so its output passes through sqz before it reaches the model. The system comprises four integration surfaces (CLI Hook, MCP Server, Browser Extension, IDE Extension) feeding into a unified Rust core (`sqz_engine`) with an 8-stage compression pipeline. Three supporting subsystems handle persistence (SHA-256 cache, SQLite FTS5 store, CTX session graph), intelligence (TOON lossless encoder, AST parser supporting 18 languages, model router), and analytics (USD cost tracking, multi-agent budgets, correction log). The entire system operates with zero telemetry, fully offline, and is air-gap capable.
 
 The architecture has five logical stages:
 
@@ -104,23 +104,23 @@ Abbreviation is deliberately **lossy for identifiers**: only the first occurrenc
 
 ## 3. Integration Model
 
-Unlike prompt compression tools that require API interception or model-specific adapters, sqz integrates at the **tool execution boundary** — a universal hook point that exists in every agent framework:
+Unlike prompt compression tools that require API interception or model-specific adapters, sqz integrates at the **tool execution boundary**: through a hook where the framework has one that can rewrite tool calls, and through agent guidance plus an MCP server where it does not:
 
 | Framework | Hook Mechanism |
 |-----------|---------------|
-| Claude Code | PreToolUse JSON hook (Bash and PowerShell tools) |
-| Cursor | .cursor/rules/*.mdc |
-| Windsurf | .windsurfrules guidance |
+| Claude Code | PreToolUse JSON hook (Bash and PowerShell tools) + PostToolUse hook (Bash) + MCP server |
+| Cursor | .cursor/rules/sqz.mdc guidance |
+| Windsurf | .windsurf/rules/sqz.md guidance |
 | Cline / Roo Code | .clinerules guidance |
-| Kiro | .kiro/hooks/ JSON schema |
+| Kiro | .kiro/steering guidance + .kiro/settings/mcp.json MCP entry |
 | Gemini CLI | BeforeTool hook |
-| OpenCode | TypeScript plugin |
+| OpenCode | TypeScript plugin + opencode.json MCP entry |
 | Codex | AGENTS.md guidance + config.toml MCP entry |
 | Zed | .rules/AGENTS.md instructions + context_servers MCP entry |
 | Copilot CLI | preToolUse hook |
 | Any MCP server | `sqz-mcp proxy` wrapper (since 1.6.0) |
 
-A single `sqz init` command detects installed frameworks and configures the appropriate hooks. The compression is transparent — the agent receives compressed output without knowing sqz exists.
+A single `sqz init` command detects installed frameworks and configures each one. On Claude Code, Gemini CLI, Copilot CLI and OpenCode the integration is transparent: the hook or plugin rewrites shell commands, and the agent receives compressed output without doing anything. On Kiro, Codex, Zed, Cursor, Windsurf and Cline it is advisory: sqz saves tokens only when the agent pipes output through `sqz compress` or calls the sqz MCP tools, and the client's built-in shell and file tools bypass it. `sqz doctor` reports each client's tier.
 
 Since 1.6.0 the MCP proxy provides a framework-independent integration surface: `sqz-mcp proxy -- <upstream command>` wraps any stdio MCP server, compresses its tool results through the full pipeline (dedup references on repeats, safe mode for stack traces and secrets, error results untouched), optionally compacts verbose tool descriptions in `tools/list`, and injects an `sqz_expand` tool so the agent can recover any original byte-exact. The client sees a normal MCP server, so this works with every MCP client regardless of whether it supports hooks.
 
@@ -190,7 +190,7 @@ Future directions include structural dedup across serializations, integration wi
 
 ## 7. Conclusion
 
-sqz demonstrates that significant token savings (24.7% average, 92% on dedup hits) are achievable through pre-injection structural compression — without model fine-tuning, additional LLM calls, or changes to the agent workflow. By operating at the tool output boundary, sqz is framework-agnostic, cache-friendly, and transparent. The combination of domain-specific formatters, content deduplication, and adaptive pressure-awareness produces a practical system that reduces costs and improves session longevity for real-world agentic coding workflows.
+sqz demonstrates that significant token savings (24.7% average, 92% on dedup hits) are achievable through pre-injection structural compression, without model fine-tuning or additional LLM calls. By operating at the tool output boundary, sqz is framework-agnostic, cache-friendly, and transparent on frameworks with a rewrite hook. The combination of domain-specific formatters, content deduplication, and adaptive pressure-awareness produces a practical system that reduces costs and improves session longevity for real-world agentic coding workflows.
 
 ---
 

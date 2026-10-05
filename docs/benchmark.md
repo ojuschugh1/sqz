@@ -26,7 +26,7 @@ sqz wins because of three features the wrapper doesn't have:
 - **Dedup cache**: if the same content is read again without changes, sqz returns a 13-token reference. Delta encoding handles the near-miss case where content changed slightly.
 - **Predictive pre-cache**: when auth.rs was read, sqz parsed its `use` imports and pre-cached db.rs. When the LLM reads db.rs, it's an instant dedup hit (13 tokens).
 
-**Note:** These dedup savings apply when files are read through Bash commands (`cat`, `head`, etc.) intercepted by the PreToolUse hook. Claude Code's built-in Read tool bypasses shell hooks — neither tool can compress its output. PostToolUse hooks can view but not modify tool output ([confirmed limitation](https://github.com/anthropics/claude-code/issues/4544)). The MCP server (`sqz-mcp`) provides compressed file reading as an alternative tool that Claude can use instead of the built-in Read.
+**Note:** These dedup savings apply when files are read through Bash commands (`cat`, `head`, etc.) that the hook routes through sqz. Claude Code's built-in Read tool does not go through Bash, and sqz does not rewrite its results. For Bash, sqz's PostToolUse hook replaces the output of commands the PreToolUse hook left alone. The MCP server (`sqz-mcp`) provides compressed file reading as an alternative tool that Claude can use instead of the built-in Read.
 
 ## Scenario 2: Test-Fix-Test Cycle
 
