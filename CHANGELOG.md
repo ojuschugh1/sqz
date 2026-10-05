@@ -48,6 +48,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **sqz adds fewer tokens to every model request.** The sqz-mcp tool
+  and parameter descriptions went from 4,907 to 1,871 characters, so
+  `tools/list` dropped from 8,705 to 5,645 bytes (about 2,177 to 1,412
+  tokens by doctor's estimate), and `§ref:HASH§` is explained once, on
+  `expand`. The guidance `sqz init` writes for Kiro, Codex, Zed,
+  Cursor, Windsurf and Cline is one shared text of under 1 KB; the
+  files it goes into went from 13,337 to 5,282 bytes together. It keeps
+  the pipe with the absolute binary path, what not to pipe, which MCP
+  tools to prefer, how to read and expand `§ref` tokens and `«A1»`
+  symbols, and the opt-out variables, and drops the rest, including
+  every percentage. Codex and Zed share one `AGENTS.md` block
+  (`sqz-guidance`) instead of writing one each.
+- **Older sqz guidance is upgraded in place.** `sqz doctor` flags
+  `AGENTS.md` and `.rules` blocks, Kiro steering, and Cursor, Windsurf
+  and Cline rules written by an older sqz; `--fix` rewrites them
+  keeping the binary path they point at, and `sqz init` rewrites them
+  with its own. The old `sqz-agents-guidance` and `sqz-zed-guidance`
+  blocks become one block where the first of them was. Text outside the
+  sqz markers stays as it is, but anything you added inside an old
+  block, or inside the text an older sqz wrote at the top of
+  `.clinerules`, is replaced, so move it below first. Cline's rules are
+  now the same marked block, so your own rules in `.clinerules` survive
+  later upgrades and `sqz uninstall`, and the old text in
+  `.windsurfrules` is removed without the rules that follow it. Files
+  sqz did not write are never touched. Doctor's overhead report counts
+  the shared block once, on a line for each file Codex and Zed read.
 - **`sqz doctor` shows the integration tier of every client.**
   Transparent clients (Claude Code, Copilot CLI, Gemini CLI, OpenCode)
   have a hook that routes shell commands through sqz on its own.
@@ -278,6 +304,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   savings were picked and numbered (`«A1»`, `«A2»`) in hash-map order,
   so the same output could come back different from one run to the next.
   Ties are now broken on the text itself.
+- **The opt-out examples in the guidance never reached sqz.** They put
+  the variable before the first command,
+  `SQZ_NO_DEDUP=1 git log | sqz compress`, which sets it for `git log`
+  only. The guidance and the `CLAUDE.md` block now put it right before
+  `sqz compress`.
 
 ## [1.9.0] — 2026-09-23
 
