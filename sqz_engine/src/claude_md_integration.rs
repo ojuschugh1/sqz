@@ -147,14 +147,14 @@ content it points at, resolve it. Three equivalent ways:
 - Shell: `{sqz_path} expand a1b2c3d4` (or paste the whole token
   `{sqz_path} expand §ref:a1b2c3d4§`).
 - MCP tool: call `expand` with `{{ \"prefix\": \"a1b2c3d4\" }}`.
-- To get uncompressed output for one command: prefix it with
-  `SQZ_NO_DEDUP=1` (e.g. `SQZ_NO_DEDUP=1 git log | sqz compress`).
+- To get uncompressed output for one command: put `SQZ_NO_DEDUP=1`
+  right before `sqz compress` (e.g. `git log | SQZ_NO_DEDUP=1 sqz compress`).
 
 If you see a `«A1»` abbreviation symbol where a SHA, path, or URL
 should be, n-gram phrase abbreviation collapsed a repeated phrase and
 kept only its first occurrence. Disable it for that command with
 `SQZ_NO_ABBREV=1` (or the `--no-abbrev` flag):
-`SQZ_NO_ABBREV=1 git log | sqz compress`.
+`git log | SQZ_NO_ABBREV=1 sqz compress`.
 
 If the compressed output is actively making the task harder (looping
 on refs, small retries replacing one big read), call the `passthrough`
