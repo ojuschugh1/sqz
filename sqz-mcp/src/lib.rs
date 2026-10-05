@@ -1576,7 +1576,7 @@ struct Listing {
 /// Walk `root` looking for files containing `pattern`. Appends one line
 /// per match to `out` in `path:lineno:text` format (ripgrep-style).
 ///
-/// Stops after `max_matches` hits or `max_bytes` of output — there's no
+/// Stops after `max_matches` hits or `max_bytes` of output. There's no
 /// point flooding the agent with thousands of hits, and if they really need
 /// that many they should use the native ripgrep via Bash (which gets hooked
 /// and compressed anyway).

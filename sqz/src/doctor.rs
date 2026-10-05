@@ -4,14 +4,14 @@
 //! week later: "is sqz actually doing anything?" It checks four layers
 //! and reports the gaps between them:
 //!
-//! 1. **Installation** — binary version, database, shell helpers.
-//! 2. **Wiring** — per-client sqz configs (project and user level), and
+//! 1. **Installation**: binary version, database, shell helpers.
+//! 2. **Wiring**: per-client sqz configs (project and user level), and
 //!    which tier each integration is in. A transparent client routes shell
 //!    output through sqz on its own; an advisory one only saves tokens
 //!    when the agent chooses to call sqz.
-//! 3. **Overhead** — what sqz itself adds to every model request (MCP tool
+//! 3. **Overhead**: what sqz itself adds to every model request (MCP tool
 //!    definitions, guidance files), including duplicate and stale copies.
-//! 4. **Activity** — compressions logged recently, and log rows a past
+//! 4. **Activity**: compressions logged recently, and log rows a past
 //!    bug wrote wrongly.
 //!
 //! Client detection is best-effort by footprint (config dir or binary on
