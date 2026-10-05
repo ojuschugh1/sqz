@@ -1,9 +1,10 @@
 use super::truncate::{CAP_ERRORS, CAP_WARNINGS};
+use crate::ansi_strip::strip_ansi;
 
-pub fn format_cargo(subcmd: Option<&str>, output: &str) -> Option<String> {
+pub fn format_cargo(subcmd: Option<&str>, output: &str, raw: &str) -> Option<String> {
     match subcmd? {
-        "test" | "nextest" => Some(format_cargo_test(output)),
-        "build" | "check" => Some(format_cargo_build(output)),
+        "test" | "nextest" => Some(format_cargo_test(output, raw)),
+        "build" | "check" => Some(format_cargo_build(output, raw)),
         "clippy" => Some(format_cargo_clippy(output)),
         _ => None,
     }
@@ -28,8 +29,15 @@ struct BuildBlocks {
 
 /// Walk the build output once: count compiled crates, gather each error/warning
 /// diagnostic into its own block, and capture the trailing "Finished" line.
-fn collect_build_blocks(output: &str) -> BuildBlocks {
-    let mut compiled = 0;
+fn collect_build_blocks(output: &str, raw: &str) -> BuildBlocks {
+    let compiled = strip_ansi(raw)
+        .lines()
+        .filter_map(|l| l.rsplit('\r').find(|s| !s.trim().is_empty()))
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("Compiling") || t.starts_with("Checking")
+        })
+        .count();
     let mut error_blocks: Vec<Vec<String>> = Vec::new();
     let mut warning_count = 0;
     let mut current_block: Vec<String> = Vec::new();
@@ -40,15 +48,6 @@ fn collect_build_blocks(output: &str) -> BuildBlocks {
         let trimmed = line.trim_start();
 
         if is_noise_line(line) {
-            compiled += 1;
-            continue;
-        }
-        if let Some(n) = trimmed
-            .strip_prefix("...+")
-            .and_then(|rest| rest.strip_suffix(" more downloads"))
-            .and_then(|n| n.parse::<usize>().ok())
-        {
-            compiled += n;
             continue;
         }
         if trimmed.starts_with("Finished") {
@@ -96,8 +95,8 @@ fn collect_build_blocks(output: &str) -> BuildBlocks {
     }
 }
 
-fn format_cargo_build(output: &str) -> String {
-    let blocks = collect_build_blocks(output);
+fn format_cargo_build(output: &str, raw: &str) -> String {
+    let blocks = collect_build_blocks(output, raw);
 
     let error_count = blocks
         .error_blocks
@@ -130,7 +129,7 @@ fn format_cargo_build(output: &str) -> String {
     result.trim().to_string()
 }
 
-fn format_cargo_test(output: &str) -> String {
+fn format_cargo_test(output: &str, raw: &str) -> String {
     let mut failures: Vec<String> = Vec::new();
     let mut summary_lines: Vec<String> = Vec::new();
     let mut in_failure_section = false;
@@ -210,7 +209,7 @@ fn format_cargo_test(output: &str) -> String {
             t.starts_with("error[") || t.starts_with("error:")
         });
         if has_compile_errors {
-            return format_cargo_build(output);
+            return format_cargo_build(output, raw);
         }
 
         return output.to_string();
@@ -415,7 +414,7 @@ mod tests {
     #[test]
     fn test_cargo_build_success() {
         let output = "   Compiling sqz v1.0.0\n   Compiling sqz-engine v1.0.0\n    Finished dev [unoptimized + debuginfo] target(s) in 2.5s\n";
-        let result = format_cargo_build(output);
+        let result = format_cargo_build(output, output);
         assert!(result.contains("2 crates compiled"));
         assert!(result.contains("Finished"));
     }
@@ -423,7 +422,7 @@ mod tests {
     #[test]
     fn test_cargo_build_errors() {
         let output = "   Compiling sqz v1.0.0\nerror[E0308]: mismatched types\n  --> src/main.rs:10:5\n  |\n10 |     foo()\n  |     ^^^^^ expected u32, found &str\n\nerror: aborting due to 1 previous error\n";
-        let result = format_cargo_build(output);
+        let result = format_cargo_build(output, output);
         assert!(result.contains("1 errors"));
         assert!(result.contains("E0308"));
         assert!(result.contains("src/main.rs:10:5"));
@@ -434,18 +433,23 @@ mod tests {
     #[test]
     fn test_cargo_build_counts_every_crate() {
         let compiling: String = (0..30).map(|i| format!("   Compiling crate_{i} v0.1.0\n")).collect();
-        let ok = format!("{compiling}    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.2s\n");
-        let result = crate::format_command("cargo build", &ok).unwrap();
-        assert!(result.starts_with("ok (30 crates compiled)"), "{result}");
-        let failed = format!("{compiling}error[E0308]: mismatched types\n  --> src/main.rs:10:5\n\nerror: could not compile `app` (bin \"app\") due to 1 previous error\n");
-        let result = crate::format_command("cargo build", &failed).unwrap();
-        assert!(result.starts_with("cargo build: 1 errors, 0 warnings (30 crates)"), "{result}");
+        let downloads: String = (0..10).map(|i| format!("  Downloaded crate_{i} v0.1.0\n")).collect();
+        let fresh = format!("    Updating crates.io index\n{downloads}  Downloaded 10 crates (1.9 MB) in 0.84s\n{compiling}");
+        let colored = compiling.replace("Compiling", "\x1b[1m\x1b[32mCompiling\x1b[0m");
+        for log in [compiling, fresh, colored] {
+            let ok = format!("{log}    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.2s\n");
+            let result = crate::format_command("cargo build", &ok).unwrap();
+            assert!(result.starts_with("ok (30 crates compiled)"), "{result}");
+            let failed = format!("{log}error[E0308]: mismatched types\n  --> src/main.rs:10:5\n\nerror: could not compile `app` (bin \"app\") due to 1 previous error\n");
+            let result = crate::format_command("cargo build", &failed).unwrap();
+            assert!(result.starts_with("cargo build: 1 errors, 0 warnings (30 crates)"), "{result}");
+        }
     }
 
     #[test]
     fn test_cargo_test_all_pass() {
         let output = "   Compiling sqz v1.0.0\n    Finished test [unoptimized + debuginfo] target(s)\n     Running unittests src/lib.rs\n\nrunning 15 tests\ntest a ... ok\ntest b ... ok\ntest result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
-        let result = format_cargo_test(output);
+        let result = format_cargo_test(output, output);
         assert!(result.contains("15 passed"));
         assert!(!result.contains("Compiling"));
         assert!(!result.contains("FAILURES"));
@@ -454,7 +458,7 @@ mod tests {
     #[test]
     fn test_cargo_test_multi_suite() {
         let output = "running 5 tests\ntest a ... ok\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n\nrunning 3 tests\ntest b ... ok\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
-        let result = format_cargo_test(output);
+        let result = format_cargo_test(output, output);
         assert!(result.contains("8 passed"));
         assert!(result.contains("2 suites"));
     }
@@ -462,7 +466,7 @@ mod tests {
     #[test]
     fn test_cargo_test_with_failure() {
         let output = "running 3 tests\ntest a ... ok\ntest b ... FAILED\ntest c ... ok\n\nfailures:\n\n---- b stdout ----\nthread 'b' panicked at 'assertion failed'\nnote: run with RUST_BACKTRACE=1\n\nfailures:\n    b\n\ntest result: FAILED. 2 passed; 1 failed; 0 ignored\n";
-        let result = format_cargo_test(output);
+        let result = format_cargo_test(output, output);
         assert!(result.contains("FAILURES (1):"));
         assert!(result.contains("assertion failed"));
     }

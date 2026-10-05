@@ -24,7 +24,7 @@ pub fn format_command(cmd: &str, output: &str) -> Option<String> {
     let cleaned = preprocess::clean(output);
     let input = if cleaned.len() < output.len() { &cleaned } else { output };
 
-    let formatted = dispatch(cmd, input)?;
+    let formatted = dispatch(cmd, input, output)?;
     if drops_error_lines(input, &formatted) {
         return None;
     }
@@ -110,7 +110,7 @@ fn is_error_line(line: &str) -> bool {
     starts || CONTAINS.iter().any(|p| t.contains(p))
 }
 
-fn dispatch(cmd: &str, output: &str) -> Option<String> {
+fn dispatch(cmd: &str, output: &str, raw: &str) -> Option<String> {
     let mut parts: Vec<&str> = cmd.split_whitespace().collect();
 
     // `bundle exec rspec ...` / `bin/rails ...` — unwrap the bundler prefix so
@@ -128,7 +128,7 @@ fn dispatch(cmd: &str, output: &str) -> Option<String> {
         "git" => git::format_git(parts.get(1).copied(), output),
 
         // Rust
-        "cargo" => cargo::format_cargo(parts.get(1).copied(), output),
+        "cargo" => cargo::format_cargo(parts.get(1).copied(), output, raw),
 
         // JavaScript/TypeScript
         "npm" | "npx" => npm::format_npm(parts.get(1).copied(), output),
