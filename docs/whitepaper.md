@@ -8,7 +8,7 @@
 
 ## Abstract
 
-Large Language Model (LLM) coding agents process tens of thousands of tokens per session through tool outputs: shell commands, file reads, test results, and build logs. These outputs enter the context window raw, consuming budget that could serve reasoning. We present **sqz**, a compression layer that operates *before* tool outputs are injected into context, transparently on agent frameworks with a rewrite hook and through agent guidance elsewhere. sqz combines domain-specific structural formatters, content-addressed deduplication, adaptive pressure-aware compression, and entropy-based safety routing to achieve a mean 24.7% reduction on first-pass content and up to 92% savings on repeated reads, without requiring model fine-tuning or prompt modification. Measured across 3,003 real compressions in production agentic sessions, sqz saved 178,442 tokens while maintaining full semantic fidelity on downstream tasks.
+Large Language Model (LLM) coding agents process tens of thousands of tokens per session through tool outputs: shell commands, file reads, test results, and build logs. These outputs enter the context window raw, consuming budget that could serve reasoning. We present **sqz**, a compression layer that operates *before* tool outputs are injected into context, transparently on agent frameworks with a rewrite hook and through agent guidance elsewhere. sqz combines domain-specific structural formatters, content-addressed deduplication, adaptive pressure-aware compression, and pattern-based safety routing to achieve a mean 24.7% reduction on first-pass content and up to 92% savings on repeated reads, without requiring model fine-tuning or prompt modification. Measured across 3,003 real compressions in production agentic sessions, sqz saved 178,442 tokens, and in its quality benchmark it kept all 359 critical facts across 25 fixtures.
 
 ---
 
@@ -42,12 +42,12 @@ The architecture has five logical stages:
 
 ### 2.1 Domain-Specific Structural Formatters
 
-Rather than treating all text uniformly (as token-level compression methods do), sqz recognizes 90+ CLI output patterns and applies format-aware transformations:
+Rather than treating all text uniformly (as token-level compression methods do), sqz has per-command formatters (git, cargo, npm and its relatives, pytest, go, gradle, maven, dotnet, docker, kubectl describe/apply, terraform, grep and others) and applies format-aware transformations:
 
 - **Test output** → failures only (passing tests stripped)
 - **Git status** → compact change summary
-- **JSON responses** → null-stripped, key-projected, array-collapsed
-- **Docker/kubectl** → name/image/status table extraction
+- **JSON responses** → nulls stripped, bookkeeping fields (`__v`, `etag`, request and correlation ids) dropped, arrays of objects written as lossless TOON tables
+- **Docker** → compact `docker ps` and `docker images` tables; `kubectl get` and `logs` go through the generic pipeline
 - **Build logs** → error-focused summarization
 
 This exploits the observation from CodeComp [7] that source code and structured outputs have formal semantics governed by structure rather than surface-level co-occurrence. A `cargo test` output of 500 lines can be faithfully represented by 30 lines containing only the failures and their locations.
@@ -60,11 +60,11 @@ This is analogous to the demand paging concept described in [8], where context c
 
 A reference is only emitted while the content it points at is plausibly still in the model's context: refs expire after a freshness window (30 minutes of wall-clock time by default) and are invalidated eagerly when the agent framework compacts its history, at which point the content is re-sent in full. As of 1.4.0, entries can also be **pinned** (`sqz pin`), exempting them from the freshness check — useful for stable knowledge-base content (project docs, system prompts) that multiple agents sharing the session store reference across days.
 
-**Near-duplicate deltas.** A file re-read after a small edit is not byte-identical, so exact hashing misses it. sqz detects near-duplicates of cached entries and emits a line-level delta — only the changed lines, plus a reference to the version the model already has. Since 1.5.0 a session-lifetime MinHash LSH index selects delta candidates, so a file re-read late in a long session still matches its earlier version rather than only the most recent cache entries.
+**Near-duplicate deltas.** A file re-read after a small edit is not byte-identical, so exact hashing misses it. sqz detects near-duplicates of cached entries and emits a line-level delta: only the changed lines, plus a reference to the version the model already has. Deltas come from the sqz MCP tools and the MCP proxy; the shell hook path has none, so a file re-read with `cat` after an edit is sent in full. Since 1.5.0 a session-lifetime MinHash LSH index selects delta candidates, so a file re-read late in a long session still matches its earlier version rather than only the most recent cache entries.
 
 **Ranged (slice) references, 1.8.0.** A field measurement over one user's real Claude Code sessions (measurement script published [15]; counters reset at each compaction boundary, edit/write confirmations excluded) found that byte-identical repeats were rare (0.3% of result characters; 1 in 542 file reads) but 8.4% of file reads were a *line range* of a file already read in full — `sed -n '41,80p'` after `cat`, or a ranged read tool call. Exact hashing misses these entirely, and near-duplicate matching does too: a 40-line slice of a 500-line file has a Jaccard similarity near 0.1. sqz therefore checks *containment*: when new output is, on line boundaries, a slice of a fresh full read whose served bytes also contain the slice, it emits `§ref:HASH:L41-80§` instead of the lines. The second condition matters — the slice must appear in what was actually delivered to the model, so a ranged reference can never point at lines a lossy stage dropped. Guards: at least 160 bytes and two lines, and the same freshness and compaction rules as whole-content refs. The reference is not a summary; it is a pointer to bytes the model already holds, and `sqz expand 'HASH:L41-80'` recovers exactly those lines on demand.
 
-Measured empirically: dedup accounts for 92% reduction on repeat reads, compared to 21-58% from first-pass structural compression.
+Measured empirically: dedup accounts for 92% reduction on repeat reads, compared to 11.5-73.6% from first-pass compression on the engine benchmark inputs (`benchmarks.rs`, excluding the stack trace and prose rows).
 
 ### 2.3 Adaptive Pressure-Aware Compression
 
@@ -76,15 +76,15 @@ Inspired by research on adaptive compression rate allocation [9, 10], sqz dynami
 
 This implements the core finding from ACC-RAG [10] that static compression rates are suboptimal: early in a session detail preservation matters more, while late in a session token scarcity demands harder compression.
 
-### 2.4 Entropy-Based Safety Routing
+### 2.4 Pattern-Based Safety Routing
 
 Not all content should be compressed. Stack traces contain exact line numbers that compression could corrupt. Configuration files with credentials should not be parsed and reformatted. Migration SQL must be preserved byte-exact.
 
-sqz uses Shannon entropy analysis combined with pattern detection to classify content into risk tiers:
+sqz classifies content into risk tiers with pattern checks, plus an entropy measure that separates boilerplate from normal content:
 
-- **Safe mode** (0% compression): Stack traces, private keys, credentials, database migrations
-- **Default mode** (20-40% compression): Normal code, git output, build logs  
-- **Aggressive mode** (40-60% compression): Repetitive logs, verbose JSON, boilerplate
+- **Safe mode**: stack traces with frame markers (a Rust `stack backtrace:`, `at` frames), PEM blocks, key and password assignments, SQL DDL. Short inputs pass through unchanged. Above about 500 characters the generic entropy truncation still runs and can drop low-information segments, and because high-risk content is never cached on the shell hook path, those segments cannot be expanded. The MCP proxy passes safe-mode content through unchanged.
+- **Default mode**: Normal code, git output, build logs
+- **Aggressive mode**: content with very low average entropy, such as repetitive logs and boilerplate; it currently runs the same pipeline as default mode
 
 This addresses the concern raised in [11] that compression methods which rely on generic importance metrics can inadvertently remove functionally critical tokens.
 
@@ -143,23 +143,26 @@ Measured across a real developer's week of agentic coding (3,003 compressions):
 
 ### 4.2 Per-Category Performance
 
+The first four rows are repeats through the shell hook path (`sqz compress --cmd`, release binary, fresh database), counted in cl100k tokens of everything the agent sees: the reference plus sqz's one-line note on stderr. The other rows are single compressions from `cargo test -p sqz-engine benchmarks`, counted in chars/4.
+
 | Content Type | Before | After | Reduction |
 |---|---:|---:|---:|
-| Repeated file reads (5×) | 10,000 | 826 | 92% |
-| Test-fix-test cycle (3 runs) | 15,000 | 5,186 | 65% |
-| Repeated JSON response (3×) | 192 | 79 | 59% |
-| Repeated log lines | 148 | 62 | 58% |
-| Large JSON array | 259 | 142 | 45% |
+| Same `cargo test` output again | 366 | 39 | 89% |
+| Lines 41-80 of a 200-line file read earlier | 260 | 35 | 87% |
+| Unchanged `git status` again | 166 | 37 | 78% |
+| Same JSON API response again | 165 | 42 | 75% |
+| Repeated log lines | 148 | 39 | 74% |
+| Large JSON array | 259 | 111 | 57% |
 | Git diff | 61 | 54 | 12% |
 | Stack trace (safe mode) | 82 | 82 | 0% |
 
 ### 4.3 Prompt Cache Impact
 
-Because sqz operates pre-injection (before content enters the context), the message prefix used for prompt caching remains unchanged. This is a critical advantage over post-hoc pruning methods which modify history and invalidate cached prefixes. Empirically, prompt cache hit rates remain at baseline (90%+) with sqz, compared to approximately 85% with history-modifying approaches [5].
+Because sqz operates pre-injection (before content enters the context), the message prefix used for prompt caching remains unchanged. This is a critical advantage over post-hoc pruning methods which modify history and invalidate cached prefixes.
 
 ### 4.4 Latency
 
-sqz is implemented as a single Rust binary with zero runtime dependencies. Compression latency is sub-millisecond for typical outputs (measured p99 < 5ms for outputs up to 100KB). The SQLite dedup lookup adds approximately 0.1ms per call. Total overhead is negligible compared to LLM inference latency.
+sqz is implemented as a single Rust binary with zero runtime dependencies. On an Apple M4 Pro, a `sqz compress` call takes 39.1-43.2 ms p50 end to end for outputs up to 10 KB (p99 43.1-52.7 ms), and most of that is fixed cost: about 13 ms of process start (`sqz --version` p50 12.9 ms) and about 22-25 ms to build the cl100k tokenizer. Warm and in process, `SqzEngine::compress` has a p99 under 3.1 ms up to 10 KB and 18.4-26.3 ms at 100 KB, except JSON at 76.5 ms. End to end, a call takes 76.0-85.5 ms p50 at 100 KB and 329.8-525.2 ms p50 at 1 MB, depending on content.
 
 ---
 
@@ -181,7 +184,7 @@ sqz is implemented as a single Rust binary with zero runtime dependencies. Compr
 
 - **Token counting**: the compression pipeline counts tokens with real BPE tokenizers (tiktoken `o200k_base` for OpenAI models — exact; `cl100k_base` as a ~5%-variance approximation for Claude and Gemini; chars/4 for unknown local models). The dedup fast path and MCP-side estimates still use the chars/4 heuristic for latency, so aggregate savings figures mix exact and approximate counts.
 - **JSONC round-trip**: For tools using JSON-with-comments configs, programmatic merging cannot preserve comments. sqz warns before merging OpenCode configs and refuses to rewrite Zed settings files entirely, printing a copy-paste snippet instead — safe, but it leaves one manual step for those users.
-- **No semantic compression**: sqz does not use an LLM to summarize content. This is by design (zero latency, zero cost, deterministic), but means it cannot capture semantic redundancy across structurally different outputs.
+- **No semantic compression**: sqz does not use an LLM to summarize content. This is by design (no model call, zero cost, deterministic), but means it cannot capture semantic redundancy across structurally different outputs.
 - **Dedup granularity**: exact whole-content hashing, line-aligned slice containment (1.8.0), and near-duplicate deltas via MinHash LSH [14] (1.5.0) cover identical, ranged, and lightly-edited re-reads. Overlaps that are not line-aligned, and structural duplicates across different serializations (the same record fetched once as JSON and once as a table), still re-send in full.
 
 Future directions include structural dedup across serializations, integration with KV cache compression methods [7], learned formatters that adapt to project-specific output patterns, and an end-to-end evaluation measuring agent task success with and without compression rather than token counts alone.
