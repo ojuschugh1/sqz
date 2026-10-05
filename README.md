@@ -517,9 +517,12 @@ sqz's design already avoids the failure modes that study measured:
 compression is deterministic and query-agnostic (never invalidates provider
 prompt caches), only new tool output is touched (history is never rewritten),
 commands that follow output, run a server or background a job are left alone
-(on Claude Code outside bypass mode, so are pipelines, loops and heredocs),
-lists and pipelines skip the per-command formatters, and the 16-token net-win
-gate skips compressions that wouldn't pay for their own markers.
+(on Claude Code outside bypass mode, the PreToolUse hook leaves pipelines,
+loops and heredocs as written and the PostToolUse hook compresses their
+output after a successful run), grouped lists and pipelines (Gemini CLI,
+Copilot CLI, Claude Code in bypass mode) skip the per-command formatters,
+and the 16-token net-win gate skips compressions that wouldn't pay for their
+own markers.
 <img width="3456" height="1918" alt="image" src="https://github.com/user-attachments/assets/d308bc60-81f3-4935-9728-b30534e5b5e5" />
 
 

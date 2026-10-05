@@ -170,7 +170,7 @@ these figures, and each row is gated so the numbers can't silently drift:
 | `git status` (verbose, 10 files) | 102 | 56 | **45%** | Branch line + compact staged/modified/untracked |
 | `grep` (100 matches, 5 files) | 1,607 | 1,085 | **32%** | ripgrep heading layout: each path once, every match under it |
 
-Reductions scale with input size: the savings are largest on the verbose, repetitive
+The savings are largest on the verbose, repetitive
 output (package lists, passing-test runs) and smaller on output that
 is already compact (a short `git status`, a handful of clippy warnings with source
 context). The formatters cover git, cargo, npm/pnpm/yarn/bun, tsc, eslint/biome, pytest,
