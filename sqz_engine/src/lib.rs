@@ -150,7 +150,7 @@ pub use simhash::{simhash, SimHashFingerprint};
 pub use structural_summary::{summarize as structural_summarize, summarize_multi, SummaryConfig, StructuralSummaryResult};
 pub use textrank::{textrank_compress, TextRankConfig, TextRankResult};
 pub use mdl_selector::{select_stages, profile_content, ContentProfile, MdlSelection};
-pub use tool_hooks::{process_hook, process_hook_cursor, process_hook_gemini, process_hook_kiro, process_hook_windsurf, process_hook_copilot, generate_hook_configs, install_tool_hooks, install_tool_hooks_scoped, install_tool_hooks_scoped_filtered, claude_user_settings_path, claude_project_settings_needs_update, remove_claude_global_hook, remove_claude_project_hook, claude_settings_stale, refresh_claude_settings, claude_post_tool_use_target, claude_hooks_compress, PostToolUseTarget, CLAUDE_ALLOW_RULES, copilot_hooks_path, install_copilot_hook, remove_copilot_hook, ci_hooks_path, ci_hook_content, install_ci_hook, remove_ci_hook, canonicalize_tool_name, parse_tool_list, integration_tier, InstallScope, IntegrationTier, ToolFilter, ToolHookConfig, HookScope, HookPlatform, SUPPORTED_TOOL_NAMES};
+pub use tool_hooks::{process_hook, process_hook_cursor, process_hook_gemini, process_hook_kiro, process_hook_windsurf, process_hook_copilot, generate_hook_configs, has_sqz_rules, refresh_sqz_rules, remove_sqz_rules, sqz_rules_change, sqz_rules_content, sqz_rules_path, sqz_rules_state, install_tool_hooks, install_tool_hooks_scoped, install_tool_hooks_scoped_filtered, claude_user_settings_path, claude_project_settings_needs_update, remove_claude_global_hook, remove_claude_project_hook, claude_settings_stale, refresh_claude_settings, claude_post_tool_use_target, claude_hooks_compress, PostToolUseTarget, CLAUDE_ALLOW_RULES, copilot_hooks_path, install_copilot_hook, remove_copilot_hook, ci_hooks_path, ci_hook_content, install_ci_hook, remove_ci_hook, canonicalize_tool_name, parse_tool_list, integration_tier, InstallScope, IntegrationTier, ToolFilter, ToolHookConfig, HookScope, HookPlatform, SUPPORTED_TOOL_NAMES};
 pub use opencode_plugin::{
     generate_opencode_plugin, install_opencode_plugin, update_opencode_config,
     update_opencode_config_detailed, find_opencode_config,
@@ -160,10 +160,11 @@ pub use opencode_plugin::{
     process_opencode_hook, opencode_plugin_path,
 };
 pub use codex_integration::{
-    agents_md_guidance_block, agents_md_path,
-    codex_config_path,
+    agents_md_guidance_block, agents_md_guidance_state, agents_md_path,
+    codex_config_path, codex_mcp_registered, guidance_blocks, guidance_change,
     install_agents_md_guidance, install_codex_mcp_config,
-    remove_agents_md_guidance, remove_codex_mcp_config,
+    refresh_agents_md_guidance, remove_agents_md_guidance, remove_all_sqz_guidance,
+    remove_codex_mcp_config, sqz_guidance, GuidanceBlock, GuidanceChange,
 };
 pub use claude_md_integration::{
     claude_md_guidance_block, claude_md_path, claude_user_json_path,

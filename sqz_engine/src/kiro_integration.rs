@@ -58,57 +58,14 @@ pub fn kiro_legacy_hook_path(project_dir: &Path) -> PathBuf {
 }
 
 pub fn kiro_steering_content(sqz_path: &str) -> String {
-    kiro_steering_content_for(sqz_path, ".kiro/settings/mcp.json")
-}
-
-/// Variant for the user-level install, which mentions the user-level MCP
-/// config location instead of the workspace one.
-pub fn kiro_user_steering_content(sqz_path: &str) -> String {
-    kiro_steering_content_for(sqz_path, "~/.kiro/settings/mcp.json (user-level)")
-}
-
-fn kiro_steering_content_for(sqz_path: &str, mcp_location: &str) -> String {
     format!(
-        "\
----
-inclusion: always
----
-{sentinel}
-
-# sqz — Token-Optimized Output
-
-When running shell commands whose output may be long (git log/diff, test
-runners, build logs, `ls -la`, `docker ps`), pipe the output through
-`sqz compress` to cut token consumption:
-
-```bash
-git status 2>&1 | {sqz_path} compress
-cargo test 2>&1 | {sqz_path} compress
-```
-
-Do NOT pipe interactive commands (REPLs, `ssh`), compound commands with
-shell operators (`&&`, `>`, `;`), or output that is already short.
-
-The `sqz` MCP server is configured in `{mcp_location}`. Prefer
-its tools when they fit:
-
-- `sqz_read_file` / `sqz_grep` / `sqz_list_dir` — file access with
-  caching; repeat reads of unchanged content cost ~13 tokens.
-- `compress` — compress a blob of text you already have.
-- `passthrough` — return text unchanged (escape hatch).
-- `expand` — resolve a `§ref:HASH§` token back to the original bytes.
-  `§ref:HASH:L40-80§` means lines 40-80 of content you already have in
-  full; `expand` on it returns just those lines.
-- `sqz_recall` — full-text search over everything sqz has compressed
-  (recover context lost to compaction).
-
-If you see a `§ref:HASH§` token you can't parse, run
-`{sqz_path} expand <prefix>` or set `SQZ_NO_DEDUP=1` on the command.
-If a `«A1»` symbol replaced a value you need verbatim, re-run with
-`SQZ_NO_ABBREV=1` (or `--no-abbrev`).
-",
-        sentinel = KIRO_STEERING_SENTINEL,
+        "---\ninclusion: always\n---\n{KIRO_STEERING_SENTINEL}\n\n{}",
+        crate::codex_integration::sqz_guidance(sqz_path)
     )
+}
+
+pub fn kiro_user_steering_content(sqz_path: &str) -> String {
+    kiro_steering_content(sqz_path)
 }
 
 /// State of a steering file sqz may manage.
@@ -126,10 +83,10 @@ pub enum SteeringState {
 
 /// The sqz binary path a managed steering file was written for, read back
 /// from its first example line.
-fn embedded_sqz_path(content: &str) -> Option<&str> {
+pub(crate) fn embedded_sqz_path(content: &str) -> Option<&str> {
     content.lines().find_map(|line| {
-        line.strip_prefix("git status 2>&1 | ")
-            .and_then(|rest| rest.strip_suffix(" compress"))
+        line.split_once("git status 2>&1 | ")
+            .and_then(|(_, rest)| rest.strip_suffix(" compress"))
     })
 }
 
@@ -542,12 +499,11 @@ mod tests {
     }
 
     #[test]
-    fn user_steering_content_mentions_user_level_mcp() {
+    fn user_and_project_steering_carry_the_shared_guidance() {
         let content = kiro_user_steering_content("/usr/bin/sqz");
-        assert!(content.contains("~/.kiro/settings/mcp.json (user-level)"));
         assert!(content.contains(KIRO_STEERING_SENTINEL));
-        // Project variant keeps the workspace path.
-        assert!(kiro_steering_content("/usr/bin/sqz").contains("`.kiro/settings/mcp.json`"));
+        assert!(content.ends_with(&crate::codex_integration::sqz_guidance("/usr/bin/sqz")));
+        assert_eq!(content, kiro_steering_content("/usr/bin/sqz"));
     }
 
     #[test]
@@ -576,8 +532,7 @@ mod tests {
 
         std::fs::write(&path, kiro_user_steering_content("/opt/bin/sqz")).unwrap();
         assert_eq!(kiro_steering_state(&path, true), SteeringState::Current);
-        // The project template differs from the user-level one.
-        assert_eq!(kiro_steering_state(&path, false), SteeringState::Stale);
+        assert_eq!(kiro_steering_state(&path, false), SteeringState::Current);
 
         // An older template: sentinel present, content no longer matches.
         let old = kiro_user_steering_content("/opt/bin/sqz").replace("sqz_recall", "recall");

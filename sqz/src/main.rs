@@ -726,28 +726,23 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
         // sqz init will touch.
         if config.tool_name == "Codex" {
             let agents_path = sqz_engine::agents_md_path(&project_dir);
-            let agents_exists = agents_path.exists();
-            plan.push((
-                agents_path.display().to_string(),
-                if agents_exists {
-                    "Codex guidance (append to existing AGENTS.md)".to_string()
-                } else {
-                    "Codex guidance (create AGENTS.md)".to_string()
-                },
-                !agents_exists,
-            ));
+            if let Some(action) = guidance_plan_action("Codex guidance", &agents_path, &sqz_path) {
+                plan.push((agents_path.display().to_string(), action, !agents_path.exists()));
+            }
 
             let codex_toml = sqz_engine::codex_config_path();
             let codex_toml_exists = codex_toml.exists();
-            plan.push((
-                codex_toml.display().to_string(),
-                if codex_toml_exists {
-                    "Codex MCP registration (merge [mcp_servers.sqz] into existing config)".to_string()
-                } else {
-                    "Codex MCP registration (create user-level config.toml)".to_string()
-                },
-                !codex_toml_exists,
-            ));
+            if !sqz_engine::codex_mcp_registered() {
+                plan.push((
+                    codex_toml.display().to_string(),
+                    if codex_toml_exists {
+                        "Codex MCP registration (merge [mcp_servers.sqz] into existing config)".to_string()
+                    } else {
+                        "Codex MCP registration (create user-level config.toml)".to_string()
+                    },
+                    !codex_toml_exists,
+                ));
+            }
             continue;
         }
 
@@ -755,37 +750,34 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
         if config.tool_name == "Windsurf" {
             let target = project_dir.join(&config.config_path);
             let legacy = project_dir.join(".windsurfrules");
-            let legacy_is_sqz = legacy.exists()
-                && std::fs::read_to_string(&legacy)
-                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
-                    .unwrap_or(false);
-            if !target.exists() {
-                plan.push((
-                    target.display().to_string(),
-                    "Windsurf rules file".to_string(),
-                    true,
-                ));
+            if let Some(action) = rules_plan_action("Windsurf", &target, &sqz_path) {
+                plan.push((target.display().to_string(), action, !target.exists()));
             }
-            if legacy_is_sqz {
+            if sqz_engine::has_sqz_rules(&legacy) {
                 plan.push((
                     legacy.display().to_string(),
-                    "remove legacy .windsurfrules (moved to .windsurf/rules/)".to_string(),
+                    "remove the old sqz rules from .windsurfrules (moved to .windsurf/rules/)"
+                        .to_string(),
                     false,
                 ));
             }
             continue;
         }
 
+        if config.tool_name == "Cursor" {
+            let target = project_dir.join(&config.config_path);
+            if let Some(action) = rules_plan_action("Cursor", &target, &sqz_path) {
+                plan.push((target.display().to_string(), action, !target.exists()));
+            }
+            continue;
+        }
+
         // Cline: .clinerules may be a directory.
         if config.tool_name == "Cline" {
-            let base = project_dir.join(".clinerules");
-            let target = if base.is_dir() { base.join("sqz.md") } else { base };
-            if !target.exists() {
-                plan.push((
-                    target.display().to_string(),
-                    "Cline rules file".to_string(),
-                    true,
-                ));
+            if let Some(target) = sqz_engine::sqz_rules_path(&project_dir, "Cline") {
+                if let Some(action) = rules_plan_action("Cline", &target, &sqz_path) {
+                    plan.push((target.display().to_string(), action, !target.exists()));
+                }
             }
             continue;
         }
@@ -880,20 +872,18 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
         // install step prints a copy-paste snippet instead.
         if config.tool_name == "Zed" {
             let guidance_target = sqz_engine::zed_guidance_target(&project_dir);
-            let guidance_current = guidance_target.exists()
-                && std::fs::read_to_string(&guidance_target)
-                    .map(|s| s.contains("BEGIN sqz-zed-guidance"))
-                    .unwrap_or(false);
-            if !guidance_current {
-                plan.push((
-                    guidance_target.display().to_string(),
-                    if guidance_target.exists() {
-                        "Zed Agent guidance (append sqz block)".to_string()
-                    } else {
-                        "Zed Agent guidance".to_string()
-                    },
-                    !guidance_target.exists(),
-                ));
+            let written_by_codex = filter.includes("Codex")
+                && guidance_target == sqz_engine::agents_md_path(&project_dir);
+            if !written_by_codex {
+                if let Some(action) =
+                    guidance_plan_action("Zed Agent guidance", &guidance_target, &sqz_path)
+                {
+                    plan.push((
+                        guidance_target.display().to_string(),
+                        action,
+                        !guidance_target.exists(),
+                    ));
+                }
             }
 
             let zed_settings = sqz_engine::zed_settings_path();
@@ -1136,6 +1126,38 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
         println!("      To enable sqz in every project on this machine, re-run:");
         println!("         sqz init --global");
         println!("      (writes ~/.claude/settings.json, merges with existing user settings)");
+    }
+}
+
+fn guidance_plan_action(label: &str, path: &std::path::Path, sqz_path: &str) -> Option<String> {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match sqz_engine::guidance_change(path, sqz_path) {
+        sqz_engine::GuidanceChange::Unchanged => None,
+        sqz_engine::GuidanceChange::Create => Some(format!("{label} (create {file})")),
+        sqz_engine::GuidanceChange::Append => Some(format!("{label} (append to existing {file})")),
+        sqz_engine::GuidanceChange::Replace => {
+            Some(format!("{label} (replace the sqz blocks in {file} with the current one)"))
+        }
+    }
+}
+
+fn rules_plan_action(tool: &str, path: &std::path::Path, sqz_path: &str) -> Option<String> {
+    match sqz_engine::sqz_rules_change(path, tool, sqz_path) {
+        sqz_engine::GuidanceChange::Unchanged => None,
+        sqz_engine::GuidanceChange::Create => Some(format!("{tool} rules file")),
+        _ => Some(format!("{tool} rules file (refresh the sqz rules)")),
+    }
+}
+
+fn remove_rules_file(path: &std::path::Path) {
+    match sqz_engine::remove_sqz_rules(path) {
+        Ok(true) if path.exists() => println!("[sqz] ✓ removed sqz rules from {}", path.display()),
+        Ok(true) => println!("[sqz] ✓ removed {}", path.display()),
+        Ok(false) => {}
+        Err(e) => eprintln!("[sqz] ✗ could not clean up {}: {e}", path.display()),
     }
 }
 
@@ -1916,12 +1938,8 @@ fn cmd_uninstall(skip_confirm: bool) {
                 files_to_remove.push((target.display().to_string(), true));
             }
             let legacy = project_dir.join(".windsurfrules");
-            let legacy_is_sqz = legacy.exists()
-                && std::fs::read_to_string(&legacy)
-                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
-                    .unwrap_or(false);
-            if legacy_is_sqz {
-                files_to_remove.push((legacy.display().to_string(), true));
+            if sqz_engine::has_sqz_rules(&legacy) {
+                files_to_remove.push((format!("{} (sqz rules only)", legacy.display()), true));
             }
             continue;
         }
@@ -1929,12 +1947,8 @@ fn cmd_uninstall(skip_confirm: bool) {
         if config.tool_name == "Cline" {
             let base = project_dir.join(".clinerules");
             let target = if base.is_dir() { base.join("sqz.md") } else { base };
-            let is_sqz = target.is_file()
-                && std::fs::read_to_string(&target)
-                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
-                    .unwrap_or(false);
-            if is_sqz {
-                files_to_remove.push((target.display().to_string(), true));
+            if sqz_engine::has_sqz_rules(&target) {
+                files_to_remove.push((format!("{} (sqz rules only)", target.display()), true));
             }
             continue;
         }
@@ -1975,16 +1989,17 @@ fn cmd_uninstall(skip_confirm: bool) {
         files_to_remove.push((format!("{path} (sqz entries only)"), true));
     }
 
-    // Codex project-level AGENTS.md: surgically strip the sqz block
-    // while preserving any other rules the user added. See
-    // codex_integration::remove_agents_md_guidance.
-    let agents_md = sqz_engine::agents_md_path(&project_dir);
-    let agents_md_exists = agents_md.exists();
-    if agents_md_exists {
-        files_to_remove.push((
-            format!("{} (sqz guidance block only)", agents_md.display()),
-            true,
-        ));
+    let guidance_files: Vec<std::path::PathBuf> =
+        [project_dir.join(".rules"), sqz_engine::agents_md_path(&project_dir)]
+            .into_iter()
+            .filter(|p| {
+                std::fs::read_to_string(p)
+                    .map(|s| !sqz_engine::guidance_blocks(&s).is_empty())
+                    .unwrap_or(false)
+            })
+            .collect();
+    for path in &guidance_files {
+        files_to_remove.push((format!("{} (sqz guidance blocks only)", path.display()), true));
     }
 
     // Codex user-level ~/.codex/config.toml: remove [mcp_servers.sqz]
@@ -1998,21 +2013,6 @@ fn cmd_uninstall(skip_confirm: bool) {
         ));
     }
 
-    // Zed: strip the sqz guidance block from .rules / AGENTS.md and
-    // remove context_servers.sqz from the user's Zed settings.json.
-    let zed_guidance_present = [".rules", "AGENTS.md"].iter().any(|f| {
-        let p = project_dir.join(f);
-        p.exists()
-            && std::fs::read_to_string(&p)
-                .map(|s| s.contains("BEGIN sqz-zed-guidance"))
-                .unwrap_or(false)
-    });
-    if zed_guidance_present {
-        files_to_remove.push((
-            format!("{} (sqz Zed guidance block only)", project_dir.display()),
-            true,
-        ));
-    }
     let zed_settings = sqz_engine::zed_settings_path();
     let zed_settings_has_sqz = zed_settings.exists()
         && std::fs::read_to_string(&zed_settings)
@@ -2153,17 +2153,7 @@ fn cmd_uninstall(skip_confirm: bool) {
                     Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", target.display()),
                 }
             }
-            let legacy = project_dir.join(".windsurfrules");
-            let legacy_is_sqz = legacy.exists()
-                && std::fs::read_to_string(&legacy)
-                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
-                    .unwrap_or(false);
-            if legacy_is_sqz {
-                match std::fs::remove_file(&legacy) {
-                    Ok(()) => println!("[sqz] ✓ removed {}", legacy.display()),
-                    Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", legacy.display()),
-                }
-            }
+            remove_rules_file(&project_dir.join(".windsurfrules"));
             continue;
         }
         // Cline: .clinerules may be a directory (remove only our sqz.md)
@@ -2171,16 +2161,7 @@ fn cmd_uninstall(skip_confirm: bool) {
         if config.tool_name == "Cline" {
             let base = project_dir.join(".clinerules");
             let target = if base.is_dir() { base.join("sqz.md") } else { base };
-            let is_sqz = target.is_file()
-                && std::fs::read_to_string(&target)
-                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
-                    .unwrap_or(false);
-            if is_sqz {
-                match std::fs::remove_file(&target) {
-                    Ok(()) => println!("[sqz] ✓ removed {}", target.display()),
-                    Err(e) => eprintln!("[sqz] ✗ could not remove {}: {e}", target.display()),
-                }
-            }
+            remove_rules_file(&target);
             continue;
         }
         // Claude Code keeps the user's "don't ask again" permissions in
@@ -2263,27 +2244,18 @@ fn cmd_uninstall(skip_confirm: bool) {
         }
     }
 
-    // Surgically strip sqz's block from Codex's project AGENTS.md.
-    // Leaves any user-authored rules intact.
-    if agents_md_exists {
-        match sqz_engine::remove_agents_md_guidance(&project_dir) {
-            Ok(Some((path, true))) => {
-                if path.exists() {
-                    println!("[sqz] ✓ removed sqz block from {}", path.display());
-                } else {
-                    println!("[sqz] ✓ removed {}", path.display());
+    if !guidance_files.is_empty() {
+        match sqz_engine::remove_all_sqz_guidance(&project_dir) {
+            Ok(changed) => {
+                for path in changed {
+                    if path.exists() {
+                        println!("[sqz] ✓ removed sqz guidance from {}", path.display());
+                    } else {
+                        println!("[sqz] ✓ removed {}", path.display());
+                    }
                 }
             }
-            Ok(Some((path, false))) => {
-                println!("[sqz] ✓ no sqz block found in {}", path.display());
-            }
-            Ok(None) => { /* path disappeared between discovery and now — fine */ }
-            Err(e) => {
-                eprintln!(
-                    "[sqz] ✗ could not clean up {}: {e}",
-                    agents_md.display()
-                );
-            }
+            Err(e) => eprintln!("[sqz] ✗ could not clean up sqz guidance: {e}"),
         }
     }
 
@@ -2317,23 +2289,6 @@ fn cmd_uninstall(skip_confirm: bool) {
         }
     }
 
-    // Zed: strip the sqz guidance block from .rules / AGENTS.md, then
-    // remove context_servers.sqz from the user's Zed settings.json.
-    // JSONC settings are left alone with a manual note (issue #6 rule).
-    if zed_guidance_present {
-        match sqz_engine::remove_zed_guidance(&project_dir) {
-            Ok(changed) => {
-                for path in changed {
-                    if path.exists() {
-                        println!("[sqz] ✓ removed sqz Zed block from {}", path.display());
-                    } else {
-                        println!("[sqz] ✓ removed {}", path.display());
-                    }
-                }
-            }
-            Err(e) => eprintln!("[sqz] ✗ could not clean up Zed guidance: {e}"),
-        }
-    }
     if zed_settings_has_sqz {
         match sqz_engine::remove_zed_mcp_config() {
             Ok(sqz_engine::ZedMcpRemove::Removed) => {

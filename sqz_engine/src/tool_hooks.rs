@@ -366,6 +366,177 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         .map_err(|e| crate::error::SqzError::Other(format!("hook: JSON serialize error: {e}")))
 }
 
+const SQZ_RULES_SENTINEL: &str = "<!-- sqz-rules (auto-installed by sqz init) -->";
+const LEGACY_RULES_HEADING: &str = "# sqz \u{2014} Token-Optimized CLI Output";
+const LEGACY_CURSOR_FRONTMATTER: &str = "---\ndescription: sqz \u{2014} Token-Optimized CLI Output\n";
+const LEGACY_RULES_LAST_LINES: [&str; 3] = [
+    "path is still what you want for most output.",
+    "not on PATH, run commands normally.",
+    "If sqz is not available, run commands normally.",
+];
+
+pub fn sqz_rules_content(tool_name: &str, sqz_path: &str) -> String {
+    if tool_name == "Cline" {
+        return crate::codex_integration::agents_md_guidance_block(sqz_path);
+    }
+    let body = format!(
+        "{SQZ_RULES_SENTINEL}\n\n{}",
+        crate::codex_integration::sqz_guidance(sqz_path)
+    );
+    if tool_name == "Cursor" {
+        format!("---\ndescription: sqz output compression\nalwaysApply: true\n---\n{body}")
+    } else {
+        body
+    }
+}
+
+fn is_sqz_rules(content: &str) -> bool {
+    content.contains(SQZ_RULES_SENTINEL)
+        || content.starts_with(LEGACY_RULES_HEADING)
+        || content.starts_with(LEGACY_CURSOR_FRONTMATTER)
+}
+
+fn legacy_rules_end(content: &str) -> Option<usize> {
+    if !content.starts_with(LEGACY_RULES_HEADING) {
+        return None;
+    }
+    LEGACY_RULES_LAST_LINES.iter().find_map(|last| {
+        let mut start = 0;
+        content.split_inclusive('\n').find_map(|line| {
+            let text = line.trim_end();
+            let end = start + text.len();
+            start += line.len();
+            text.ends_with(last).then_some(end)
+        })
+    })
+}
+
+fn without_sqz_rules(content: &str) -> Option<String> {
+    match legacy_rules_end(content) {
+        Some(end) => Some(content[end..].trim_start_matches(['\r', '\n']).to_string()),
+        None => crate::codex_integration::without_guidance(content),
+    }
+}
+
+pub fn has_sqz_rules(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| without_sqz_rules(&content))
+        .is_some()
+}
+
+pub fn remove_sqz_rules(path: &Path) -> Result<bool> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    let Some(rest) = without_sqz_rules(&content) else {
+        return Ok(false);
+    };
+    if rest.trim().is_empty() {
+        std::fs::remove_file(path).map_err(|e| {
+            crate::error::SqzError::Other(format!("remove {}: {e}", path.display()))
+        })?;
+    } else {
+        std::fs::write(path, rest)
+            .map_err(|e| crate::error::SqzError::Other(format!("write {}: {e}", path.display())))?;
+    }
+    Ok(true)
+}
+
+pub fn sqz_rules_path(project_dir: &Path, tool_name: &str) -> Option<PathBuf> {
+    match tool_name {
+        "Cursor" => Some(project_dir.join(".cursor").join("rules").join("sqz.mdc")),
+        "Windsurf" => Some(project_dir.join(".windsurf").join("rules").join("sqz.md")),
+        "Cline" => {
+            let base = project_dir.join(".clinerules");
+            Some(if base.is_dir() { base.join("sqz.md") } else { base })
+        }
+        _ => None,
+    }
+}
+
+pub fn sqz_rules_state(path: &Path, tool_name: &str) -> crate::kiro_integration::SteeringState {
+    use crate::kiro_integration::SteeringState;
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return SteeringState::Missing;
+    };
+    if tool_name == "Cline" {
+        return if legacy_rules_end(&content).is_some() {
+            SteeringState::Stale
+        } else {
+            crate::codex_integration::guidance_state(&content)
+        };
+    }
+    if !is_sqz_rules(&content) {
+        return SteeringState::UserAuthored;
+    }
+    match crate::kiro_integration::embedded_sqz_path(&content) {
+        Some(p) if content == sqz_rules_content(tool_name, p) => SteeringState::Current,
+        _ => SteeringState::Stale,
+    }
+}
+
+pub fn refresh_sqz_rules(path: &Path, tool_name: &str, fallback_sqz_path: &str) -> Result<bool> {
+    if sqz_rules_state(path, tool_name) != crate::kiro_integration::SteeringState::Stale {
+        return Ok(false);
+    }
+    let existing = std::fs::read_to_string(path)
+        .map_err(|e| crate::error::SqzError::Other(format!("read {}: {e}", path.display())))?;
+    if tool_name == "Cline" && legacy_rules_end(&existing).is_none() {
+        return crate::codex_integration::refresh_agents_md_guidance(path, fallback_sqz_path);
+    }
+    let sqz_path = crate::kiro_integration::embedded_sqz_path(&existing)
+        .filter(|p| Path::new(p).is_file())
+        .unwrap_or(fallback_sqz_path)
+        .to_string();
+    install_sqz_rules(path, tool_name, &sqz_path)
+}
+
+pub fn sqz_rules_change(
+    path: &Path,
+    tool_name: &str,
+    sqz_path: &str,
+) -> crate::codex_integration::GuidanceChange {
+    use crate::codex_integration::GuidanceChange;
+    match rules_update(path, tool_name, sqz_path) {
+        None => GuidanceChange::Unchanged,
+        Some(_) if path.exists() => GuidanceChange::Replace,
+        Some(_) => GuidanceChange::Create,
+    }
+}
+
+fn rules_update(path: &Path, tool_name: &str, sqz_path: &str) -> Option<String> {
+    let content = sqz_rules_content(tool_name, sqz_path);
+    let Ok(existing) = std::fs::read_to_string(path) else {
+        return (!path.exists()).then_some(content);
+    };
+    let updated = if tool_name != "Cline" {
+        if !is_sqz_rules(&existing) {
+            return None;
+        }
+        content
+    } else if let Some(end) = legacy_rules_end(&existing) {
+        format!("{}{}", content.trim_end_matches('\n'), &existing[end..])
+    } else {
+        crate::codex_integration::replaced_guidance(&existing, sqz_path)?
+    };
+    (updated != existing).then_some(updated)
+}
+
+fn install_sqz_rules(path: &Path, tool_name: &str, sqz_path: &str) -> Result<bool> {
+    let Some(content) = rules_update(path, tool_name, sqz_path) else {
+        return Ok(false);
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::error::SqzError::Other(format!("create {}: {e}", parent.display()))
+        })?;
+    }
+    std::fs::write(path, content)
+        .map_err(|e| crate::error::SqzError::Other(format!("write {}: {e}", path.display())))?;
+    Ok(true)
+}
+
 /// Generate hook configuration files for all supported AI tools.
 pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
     // On Windows, `sqz_path` contains backslashes (C:\Users\...\sqz.exe).
@@ -381,40 +552,6 @@ pub fn generate_hook_configs(sqz_path: &str) -> Vec<ToolHookConfig> {
     let sqz_path_raw = sqz_path;
     let sqz_path_json = json_escape_string_value(sqz_path);
     let sqz_path = &sqz_path_json;
-
-    // Escape-hatch paragraph shared across every markdown-style rules
-    // file (Cursor/Windsurf/Cline). Documents the three ways an agent
-    // can opt out of compression when it can't parse sqz's output.
-    // Reported by SquireNed on Synthetic: GLM 5.1 loops on `§ref:…§`
-    // dedup tokens. Visible-in-every-rules-file so any agent reading
-    // the rules sees the escape hatch, not just the one that hit the
-    // loop.
-    let escape_hatch = format!(
-        r#"## Escape hatch — when sqz output confuses the agent
-
-If you see a `§ref:HASH§` token in tool output and can't parse it, or if
-compressed output is making it harder to work (loops, repeated tiny
-requests), or if a `«A1»` abbreviation symbol has replaced a value you
-need verbatim (a SHA, path, or URL), you have these ways out:
-
-- **`{sqz_path_raw} expand <prefix>`** — resolve a ref back to the
-  original bytes. Accepts the bare hex prefix (`sqz expand a1b2c3d4`)
-  or the full token pasted verbatim (`sqz expand §ref:a1b2c3d4§`).
-- **`SQZ_NO_DEDUP=1`** — set this env var (e.g. `SQZ_NO_DEDUP=1 git
-  status 2>&1 | sqz compress`) to disable dedup for that one command.
-  Strictly more tokens, strictly less ambiguous.
-- **`--no-cache`** — the same opt-out as a CLI flag:
-  `git status 2>&1 | sqz compress --no-cache`.
-- **`SQZ_NO_ABBREV=1`** (or **`--no-abbrev`**) — disable n-gram phrase
-  abbreviation, which replaces repeated phrases with `«A1»` symbols.
-  Use this for output full of SHAs/paths/URLs you'll copy-paste, since
-  abbreviation keeps only the first occurrence of a repeated phrase:
-  `SQZ_NO_ABBREV=1 git log 2>&1 | sqz compress`.
-
-Use these when you genuinely need raw data. The default compressed
-path is still what you want for most output."#,
-    );
-    let escape_hatch = &escape_hatch;
 
     vec![
         // Claude Code — goes in .claude/settings.local.json (nested format)
@@ -451,46 +588,7 @@ path is still what you want for most output."#,
         ToolHookConfig {
             tool_name: "Cursor".to_string(),
             config_path: PathBuf::from(".cursor/rules/sqz.mdc"),
-            config_content: format!(
-                r#"---
-description: sqz — Token-Optimized CLI Output
-alwaysApply: true
----
-
-# sqz — Token-Optimized CLI Output
-
-When running shell commands whose output may be long (directory listings,
-git log/diff, test runners, build logs, `docker ps`, `kubectl get`, etc.),
-pipe the output through `sqz compress` to reduce token consumption.
-
-`sqz` is a stdin-to-stdout compressor, not a command wrapper. The correct
-usage is to pipe the command's output into `sqz compress`:
-
-```bash
-# Instead of:     Use:
-git status        git status 2>&1 | {sqz_path_raw} compress
-cargo test        cargo test 2>&1 | {sqz_path_raw} compress
-git log -10       git log -10 2>&1 | {sqz_path_raw} compress
-docker ps         docker ps 2>&1 | {sqz_path_raw} compress
-ls -la            ls -la 2>&1 | {sqz_path_raw} compress
-```
-
-The `2>&1` captures stderr too, which is useful for commands like `cargo
-test` where diagnostics go to stderr. `sqz compress` filters and compresses
-the combined output while preserving filenames, paths, and identifiers.
-It typically saves 60-90% tokens on verbose commands.
-
-Do NOT pipe output for:
-- Interactive commands (`vim`, `ssh`, `python`, REPLs)
-- Compound commands with operators (`cmd && other`, `cmd > file.txt`,
-  `cmd; other`) — run those directly
-- Short commands whose output is already a few lines
-
-If `sqz` is not on PATH, run commands normally.
-
-{escape_hatch}
-"#
-            ),
+            config_content: sqz_rules_content("Cursor", sqz_path_raw),
             scope: HookScope::Project,
         },
         // Windsurf — no hook API; prompt-level rules. Current docs only
@@ -498,30 +596,7 @@ If `sqz` is not on PATH, run commands normally.
         ToolHookConfig {
             tool_name: "Windsurf".to_string(),
             config_path: PathBuf::from(".windsurf/rules/sqz.md"),
-            config_content: format!(
-                r#"# sqz — Token-Optimized CLI Output
-
-Pipe verbose shell command output through `sqz compress` to save tokens.
-`sqz` reads from stdin and writes the compressed output to stdout — it is
-NOT a command wrapper, so `{sqz_path_raw} git status` is not valid.
-
-```bash
-# Instead of:     Use:
-git status        git status 2>&1 | {sqz_path_raw} compress
-cargo test        cargo test 2>&1 | {sqz_path_raw} compress
-git log -10       git log -10 2>&1 | {sqz_path_raw} compress
-docker ps         docker ps 2>&1 | {sqz_path_raw} compress
-```
-
-sqz filters and compresses command outputs while preserving filenames,
-paths, and identifiers (typically 60-90% token reduction on verbose
-commands). Skip short commands, interactive commands (vim, ssh, python),
-and commands with shell operators (`&&`, `||`, `;`, `>`, `<`). If sqz is
-not on PATH, run commands normally.
-
-{escape_hatch}
-"#
-            ),
+            config_content: sqz_rules_content("Windsurf", sqz_path_raw),
             scope: HookScope::Project,
         },
         // Cline / Roo Code — prompt-level guidance. .clinerules can be a
@@ -529,30 +604,7 @@ not on PATH, run commands normally.
         ToolHookConfig {
             tool_name: "Cline".to_string(),
             config_path: PathBuf::from(".clinerules"),
-            config_content: format!(
-                r#"# sqz — Token-Optimized CLI Output
-
-Pipe verbose shell command output through `sqz compress` to save tokens.
-`sqz` reads from stdin and writes the compressed output to stdout — it is
-NOT a command wrapper, so `{sqz_path_raw} git status` is not valid.
-
-```bash
-# Instead of:     Use:
-git status        git status 2>&1 | {sqz_path_raw} compress
-cargo test        cargo test 2>&1 | {sqz_path_raw} compress
-git log -10       git log -10 2>&1 | {sqz_path_raw} compress
-docker ps         docker ps 2>&1 | {sqz_path_raw} compress
-```
-
-sqz filters and compresses command outputs while preserving filenames,
-paths, and identifiers (typically 60-90% token reduction on verbose
-commands). Skip short commands, interactive commands (vim, ssh, python),
-and commands with shell operators (`&&`, `||`, `;`, `>`, `<`). If sqz is
-not on PATH, run commands normally.
-
-{escape_hatch}
-"#
-            ),
+            config_content: sqz_rules_content("Cline", sqz_path_raw),
             scope: HookScope::Project,
         },
         // Gemini CLI — goes in .gemini/settings.json (BeforeTool event)
@@ -1158,21 +1210,8 @@ pub fn install_tool_hooks_scoped_filtered(
         if config.tool_name == "Windsurf" {
             let legacy = project_dir.join(".windsurfrules");
             let target = project_dir.join(&config.config_path);
-            let legacy_is_sqz = legacy.exists()
-                && std::fs::read_to_string(&legacy)
-                    .map(|s| s.starts_with("# sqz — Token-Optimized CLI Output"))
-                    .unwrap_or(false);
-            let mut changed = false;
-            if !target.exists() {
-                if let Some(parent) = target.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if std::fs::write(&target, &config.config_content).is_ok() {
-                    changed = true;
-                }
-            }
-            if legacy_is_sqz && target.exists() {
-                let _ = std::fs::remove_file(&legacy);
+            let mut changed = install_sqz_rules(&target, "Windsurf", sqz_path).unwrap_or(false);
+            if target.exists() && remove_sqz_rules(&legacy).unwrap_or(false) {
                 changed = true;
             }
             if changed && !installed.iter().any(|n| n == "Windsurf") {
@@ -1181,17 +1220,26 @@ pub fn install_tool_hooks_scoped_filtered(
             continue;
         }
 
+        if config.tool_name == "Cursor" {
+            let target = project_dir.join(&config.config_path);
+            if install_sqz_rules(&target, "Cursor", sqz_path).unwrap_or(false)
+                && !installed.iter().any(|n| n == "Cursor")
+            {
+                installed.push("Cursor".to_string());
+            }
+            continue;
+        }
+
         // Cline: .clinerules can be a single file or a directory of md
         // files; when it's a directory, install .clinerules/sqz.md.
         if config.tool_name == "Cline" {
-            let base = project_dir.join(".clinerules");
-            let target = if base.is_dir() { base.join("sqz.md") } else { base };
-            if !target.exists() {
-                if std::fs::write(&target, &config.config_content).is_ok()
-                    && !installed.iter().any(|n| n == "Cline")
-                {
-                    installed.push("Cline".to_string());
-                }
+            let Some(target) = sqz_rules_path(project_dir, "Cline") else {
+                continue;
+            };
+            if install_sqz_rules(&target, "Cline", sqz_path).unwrap_or(false)
+                && !installed.iter().any(|n| n == "Cline")
+            {
+                installed.push("Cline".to_string());
             }
             continue;
         }
@@ -3073,17 +3121,29 @@ mod tests {
         assert!(!dir.path().join(".windsurfrules").exists());
     }
 
+    fn legacy_rules(sqz: &str) -> String {
+        format!(
+            "# sqz \u{2014} Token-Optimized CLI Output\n\n```bash\ngit status        git status 2>&1 | {sqz} compress\n```\n\nUse these when you genuinely need raw data. The default compressed\npath is still what you want for most output.\n"
+        )
+    }
+
     #[test]
     fn test_windsurf_migrates_legacy_sqz_rules_file() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".windsurfrules"),
-            "# sqz — Token-Optimized CLI Output\n\nold content\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".windsurfrules"), legacy_rules("sqz")).unwrap();
         install_tool_hooks(dir.path(), "sqz");
         assert!(dir.path().join(".windsurf/rules/sqz.md").exists());
         assert!(!dir.path().join(".windsurfrules").exists(), "legacy file migrated");
+    }
+
+    #[test]
+    fn test_windsurf_migration_keeps_user_rules_after_the_sqz_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join(".windsurfrules");
+        std::fs::write(&legacy, format!("{}\n## Team rules\n\nUse tabs.\n", legacy_rules("sqz"))).unwrap();
+        install_tool_hooks(dir.path(), "sqz");
+        assert!(dir.path().join(".windsurf/rules/sqz.md").exists());
+        assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "## Team rules\n\nUse tabs.\n");
     }
 
     #[test]
@@ -3135,6 +3195,148 @@ mod tests {
         assert_eq!(a, b, "second init must not change project settings");
         // No duplicated sqz entries.
         assert_eq!(b["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn init_refreshes_old_sqz_rules_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let filter = ToolFilter::Only(vec!["cursor".into(), "windsurf".into(), "cline".into()]);
+        let old_cursor = "---\ndescription: sqz \u{2014} Token-Optimized CLI Output\nalwaysApply: true\n---\n\n# sqz \u{2014} Token-Optimized CLI Output\n\ngit status        git status 2>&1 | /old/sqz compress\n";
+        std::fs::create_dir_all(dir.path().join(".cursor/rules")).unwrap();
+        std::fs::write(dir.path().join(".cursor/rules/sqz.mdc"), old_cursor).unwrap();
+        std::fs::write(dir.path().join(".clinerules"), legacy_rules("/old/sqz")).unwrap();
+
+        let installed =
+            install_tool_hooks_scoped_filtered(dir.path(), "/new/sqz", InstallScope::Project, &filter);
+        assert_eq!(installed, vec!["Cursor", "Windsurf", "Cline"]);
+        for (tool, rel) in [
+            ("Cursor", ".cursor/rules/sqz.mdc"),
+            ("Windsurf", ".windsurf/rules/sqz.md"),
+            ("Cline", ".clinerules"),
+        ] {
+            let content = std::fs::read_to_string(dir.path().join(rel)).unwrap();
+            assert_eq!(content, sqz_rules_content(tool, "/new/sqz"), "{tool}");
+            assert!(!content.contains('%') && !content.contains('\u{2014}'), "{tool}");
+        }
+        assert!(
+            install_tool_hooks_scoped_filtered(dir.path(), "/new/sqz", InstallScope::Project, &filter)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn init_leaves_user_written_rules_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let cursor = dir.path().join(".cursor/rules/sqz.mdc");
+        std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+        std::fs::write(&cursor, "my own rule\n").unwrap();
+        let filter = ToolFilter::Only(vec!["cursor".into()]);
+        assert!(
+            install_tool_hooks_scoped_filtered(dir.path(), "/new/sqz", InstallScope::Project, &filter)
+                .is_empty()
+        );
+        assert_eq!(std::fs::read_to_string(&cursor).unwrap(), "my own rule\n");
+    }
+
+    #[test]
+    fn rules_refresh_keeps_the_binary_the_old_text_points_at() {
+        use crate::kiro_integration::SteeringState;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("sqz");
+        std::fs::write(&bin, "").unwrap();
+        let bin = bin.to_string_lossy().to_string();
+        let path = dir.path().join("sqz.md");
+        std::fs::write(
+            &path,
+            format!("# sqz \u{2014} Token-Optimized CLI Output\n\ngit status        git status 2>&1 | {bin} compress\n"),
+        )
+        .unwrap();
+
+        assert_eq!(sqz_rules_state(&path, "Windsurf"), SteeringState::Stale);
+        assert!(refresh_sqz_rules(&path, "Windsurf", "/fallback/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), sqz_rules_content("Windsurf", &bin));
+        assert_eq!(sqz_rules_state(&path, "Windsurf"), SteeringState::Current);
+        assert!(!refresh_sqz_rules(&path, "Windsurf", "/fallback/sqz").unwrap());
+
+        std::fs::write(&path, "my own rules\n").unwrap();
+        assert_eq!(sqz_rules_state(&path, "Windsurf"), SteeringState::UserAuthored);
+        assert!(!refresh_sqz_rules(&path, "Windsurf", "/fallback/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "my own rules\n");
+    }
+
+    #[test]
+    fn cline_rules_keep_the_user_rules_after_them() {
+        use crate::kiro_integration::SteeringState;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".clinerules");
+        let filter = ToolFilter::Only(vec!["cline".into()]);
+        let install = |sqz: &str| {
+            install_tool_hooks_scoped_filtered(dir.path(), sqz, InstallScope::Project, &filter)
+        };
+        let mine = "\n## Team rules\n\nUse tabs.\n";
+        std::fs::write(&path, format!("{}{mine}", legacy_rules("/old/sqz"))).unwrap();
+
+        assert_eq!(sqz_rules_state(&path, "Cline"), SteeringState::Stale);
+        assert_eq!(install("/new/sqz"), vec!["Cline"]);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{}{mine}", sqz_rules_content("Cline", "/new/sqz"))
+        );
+        assert_eq!(sqz_rules_state(&path, "Cline"), SteeringState::Current);
+        assert!(install("/new/sqz").is_empty());
+
+        assert_eq!(install("/other/sqz"), vec!["Cline"]);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{}{mine}", sqz_rules_content("Cline", "/other/sqz"))
+        );
+
+        assert!(remove_sqz_rules(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "## Team rules\n\nUse tabs.\n");
+        assert!(!has_sqz_rules(&path));
+    }
+
+    #[test]
+    fn cline_refresh_keeps_the_old_binary_and_the_user_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("sqz");
+        std::fs::write(&bin, "").unwrap();
+        let bin = bin.to_string_lossy().to_string();
+        let path = dir.path().join(".clinerules");
+        let v2_ending = "and commands with shell operators. If sqz is\nnot on PATH, run commands normally.\n";
+        let old = legacy_rules(&bin).replace(
+            "Use these when you genuinely need raw data. The default compressed\npath is still what you want for most output.\n",
+            v2_ending,
+        );
+        std::fs::write(&path, format!("{old}\nUse tabs.\n")).unwrap();
+
+        assert!(refresh_sqz_rules(&path, "Cline", "/fallback/sqz").unwrap());
+        let block = sqz_rules_content("Cline", &bin);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{block}\nUse tabs.\n"));
+        assert!(!refresh_sqz_rules(&path, "Cline", "/fallback/sqz").unwrap());
+
+        std::fs::write(&path, format!("{}\nUse tabs.\n", block.replace("sqz_recall", "recall"))).unwrap();
+        assert!(refresh_sqz_rules(&path, "Cline", "/fallback/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{block}\nUse tabs.\n"));
+    }
+
+    #[test]
+    fn cline_rules_without_a_known_end_are_left_alone() {
+        use crate::kiro_integration::SteeringState;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".clinerules");
+        let edited = "# sqz \u{2014} Token-Optimized CLI Output\n\nPipe output through sqz.\n\n## Team rules\n";
+        std::fs::write(&path, edited).unwrap();
+        let filter = ToolFilter::Only(vec!["cline".into()]);
+
+        assert_eq!(sqz_rules_state(&path, "Cline"), SteeringState::UserAuthored);
+        assert!(
+            install_tool_hooks_scoped_filtered(dir.path(), "/new/sqz", InstallScope::Project, &filter)
+                .is_empty()
+        );
+        assert!(!refresh_sqz_rules(&path, "Cline", "/fallback/sqz").unwrap());
+        assert!(!remove_sqz_rules(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
     }
 }
 

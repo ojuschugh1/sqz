@@ -33,6 +33,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, SqzError};
+use crate::kiro_integration::{embedded_sqz_path, SteeringState};
 
 // ── Paths ─────────────────────────────────────────────────────────────────
 
@@ -71,8 +72,42 @@ pub fn agents_md_path(project_dir: &Path) -> PathBuf {
 // content. Matches the pattern we already use for shell RC hooks in
 // sqz/src/shell_hook.rs.
 
-const AGENTS_MD_BEGIN: &str = "<!-- BEGIN sqz-agents-guidance (auto-installed by sqz init; remove this block to disable) -->";
-const AGENTS_MD_END: &str = "<!-- END sqz-agents-guidance -->";
+const AGENTS_MD_BEGIN: &str = "<!-- BEGIN sqz-guidance (auto-installed by sqz init; remove this block to disable) -->";
+const AGENTS_MD_END: &str = "<!-- END sqz-guidance -->";
+const CODEX_LEGACY_BEGIN: &str = "<!-- BEGIN sqz-agents-guidance (auto-installed by sqz init; remove this block to disable) -->";
+const CODEX_LEGACY_END: &str = "<!-- END sqz-agents-guidance -->";
+const ZED_LEGACY_BEGIN: &str = "<!-- BEGIN sqz-zed-guidance (auto-installed by sqz init; remove this block to disable) -->";
+const ZED_LEGACY_END: &str = "<!-- END sqz-zed-guidance -->";
+
+pub fn sqz_guidance(sqz_path: &str) -> String {
+    format!(
+        "\
+## sqz
+
+Pipe shell commands with long output (git log or diff, tests, builds,
+`ls -la`) through sqz:
+
+```bash
+git status 2>&1 | {sqz_path} compress
+```
+
+Don't pipe interactive commands (REPLs, `ssh`), chains with `&&`, `||`
+or `;`, output redirected to a file, or short output. If that binary is
+missing, run commands without it.
+
+When the sqz MCP tools are available, prefer `sqz_read_file`, `sqz_grep`
+and `sqz_list_dir` over the built-in read, grep and `ls` for long or
+repeated reads, and use `sqz_recall` to find output seen earlier.
+
+A `§ref:HASH§` stands in for output you have already seen, and
+`§ref:HASH:L40-80§` for lines 40-80 of it. Get the text back with the
+`expand` tool or `{sqz_path} expand <token>`. `«A1»` stands for the
+phrase listed for it under `[Abbreviations]` at the top of the output.
+For output without refs or abbreviations, put `SQZ_NO_DEDUP=1` or
+`SQZ_NO_ABBREV=1` right before `{sqz_path} compress`.
+"
+    )
+}
 
 /// Build the markdown block that sqz appends to `AGENTS.md`.
 ///
@@ -83,91 +118,266 @@ const AGENTS_MD_END: &str = "<!-- END sqz-agents-guidance -->";
 /// Windows render correctly as-is, and the user can copy-paste the
 /// commands straight into their shell.
 pub fn agents_md_guidance_block(sqz_path: &str) -> String {
-    format!(
-        "\
-{begin}
-
-## sqz — Token-Optimized CLI Output
-
-When running shell commands whose output may be long (directory listings,
-git log/diff, test runners, build logs, `docker ps`, `kubectl get`, etc.),
-pipe the output through `sqz compress` to reduce token consumption.
-
-`sqz` is a stdin-to-stdout compressor, not a command wrapper. The correct
-usage is to pipe the command's output into `sqz compress`:
-
-```bash
-# Instead of:     Use:
-git status        git status 2>&1 | {sqz_path} compress
-cargo test        cargo test 2>&1 | {sqz_path} compress
-git log -10       git log -10 2>&1 | {sqz_path} compress
-docker ps         docker ps 2>&1 | {sqz_path} compress
-ls -la            ls -la 2>&1 | {sqz_path} compress
-```
-
-The `2>&1` captures stderr too, which is useful for commands like `cargo
-test` where diagnostics go to stderr. `sqz compress` filters and compresses
-the combined output while preserving filenames, paths, and identifiers.
-It typically saves 60-90% tokens on verbose commands.
-
-Do NOT pipe output for:
-- Interactive commands (`vim`, `ssh`, `python`, REPLs)
-- Compound commands with shell operators (`cmd && other`, `cmd > file.txt`,
-  `cmd; other`) — run those directly
-- Short commands whose output is already a few lines
-
-If `sqz` is not on PATH, run commands normally.
-
-The `sqz-mcp` MCP server is also available — Codex reads it from
-`~/.codex/config.toml` under `[mcp_servers.sqz]`. It exposes
-`compress` (the default pipeline), `passthrough` (return text
-unchanged — the escape hatch below), `expand` (resolve a
-`§ref:HASH§` token back to the original bytes), `sqz_recall`
-(full-text search over everything sqz has compressed — recover
-context lost to compaction), and `sqz_read_file` / `sqz_grep` /
-`sqz_list_dir` (file access with a dedup cache: a repeat read of an
-unchanged file costs ~13 tokens, and a ranged re-read via `offset` /
-`limit` of a file you already have in full returns a
-`§ref:HASH:L40-80§` line-range reference). Prefer those three over
-`cat`, `grep` and `ls` for anything you might read more than once.
-
-## Escape hatch — when sqz output confuses you
-
-If you see a `§ref:HASH§` token and can't parse it, or compressed
-output is leading you to make lots of small retries instead of one
-big request, use one of these:
-
-- **`{sqz_path} expand <prefix>`** — resolve a dedup ref back to the
-  original bytes. Accepts bare hex (`sqz expand a1b2c3d4`) or the full
-  token pasted verbatim (`sqz expand §ref:a1b2c3d4§`).
-- **`SQZ_NO_DEDUP=1`** — set this env var for one command to disable
-  dedup: `SQZ_NO_DEDUP=1 git status 2>&1 | sqz compress`. You'll get
-  the full compressed output with no `§ref:…§` tokens.
-- **`--no-cache`** — same opt-out as a CLI flag:
-  `git status 2>&1 | sqz compress --no-cache`.
-- **`SQZ_NO_ABBREV=1`** (or **`--no-abbrev`**) — disable n-gram phrase
-  abbreviation, which rewrites repeated phrases to `«A1»` symbols and
-  keeps only the first occurrence. Use it when output is full of
-  SHAs/paths/URLs you'll copy-paste verbatim:
-  `SQZ_NO_ABBREV=1 git log 2>&1 | sqz compress`.
-
-If you're using the MCP server, the `passthrough` tool returns raw
-text and the `expand` tool resolves refs — call them when you need
-data sqz hasn't touched.
-
-{end}
-",
-        begin = AGENTS_MD_BEGIN,
-        end = AGENTS_MD_END,
-    )
+    format!("{AGENTS_MD_BEGIN}\n\n{}\n{AGENTS_MD_END}\n", sqz_guidance(sqz_path))
 }
 
 // ── AGENTS.md install/uninstall ──────────────────────────────────────────
 
-/// Return `true` if the given `AGENTS.md` content already contains sqz's
-/// guidance block (matched by the BEGIN sentinel).
-fn agents_md_has_sqz_block(content: &str) -> bool {
-    content.contains(AGENTS_MD_BEGIN)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockKind {
+    Shared,
+    Codex,
+    Zed,
+}
+
+impl BlockKind {
+    pub(crate) const ALL: [BlockKind; 3] = [BlockKind::Shared, BlockKind::Codex, BlockKind::Zed];
+
+    fn markers(self) -> (&'static str, &'static str) {
+        match self {
+            BlockKind::Shared => (AGENTS_MD_BEGIN, AGENTS_MD_END),
+            BlockKind::Codex => (CODEX_LEGACY_BEGIN, CODEX_LEGACY_END),
+            BlockKind::Zed => (ZED_LEGACY_BEGIN, ZED_LEGACY_END),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Block {
+    start: usize,
+    end: usize,
+    kind: BlockKind,
+}
+
+fn find_blocks(content: &str) -> Vec<Block> {
+    let mut blocks = Vec::new();
+    for kind in BlockKind::ALL {
+        let (begin, end) = kind.markers();
+        let mut from = 0;
+        while let Some(i) = content[from..].find(begin) {
+            let start = from + i;
+            let Some(j) = content[start..].find(end) else { break };
+            from = start + j + end.len();
+            blocks.push(Block { start, end: from, kind });
+        }
+    }
+    blocks.sort_by_key(|b| b.start);
+    let mut kept: Vec<Block> = Vec::new();
+    for block in blocks {
+        if kept.last().is_some_and(|last| block.start < last.end) {
+            continue;
+        }
+        kept.push(block);
+    }
+    kept
+}
+
+fn has_sqz_marker(content: &str) -> bool {
+    BlockKind::ALL.iter().any(|kind| content.contains(kind.markers().0))
+}
+
+fn excise(content: &str, block: Block) -> String {
+    let head = &content[..block.start];
+    let after = &content[block.end..];
+    let tail = after.strip_prefix('\n').unwrap_or(after);
+    let kept_head = head.trim_end_matches('\n');
+    let kept_tail = tail.trim_start_matches('\n');
+    if kept_tail.is_empty() {
+        return if kept_head.is_empty() { String::new() } else { format!("{kept_head}\n") };
+    }
+    if kept_head.is_empty() {
+        return kept_tail.to_string();
+    }
+    let newlines = (head.len() - kept_head.len() + tail.len() - kept_tail.len()).clamp(1, 2);
+    format!("{kept_head}{}{kept_tail}", "\n".repeat(newlines))
+}
+
+fn replace_blocks(content: &str, block: &str) -> Option<String> {
+    let first = *find_blocks(content).first()?;
+    let mut out = format!("{}{block}{}", &content[..first.start], &content[first.end..]);
+    loop {
+        let blocks = find_blocks(&out);
+        let [prev, next, ..] = blocks[..] else { break };
+        out = if out[prev.end..next.start].trim().is_empty() {
+            format!("{}{}", &out[..prev.end], &out[next.end..])
+        } else {
+            excise(&out, next)
+        };
+    }
+    Some(out)
+}
+
+fn remove_blocks(content: &str, drop: &[BlockKind]) -> Option<String> {
+    let mut out = content.to_string();
+    let mut changed = false;
+    while let Some(block) = find_blocks(&out).into_iter().find(|b| drop.contains(&b.kind)) {
+        out = excise(&out, block);
+        changed = true;
+    }
+    changed.then_some(out)
+}
+
+fn append_block(content: &str, block: &str) -> String {
+    if content.trim().is_empty() {
+        return block.to_string();
+    }
+    let mut out = content.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    out.push_str(block);
+    out
+}
+
+pub(crate) fn replaced_guidance(content: &str, sqz_path: &str) -> Option<String> {
+    replace_blocks(content, agents_md_guidance_block(sqz_path).trim_end_matches('\n'))
+}
+
+pub(crate) fn without_guidance(content: &str) -> Option<String> {
+    remove_blocks(content, &BlockKind::ALL)
+}
+
+fn with_guidance(content: &str, sqz_path: &str) -> Option<String> {
+    let updated = if find_blocks(content).is_empty() {
+        if has_sqz_marker(content) {
+            return None;
+        }
+        append_block(content, &agents_md_guidance_block(sqz_path))
+    } else {
+        replaced_guidance(content, sqz_path)?
+    };
+    (updated != content).then_some(updated)
+}
+
+pub(crate) fn write_guidance(path: &Path, sqz_path: &str) -> Result<bool> {
+    let existing = std::fs::read_to_string(path)
+        .map_err(|e| SqzError::Other(format!("failed to read {}: {e}", path.display())))?;
+    let Some(updated) = with_guidance(&existing, sqz_path) else {
+        return Ok(false);
+    };
+    std::fs::write(path, updated)
+        .map_err(|e| SqzError::Other(format!("failed to write {}: {e}", path.display())))?;
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuidanceChange {
+    Unchanged,
+    Create,
+    Append,
+    Replace,
+}
+
+pub fn guidance_change(path: &Path, sqz_path: &str) -> GuidanceChange {
+    if !path.exists() {
+        return GuidanceChange::Create;
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return GuidanceChange::Unchanged;
+    };
+    match with_guidance(&content, sqz_path) {
+        None => GuidanceChange::Unchanged,
+        Some(_) if find_blocks(&content).is_empty() => GuidanceChange::Append,
+        Some(_) => GuidanceChange::Replace,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuidanceBlock {
+    pub bytes: usize,
+    pub legacy: bool,
+}
+
+pub fn guidance_blocks(content: &str) -> Vec<GuidanceBlock> {
+    find_blocks(content)
+        .into_iter()
+        .map(|b| GuidanceBlock { bytes: b.end - b.start, legacy: b.kind != BlockKind::Shared })
+        .collect()
+}
+
+pub fn agents_md_guidance_state(path: &Path) -> SteeringState {
+    match std::fs::read_to_string(path) {
+        Ok(content) => guidance_state(&content),
+        Err(_) => SteeringState::Missing,
+    }
+}
+
+pub(crate) fn guidance_state(content: &str) -> SteeringState {
+    let blocks = find_blocks(content);
+    let [block] = blocks[..] else {
+        return if blocks.is_empty() { SteeringState::UserAuthored } else { SteeringState::Stale };
+    };
+    let text = &content[block.start..block.end];
+    let current = block.kind == BlockKind::Shared
+        && embedded_sqz_path(text)
+            .is_some_and(|p| text == agents_md_guidance_block(p).trim_end_matches('\n'));
+    if current {
+        SteeringState::Current
+    } else {
+        SteeringState::Stale
+    }
+}
+
+pub fn refresh_agents_md_guidance(path: &Path, fallback_sqz_path: &str) -> Result<bool> {
+    if agents_md_guidance_state(path) != SteeringState::Stale {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| SqzError::Other(format!("failed to read {}: {e}", path.display())))?;
+    let sqz_path = find_blocks(&content)
+        .iter()
+        .filter_map(|b| embedded_sqz_path(&content[b.start..b.end]))
+        .find(|p| Path::new(p).is_file())
+        .unwrap_or(fallback_sqz_path)
+        .to_string();
+    write_guidance(path, &sqz_path)
+}
+
+pub fn codex_mcp_registered() -> bool {
+    std::fs::read_to_string(codex_config_path())
+        .ok()
+        .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok())
+        .is_some_and(|doc| {
+            doc.get("mcp_servers")
+                .and_then(|v| v.get("sqz"))
+                .and_then(|v| v.get("command"))
+                .is_some()
+        })
+}
+
+pub(crate) fn remove_guidance_from(
+    path: &Path,
+    drop: &[BlockKind],
+) -> Result<Option<(PathBuf, bool)>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| SqzError::Other(format!("failed to read {}: {e}", path.display())))?;
+    let Some(updated) = remove_blocks(&content, drop) else {
+        return Ok(Some((path.to_path_buf(), false)));
+    };
+    if is_essentially_empty_agents_md(&updated) {
+        std::fs::remove_file(path)
+            .map_err(|e| SqzError::Other(format!("failed to remove {}: {e}", path.display())))?;
+    } else {
+        std::fs::write(path, updated)
+            .map_err(|e| SqzError::Other(format!("failed to write {}: {e}", path.display())))?;
+    }
+    Ok(Some((path.to_path_buf(), true)))
+}
+
+pub fn remove_all_sqz_guidance(project_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut changed = Vec::new();
+    for path in [project_dir.join(".rules"), agents_md_path(project_dir)] {
+        if let Some((path, true)) = remove_guidance_from(&path, &BlockKind::ALL)? {
+            changed.push(path);
+        }
+    }
+    Ok(changed)
 }
 
 /// Install sqz's guidance block into `AGENTS.md` at `project_dir`.
@@ -185,26 +395,7 @@ pub fn install_agents_md_guidance(project_dir: &Path, sqz_path: &str) -> Result<
     let block = agents_md_guidance_block(sqz_path);
 
     if path.exists() {
-        let existing = std::fs::read_to_string(&path).map_err(|e| {
-            SqzError::Other(format!("failed to read {}: {e}", path.display()))
-        })?;
-        if agents_md_has_sqz_block(&existing) {
-            return Ok(false);
-        }
-        // Append with a guaranteed blank-line separator so sqz's section
-        // doesn't accidentally fuse with a trailing user section.
-        let mut new_content = existing;
-        if !new_content.ends_with('\n') {
-            new_content.push('\n');
-        }
-        if !new_content.ends_with("\n\n") {
-            new_content.push('\n');
-        }
-        new_content.push_str(&block);
-        std::fs::write(&path, new_content).map_err(|e| {
-            SqzError::Other(format!("failed to write {}: {e}", path.display()))
-        })?;
-        return Ok(true);
+        return write_guidance(&path, sqz_path);
     }
 
     // Fresh AGENTS.md — write just sqz's block. A tiny preamble is added
@@ -238,68 +429,21 @@ Windsurf, Amp, Devin) working in this repository. See <https://agentsmd.io>.
 ///
 /// Returns `Ok(None)` when `AGENTS.md` does not exist at all.
 pub fn remove_agents_md_guidance(project_dir: &Path) -> Result<Option<(PathBuf, bool)>> {
-    let path = agents_md_path(project_dir);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content = std::fs::read_to_string(&path).map_err(|e| {
-        SqzError::Other(format!("failed to read {}: {e}", path.display()))
-    })?;
-    if !agents_md_has_sqz_block(&content) {
-        return Ok(Some((path, false)));
-    }
+    let zed_uses_it = crate::zed_integration::zed_mcp_registered()
+        && crate::zed_integration::zed_guidance_target(project_dir) == agents_md_path(project_dir);
+    remove_agents_md_guidance_at(project_dir, zed_uses_it)
+}
 
-    // Find the slice that contains sqz's block (BEGIN..=END sentinel,
-    // plus any immediate surrounding blank line we contributed on install
-    // so the remaining file reads cleanly).
-    let begin_idx = match content.find(AGENTS_MD_BEGIN) {
-        Some(i) => i,
-        None => return Ok(Some((path, false))),
+pub(crate) fn remove_agents_md_guidance_at(
+    project_dir: &Path,
+    shared_in_use: bool,
+) -> Result<Option<(PathBuf, bool)>> {
+    let drop: &[BlockKind] = if shared_in_use {
+        &[BlockKind::Codex]
+    } else {
+        &[BlockKind::Codex, BlockKind::Shared]
     };
-    let after_end_idx = match content.find(AGENTS_MD_END) {
-        Some(i) => i + AGENTS_MD_END.len(),
-        None => {
-            // BEGIN without END — truncated/edited file. Preserve the
-            // user's file and emit a soft no-op rather than destroying
-            // content we can't precisely delimit.
-            return Ok(Some((path, false)));
-        }
-    };
-
-    let mut new_content = String::with_capacity(content.len());
-    new_content.push_str(&content[..begin_idx]);
-    // Trim any trailing blank-line run that was inserted to separate
-    // sqz's block from what preceded it — but keep one trailing newline
-    // if the file had content before the block.
-    while new_content.ends_with("\n\n\n") {
-        new_content.pop();
-    }
-    let tail = &content[after_end_idx..];
-    // Skip the leading newline(s) right after our END sentinel so the
-    // trailing user content starts cleanly.
-    let trimmed_tail = tail.trim_start_matches('\n');
-    if !trimmed_tail.is_empty() {
-        if !new_content.ends_with('\n') {
-            new_content.push('\n');
-        }
-        new_content.push_str(trimmed_tail);
-    }
-
-    // If the remaining content is empty (or only the stock preamble sqz
-    // wrote on first install), remove the file entirely — a near-empty
-    // AGENTS.md is worse than no file.
-    let essentially_empty = is_essentially_empty_agents_md(&new_content);
-    if essentially_empty {
-        std::fs::remove_file(&path).map_err(|e| {
-            SqzError::Other(format!("failed to remove {}: {e}", path.display()))
-        })?;
-        return Ok(Some((path, true)));
-    }
-
-    std::fs::write(&path, new_content).map_err(|e| {
-        SqzError::Other(format!("failed to write {}: {e}", path.display()))
-    })?;
-    Ok(Some((path, true)))
+    remove_guidance_from(&agents_md_path(project_dir), drop)
 }
 
 /// Return `true` when the remaining `AGENTS.md` content has no
@@ -566,7 +710,198 @@ mod tests {
         assert!(block.contains(AGENTS_MD_BEGIN));
         assert!(block.contains(AGENTS_MD_END));
         assert!(block.contains("| /usr/local/bin/sqz compress"));
-        assert!(block.contains("sqz-mcp"));
+        assert!(block.contains("sqz_read_file"));
+    }
+
+    #[test]
+    fn shared_guidance_is_short_plain_and_complete() {
+        let text = sqz_guidance("/usr/local/bin/sqz");
+        assert!(text.len() < 1000, "{} bytes", text.len());
+        assert!(!text.contains('%'));
+        assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'));
+        assert!(text.contains("\ngit status 2>&1 | /usr/local/bin/sqz compress\n"));
+        for needle in [
+            "run commands without it",
+            "sqz_read_file",
+            "sqz_grep",
+            "sqz_list_dir",
+            "sqz_recall",
+            "`expand`",
+            "/usr/local/bin/sqz expand",
+            "§ref:HASH§",
+            "§ref:HASH:L40-80§",
+            "«A1»",
+            "[Abbreviations]",
+            "SQZ_NO_DEDUP=1",
+            "SQZ_NO_ABBREV=1",
+        ] {
+            assert!(text.contains(needle), "missing {needle}");
+        }
+        assert_eq!(embedded_sqz_path(&text), Some("/usr/local/bin/sqz"));
+    }
+
+    fn legacy(kind: &str, body: &str) -> String {
+        format!(
+            "<!-- BEGIN sqz-{kind}-guidance (auto-installed by sqz init; remove this block to disable) -->\n\n{body}\n\n<!-- END sqz-{kind}-guidance -->"
+        )
+    }
+
+    #[test]
+    fn old_blocks_are_replaced_in_place_by_one_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let head = "# Rules\n\nBe polite.\n\n";
+        let tail = "\n\n## Notes\n\nKeep this.\n";
+        std::fs::write(
+            &path,
+            format!(
+                "{head}{}\n\n{}{tail}",
+                legacy("agents", "git status        git status 2>&1 | /old/release/sqz compress"),
+                legacy("zed", "git status 2>&1 | /old/debug/sqz compress"),
+            ),
+        )
+        .unwrap();
+
+        assert!(install_agents_md_guidance(dir.path(), "/new/sqz").unwrap());
+        let block = agents_md_guidance_block("/new/sqz");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{head}{}{tail}", block.trim_end_matches('\n'))
+        );
+        assert!(!install_agents_md_guidance(dir.path(), "/new/sqz").unwrap());
+    }
+
+    #[test]
+    fn a_block_between_user_paragraphs_is_removed_without_touching_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n\nMine.\n\n{}\n\nAlso mine.\n",
+                legacy("zed", "git status 2>&1 | /old/sqz compress"),
+                legacy("agents", "git status        git status 2>&1 | /old/sqz compress"),
+            ),
+        )
+        .unwrap();
+
+        assert!(install_agents_md_guidance(dir.path(), "/new/sqz").unwrap());
+        let block = agents_md_guidance_block("/new/sqz");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{}\n\nMine.\n\nAlso mine.\n", block.trim_end_matches('\n'))
+        );
+    }
+
+    #[test]
+    fn refresh_keeps_the_first_binary_that_still_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("sqz");
+        std::fs::write(&bin, "").unwrap();
+        let bin = bin.to_string_lossy().to_string();
+        let path = dir.path().join("AGENTS.md");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n\n{}\n",
+                legacy("agents", "git status        git status 2>&1 | /gone/sqz compress"),
+                legacy("zed", &format!("git status 2>&1 | {bin} compress")),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(agents_md_guidance_state(&path), SteeringState::Stale);
+        assert!(refresh_agents_md_guidance(&path, "/fallback/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), agents_md_guidance_block(&bin));
+        assert_eq!(agents_md_guidance_state(&path), SteeringState::Current);
+        assert!(!refresh_agents_md_guidance(&path, "/fallback/sqz").unwrap());
+    }
+
+    #[test]
+    fn refresh_falls_back_when_the_old_binary_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        std::fs::write(
+            &path,
+            format!("{}\n", legacy("agents", "git status        git status 2>&1 | /gone/sqz compress")),
+        )
+        .unwrap();
+
+        assert!(refresh_agents_md_guidance(&path, "/fallback/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), agents_md_guidance_block("/fallback/sqz"));
+    }
+
+    #[test]
+    fn outdated_text_in_the_new_block_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        std::fs::write(&path, agents_md_guidance_block("/bin/sqz").replace("sqz_recall", "recall")).unwrap();
+        assert_eq!(agents_md_guidance_state(&path), SteeringState::Stale);
+        std::fs::write(&path, format!("{0}\n{0}", agents_md_guidance_block("/bin/sqz"))).unwrap();
+        assert_eq!(agents_md_guidance_state(&path), SteeringState::Stale);
+    }
+
+    #[test]
+    fn files_without_a_complete_sqz_block_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        std::fs::write(&path, "# Mine\n").unwrap();
+        assert_eq!(agents_md_guidance_state(&path), SteeringState::UserAuthored);
+        assert!(!refresh_agents_md_guidance(&path, "/fallback/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Mine\n");
+
+        let broken = "# Mine\n\n<!-- BEGIN sqz-agents-guidance (auto-installed by sqz init; remove this block to disable) -->\nhalf\n";
+        std::fs::write(&path, broken).unwrap();
+        assert!(!install_agents_md_guidance(dir.path(), "/new/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    #[test]
+    fn guidance_change_says_what_init_would_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        assert_eq!(guidance_change(&path, "/bin/sqz"), GuidanceChange::Create);
+        std::fs::write(&path, "# Mine\n").unwrap();
+        assert_eq!(guidance_change(&path, "/bin/sqz"), GuidanceChange::Append);
+        std::fs::write(&path, format!("# Mine\n\n{}\n", legacy("zed", "git status 2>&1 | /bin/sqz compress"))).unwrap();
+        assert_eq!(guidance_change(&path, "/bin/sqz"), GuidanceChange::Replace);
+        install_agents_md_guidance(dir.path(), "/bin/sqz").unwrap();
+        assert_eq!(guidance_change(&path, "/bin/sqz"), GuidanceChange::Unchanged);
+    }
+
+    #[test]
+    fn codex_removal_keeps_the_shared_block_while_zed_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let block = agents_md_guidance_block("sqz");
+        std::fs::write(&path, format!("# Mine\n\n{}\n\n{block}", legacy("agents", "a"))).unwrap();
+
+        let (_, changed) = remove_agents_md_guidance_at(dir.path(), true).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("# Mine\n\n{block}"));
+        let (_, changed) = remove_agents_md_guidance_at(dir.path(), true).unwrap().unwrap();
+        assert!(!changed);
+        let (_, changed) = remove_agents_md_guidance_at(dir.path(), false).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Mine\n");
+    }
+
+    #[test]
+    fn full_uninstall_removes_old_and_new_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("AGENTS.md");
+        let rules = dir.path().join(".rules");
+        std::fs::write(
+            &agents,
+            format!("# Mine\n\n{}\n\n{}", legacy("agents", "a"), agents_md_guidance_block("sqz")),
+        )
+        .unwrap();
+        std::fs::write(&rules, format!("Tabs.\n\n{}\n", legacy("zed", "z"))).unwrap();
+
+        let changed = remove_all_sqz_guidance(dir.path()).unwrap();
+        assert_eq!(changed, vec![rules.clone(), agents.clone()]);
+        assert_eq!(std::fs::read_to_string(&agents).unwrap(), "# Mine\n");
+        assert_eq!(std::fs::read_to_string(&rules).unwrap(), "Tabs.\n");
     }
 
     #[test]
@@ -627,7 +962,7 @@ mod tests {
         install_agents_md_guidance(dir.path(), "sqz").unwrap();
 
         let (returned_path, changed) =
-            remove_agents_md_guidance(dir.path()).unwrap().unwrap();
+            remove_agents_md_guidance_at(dir.path(), false).unwrap().unwrap();
         assert_eq!(returned_path, path);
         assert!(changed);
         assert!(path.exists(),
@@ -650,7 +985,7 @@ mod tests {
         assert!(path.exists());
 
         let (_returned, changed) =
-            remove_agents_md_guidance(dir.path()).unwrap().unwrap();
+            remove_agents_md_guidance_at(dir.path(), false).unwrap().unwrap();
         assert!(changed);
         assert!(
             !path.exists(),
@@ -665,7 +1000,7 @@ mod tests {
         std::fs::write(&path, "# User-authored, sqz never touched this.\n").unwrap();
 
         let (returned_path, changed) =
-            remove_agents_md_guidance(dir.path()).unwrap().unwrap();
+            remove_agents_md_guidance_at(dir.path(), false).unwrap().unwrap();
         assert_eq!(returned_path, path);
         assert!(!changed, "no sqz block means no change");
         assert!(path.exists(), "user file must be untouched");
@@ -674,7 +1009,7 @@ mod tests {
     #[test]
     fn remove_agents_md_returns_none_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let result = remove_agents_md_guidance(dir.path()).unwrap();
+        let result = remove_agents_md_guidance_at(dir.path(), false).unwrap();
         assert!(result.is_none());
     }
 

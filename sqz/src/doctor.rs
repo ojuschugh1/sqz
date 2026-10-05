@@ -100,6 +100,11 @@ pub struct Activity {
 pub struct Managed {
     pub kiro_global: SteeringState,
     pub kiro_project: SteeringState,
+    pub agents_md: SteeringState,
+    pub zed_rules: SteeringState,
+    pub cursor_rules: SteeringState,
+    pub windsurf_rules: SteeringState,
+    pub cline_rules: SteeringState,
     pub shell_block_stale: bool,
     /// A Claude Code settings file has the sqz hook without the allow rules
     /// and PostToolUse hook current sqz writes next to it.
@@ -150,6 +155,36 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
         problems.push(Problem {
             message: "Kiro loads sqz steering twice (user-level and this project), on every request".to_string(),
             fix: Some(format!("{FIX_CMD}   (removes the project copy; the user-level one covers every workspace)")),
+        });
+    }
+    for (file, state) in [("AGENTS.md", managed.agents_md), (".rules", managed.zed_rules)] {
+        if state == SteeringState::Stale {
+            problems.push(Problem {
+                message: format!(
+                    "the sqz guidance in {file} was written by an older sqz, so agents read outdated or duplicated guidance on every request"
+                ),
+                fix: Some(format!(
+                    "{FIX_CMD}   (replaces the sqz blocks with one current block; the rest of {file} stays as it is)"
+                )),
+            });
+        }
+    }
+    let stale_rules: Vec<&str> = [
+        ("Cursor", managed.cursor_rules),
+        ("Windsurf", managed.windsurf_rules),
+        ("Cline", managed.cline_rules),
+    ]
+    .into_iter()
+    .filter(|(_, state)| *state == SteeringState::Stale)
+    .map(|(name, _)| name)
+    .collect();
+    if !stale_rules.is_empty() {
+        problems.push(Problem {
+            message: format!(
+                "the sqz rules for {} were written by an older sqz, so the agent is reading outdated guidance",
+                stale_rules.join(", ")
+            ),
+            fix: Some(FIX_CMD.to_string()),
         });
     }
     if managed.claude_stale {
@@ -448,13 +483,56 @@ fn kiro_guidance(project_dir: &Path) -> Vec<(String, usize)> {
             found.push((label, bytes));
         }
     }
-    if let Ok(agents) = std::fs::read_to_string(project_dir.join("AGENTS.md")) {
-        for block in agents.split("<!-- BEGIN sqz-").skip(1) {
-            let bytes = block.find("<!-- END sqz-").unwrap_or(block.len());
-            found.push(("AGENTS.md block".to_string(), bytes));
+    found.extend(guidance_block_copies(&project_dir.join("AGENTS.md"), "AGENTS.md"));
+    found
+}
+
+fn guidance_block_copies(path: &Path, label: &str) -> Vec<(String, usize)> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    sqz_engine::guidance_blocks(&content)
+        .into_iter()
+        .map(|block| {
+            let kind = if block.legacy { " (old)" } else { "" };
+            (format!("{label} block{kind}"), block.bytes)
+        })
+        .collect()
+}
+
+fn print_guidance(label: &str, copies: &[(String, usize)]) {
+    let bytes: usize = copies.iter().map(|(_, b)| b).sum();
+    let labels: Vec<&str> = copies.iter().map(|(l, _)| l.as_str()).collect();
+    println!(
+        "  {label:<16}{} cop{}, ~{} tokens{}{}",
+        copies.len(),
+        if copies.len() == 1 { "y" } else { "ies" },
+        approx_tokens(bytes),
+        if labels.is_empty() { "" } else { ": " },
+        labels.join(", ")
+    );
+}
+
+fn guidance_readers(tools: &[ToolStatus], project_dir: &Path) -> Vec<(Vec<&'static str>, PathBuf)> {
+    let mut readers: Vec<(Vec<&'static str>, PathBuf)> = Vec::new();
+    for t in tools.iter().filter(|t| matches!(t.name, "Codex" | "Zed") && t.config.configured()) {
+        let path = if t.name == "Zed" {
+            sqz_engine::zed_guidance_target(project_dir)
+        } else {
+            sqz_engine::agents_md_path(project_dir)
+        };
+        match readers.iter_mut().find(|(_, p)| *p == path) {
+            Some((clients, _)) => clients.push(t.name),
+            None => readers.push((vec![t.name], path)),
         }
     }
-    found
+    readers
+}
+
+fn rules_state(project_dir: &Path, tool: &str) -> SteeringState {
+    sqz_engine::sqz_rules_path(project_dir, tool)
+        .map(|path| sqz_engine::sqz_rules_state(&path, tool))
+        .unwrap_or(SteeringState::Missing)
 }
 
 fn approx_tokens(bytes: usize) -> usize {
@@ -504,6 +582,33 @@ fn apply_fixes(store: &sqz_engine::SessionStore, managed: &Managed, project_dir:
         }
     }
 
+    for (file, state) in [("AGENTS.md", managed.agents_md), (".rules", managed.zed_rules)] {
+        if state != SteeringState::Stale {
+            continue;
+        }
+        match sqz_engine::refresh_agents_md_guidance(&project_dir.join(file), &fallback) {
+            Ok(_) => println!("  ok  --fix: replaced the sqz guidance in {file} with one current block"),
+            Err(e) => println!("  ERR --fix: could not refresh {file}: {e}"),
+        }
+    }
+    for (tool, state) in [
+        ("Cursor", managed.cursor_rules),
+        ("Windsurf", managed.windsurf_rules),
+        ("Cline", managed.cline_rules),
+    ] {
+        if state != SteeringState::Stale {
+            continue;
+        }
+        let Some(path) = sqz_engine::sqz_rules_path(project_dir, tool) else {
+            continue;
+        };
+        let shown = path.strip_prefix(project_dir).unwrap_or(&path).display().to_string();
+        match sqz_engine::refresh_sqz_rules(&path, tool, &fallback) {
+            Ok(_) => println!("  ok  --fix: refreshed {shown}"),
+            Err(e) => println!("  ERR --fix: could not refresh {shown}: {e}"),
+        }
+    }
+
     if managed.shell_block_stale {
         match ShellHook::detect().refresh() {
             Ok(true) => println!("  ok  --fix: refreshed the sqz block in your shell rc (open a new shell to pick it up)"),
@@ -535,6 +640,11 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
     Managed {
         kiro_global: sqz_engine::kiro_steering_state(&sqz_engine::kiro_user_steering_path(), true),
         kiro_project: sqz_engine::kiro_steering_state(&sqz_engine::kiro_steering_path(project_dir), false),
+        agents_md: sqz_engine::agents_md_guidance_state(&sqz_engine::agents_md_path(project_dir)),
+        zed_rules: sqz_engine::agents_md_guidance_state(&project_dir.join(".rules")),
+        cursor_rules: rules_state(project_dir, "Cursor"),
+        windsurf_rules: rules_state(project_dir, "Windsurf"),
+        cline_rules: rules_state(project_dir, "Cline"),
         shell_block_stale: hook.needs_refresh(),
         claude_stale: claude_settings_paths(project_dir)
             .iter()
@@ -640,17 +750,11 @@ pub fn run(fix: bool) -> i32 {
     }
     let kiro_configured = tools.iter().any(|t| t.name == "Kiro" && t.config.configured());
     if kiro_configured {
-        let guidance = kiro_guidance(&project_dir);
-        let bytes: usize = guidance.iter().map(|(_, b)| b).sum();
-        let labels: Vec<&str> = guidance.iter().map(|(l, _)| l.as_str()).collect();
-        println!(
-            "  Kiro guidance   {} cop{}, ~{} tokens{}{}",
-            guidance.len(),
-            if guidance.len() == 1 { "y" } else { "ies" },
-            approx_tokens(bytes),
-            if labels.is_empty() { "" } else { ": " },
-            labels.join(", ")
-        );
+        print_guidance("Kiro guidance", &kiro_guidance(&project_dir));
+    }
+    for (clients, path) in guidance_readers(&tools, &project_dir) {
+        let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        print_guidance(&clients.join(", "), &guidance_block_copies(&path, &file));
     }
 
     // ── Activity ────────────────────────────────────────────────────
@@ -716,6 +820,11 @@ mod tests {
         Managed {
             kiro_global: SteeringState::Current,
             kiro_project: SteeringState::Missing,
+            agents_md: SteeringState::Missing,
+            zed_rules: SteeringState::Missing,
+            cursor_rules: SteeringState::Missing,
+            windsurf_rules: SteeringState::Missing,
+            cline_rules: SteeringState::Missing,
             shell_block_stale: false,
             claude_stale: false,
         }
@@ -790,8 +899,7 @@ mod tests {
         let managed = Managed {
             kiro_global: SteeringState::Stale,
             kiro_project: SteeringState::Current,
-            shell_block_stale: false,
-            claude_stale: false,
+            ..clean()
         };
         let problems = diagnose(&tools, &active(), &managed);
         assert_eq!(problems.len(), 2, "{problems:?}");
@@ -806,10 +914,84 @@ mod tests {
         let managed = Managed {
             kiro_global: SteeringState::UserAuthored,
             kiro_project: SteeringState::UserAuthored,
-            shell_block_stale: false,
-            claude_stale: false,
+            ..clean()
         };
         assert!(diagnose(&tools, &active(), &managed).is_empty());
+    }
+
+    #[test]
+    fn stale_agents_md_and_rules_files_are_flagged() {
+        let tools = vec![tool("Codex", "codex", Detection::Detected, ConfigScope::Both)];
+        let managed = Managed {
+            agents_md: SteeringState::Stale,
+            cursor_rules: SteeringState::UserAuthored,
+            windsurf_rules: SteeringState::Stale,
+            cline_rules: SteeringState::Stale,
+            ..clean()
+        };
+        let problems = diagnose(&tools, &active(), &managed);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].message.contains("AGENTS.md") && problems[0].message.contains("older sqz"));
+        assert!(problems[1].message.contains("Windsurf, Cline"), "{}", problems[1].message);
+        assert!(!problems[1].message.contains("Cursor"));
+        assert!(problems.iter().all(|p| p.fix.as_deref().unwrap().starts_with(FIX_CMD)));
+    }
+
+    #[test]
+    fn current_and_user_guidance_files_are_not_flagged() {
+        let tools = vec![tool("Zed", "zed", Detection::Detected, ConfigScope::Both)];
+        let managed = Managed {
+            agents_md: SteeringState::Current,
+            zed_rules: SteeringState::UserAuthored,
+            cursor_rules: SteeringState::Current,
+            ..clean()
+        };
+        assert!(diagnose(&tools, &active(), &managed).is_empty());
+    }
+
+    #[test]
+    fn the_shared_block_counts_once_and_old_blocks_are_labelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let block = sqz_engine::agents_md_guidance_block("/bin/sqz");
+        std::fs::write(&path, format!("# Mine\n\n{block}")).unwrap();
+        assert_eq!(
+            guidance_block_copies(&path, "AGENTS.md"),
+            vec![("AGENTS.md block".to_string(), block.trim_end_matches('\n').len())]
+        );
+
+        std::fs::write(
+            &path,
+            "<!-- BEGIN sqz-zed-guidance (auto-installed by sqz init; remove this block to disable) -->\nold\n<!-- END sqz-zed-guidance -->\n",
+        )
+        .unwrap();
+        let copies = guidance_block_copies(&path, "AGENTS.md");
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].0, "AGENTS.md block (old)");
+    }
+
+    #[test]
+    fn codex_and_zed_are_counted_for_the_file_each_one_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = vec![
+            tool("Codex", "codex", Detection::Detected, ConfigScope::Both),
+            tool("Zed", "zed", Detection::Detected, ConfigScope::Both),
+            tool("Cursor", "cursor", Detection::Detected, ConfigScope::Both),
+        ];
+        assert_eq!(
+            guidance_readers(&tools, dir.path()),
+            vec![(vec!["Codex", "Zed"], dir.path().join("AGENTS.md"))]
+        );
+
+        std::fs::write(dir.path().join(".rules"), "Tabs.\n").unwrap();
+        assert_eq!(
+            guidance_readers(&tools, dir.path()),
+            vec![
+                (vec!["Codex"], dir.path().join("AGENTS.md")),
+                (vec!["Zed"], dir.path().join(".rules")),
+            ]
+        );
+        assert!(guidance_readers(&tools[2..], dir.path()).is_empty());
     }
 
     #[test]

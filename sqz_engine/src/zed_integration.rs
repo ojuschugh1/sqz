@@ -9,8 +9,7 @@
 //!    `.github/copilot-instructions.md`, `AGENT.md`, `AGENTS.md`,
 //!    `CLAUDE.md`, `GEMINI.md` (per zed.dev/docs/ai/instructions). sqz
 //!    appends a sentinel-bracketed guidance block to `.rules` when that
-//!    file exists (it shadows everything else), otherwise to `AGENTS.md`
-//!    (shared with the Codex integration's file, separate block).
+//!    file exists (it shadows everything else), otherwise to `AGENTS.md`.
 //!
 //! 2. **MCP registration** — Zed reads MCP servers from the
 //!    `context_servers` map in its `settings.json`
@@ -79,53 +78,9 @@ pub fn zed_guidance_target(project_dir: &Path) -> PathBuf {
 
 // ── Sentinel-bracketed guidance block ─────────────────────────────────────
 
-const ZED_GUIDANCE_BEGIN: &str =
-    "<!-- BEGIN sqz-zed-guidance (auto-installed by sqz init; remove this block to disable) -->";
-const ZED_GUIDANCE_END: &str = "<!-- END sqz-zed-guidance -->";
-
 /// Build the markdown block sqz appends to the Zed instruction file.
 pub fn zed_guidance_block(sqz_path: &str) -> String {
-    format!(
-        "\
-{begin}
-
-## sqz — Token-Optimized Output (Zed Agent)
-
-When running terminal commands whose output may be long (git log/diff,
-test runners, build logs, `ls -la`, `docker ps`), pipe the output
-through `sqz compress` to cut token consumption:
-
-```bash
-git status 2>&1 | {sqz_path} compress
-cargo test 2>&1 | {sqz_path} compress
-```
-
-Do NOT pipe interactive commands (REPLs, `ssh`), compound commands with
-shell operators (`&&`, `>`, `;`), or output that is already short.
-
-The `sqz` MCP server is registered in Zed's `settings.json` under
-`context_servers`. Prefer its tools when they fit:
-
-- `sqz_read_file` / `sqz_grep` / `sqz_list_dir` — file access with
-  caching; repeat reads of unchanged content cost ~13 tokens.
-- `compress` — compress a blob of text you already have.
-- `passthrough` — return text unchanged (escape hatch).
-- `expand` — resolve a `§ref:HASH§` token back to the original bytes.
-  `§ref:HASH:L40-80§` means lines 40-80 of content you already have in
-  full; `expand` on it returns just those lines.
-- `sqz_recall` — full-text search over everything sqz has compressed
-  (recover context lost to compaction).
-
-If you see a `§ref:HASH§` token you can't parse, run
-`{sqz_path} expand <prefix>` or set `SQZ_NO_DEDUP=1` on the command.
-If a `«A1»` symbol replaced a value you need verbatim, re-run with
-`SQZ_NO_ABBREV=1` (or `--no-abbrev`).
-
-{end}
-",
-        begin = ZED_GUIDANCE_BEGIN,
-        end = ZED_GUIDANCE_END,
-    )
+    crate::codex_integration::agents_md_guidance_block(sqz_path)
 }
 
 // ── Guidance install / uninstall ──────────────────────────────────────────
@@ -137,32 +92,24 @@ If a `«A1»` symbol replaced a value you need verbatim, re-run with
 /// block. Appends to existing files rather than clobbering them.
 pub fn install_zed_guidance(project_dir: &Path, sqz_path: &str) -> Result<bool> {
     let path = zed_guidance_target(project_dir);
-    let block = zed_guidance_block(sqz_path);
 
     if path.exists() {
-        let existing = std::fs::read_to_string(&path).map_err(|e| {
-            SqzError::Other(format!("failed to read {}: {e}", path.display()))
-        })?;
-        if existing.contains(ZED_GUIDANCE_BEGIN) {
-            return Ok(false);
-        }
-        let mut updated = existing;
-        if !updated.is_empty() && !updated.ends_with('\n') {
-            updated.push('\n');
-        }
-        if !updated.is_empty() {
-            updated.push('\n');
-        }
-        updated.push_str(&block);
-        std::fs::write(&path, updated).map_err(|e| {
-            SqzError::Other(format!("failed to write {}: {e}", path.display()))
-        })?;
-    } else {
-        std::fs::write(&path, &block).map_err(|e| {
-            SqzError::Other(format!("failed to write {}: {e}", path.display()))
-        })?;
+        return crate::codex_integration::write_guidance(&path, sqz_path);
     }
+    std::fs::write(&path, zed_guidance_block(sqz_path)).map_err(|e| {
+        SqzError::Other(format!("failed to write {}: {e}", path.display()))
+    })?;
     Ok(true)
+}
+
+pub(crate) fn zed_mcp_registered() -> bool {
+    let Ok(text) = std::fs::read_to_string(zed_settings_path()) else {
+        return false;
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(root) => root.get("context_servers").and_then(|s| s.get("sqz")).is_some(),
+        Err(_) => text.contains("\"sqz\""),
+    }
 }
 
 /// Remove sqz's Zed guidance block from BOTH `.rules` and `AGENTS.md`
@@ -173,53 +120,29 @@ pub fn install_zed_guidance(project_dir: &Path, sqz_path: &str) -> Result<bool> 
 /// (or whitespace-only) after stripping is deleted, matching the
 /// AGENTS.md uninstall behaviour of the Codex integration.
 pub fn remove_zed_guidance(project_dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut changed = Vec::new();
-    for candidate in [project_dir.join(".rules"), project_dir.join("AGENTS.md")] {
-        if !candidate.exists() {
-            continue;
-        }
-        let content = std::fs::read_to_string(&candidate).map_err(|e| {
-            SqzError::Other(format!("failed to read {}: {e}", candidate.display()))
-        })?;
-        let Some(stripped) = strip_sentinel_block(&content) else {
-            continue;
-        };
-        if stripped.trim().is_empty() {
-            std::fs::remove_file(&candidate).map_err(|e| {
-                SqzError::Other(format!("failed to remove {}: {e}", candidate.display()))
-            })?;
-        } else {
-            std::fs::write(&candidate, stripped).map_err(|e| {
-                SqzError::Other(format!("failed to write {}: {e}", candidate.display()))
-            })?;
-        }
-        changed.push(candidate);
-    }
-    Ok(changed)
+    remove_zed_guidance_at(project_dir, crate::codex_integration::codex_mcp_registered())
 }
 
-/// Excise the sentinel-bracketed block (plus surrounding blank padding).
-/// Returns `None` when the content has no block.
-fn strip_sentinel_block(content: &str) -> Option<String> {
-    let start = content.find(ZED_GUIDANCE_BEGIN)?;
-    let end_marker = content[start..].find(ZED_GUIDANCE_END)?;
-    let mut end = start + end_marker + ZED_GUIDANCE_END.len();
-    // Swallow the trailing newline(s) the block brought with it.
-    while content[end..].starts_with('\n') {
-        end += 1;
+pub(crate) fn remove_zed_guidance_at(
+    project_dir: &Path,
+    codex_installed: bool,
+) -> Result<Vec<PathBuf>> {
+    use crate::codex_integration::{remove_guidance_from, BlockKind};
+    let from_agents_md: &[BlockKind] = if codex_installed {
+        &[BlockKind::Zed]
+    } else {
+        &[BlockKind::Zed, BlockKind::Shared]
+    };
+    let mut changed = Vec::new();
+    for (path, drop) in [
+        (project_dir.join(".rules"), &[BlockKind::Zed, BlockKind::Shared][..]),
+        (project_dir.join("AGENTS.md"), from_agents_md),
+    ] {
+        if let Some((path, true)) = remove_guidance_from(&path, drop)? {
+            changed.push(path);
+        }
     }
-    // And the blank separator line we inserted before the block.
-    let mut trimmed_start = start;
-    while trimmed_start > 0 && content[..trimmed_start].ends_with('\n') {
-        trimmed_start -= 1;
-    }
-    if trimmed_start < content.len() && content[trimmed_start..].starts_with('\n') {
-        trimmed_start += 1; // keep exactly one newline before the cut
-    }
-    let mut out = String::with_capacity(content.len());
-    out.push_str(&content[..trimmed_start]);
-    out.push_str(&content[end..]);
-    Some(out)
+    Ok(changed)
 }
 
 // ── MCP registration in Zed's settings.json ──────────────────────────────
@@ -416,14 +339,16 @@ mod tests {
 
     // ── Guidance install / remove ────────────────────────────────────
 
+    const BEGIN: &str = "<!-- BEGIN sqz-guidance (";
+
     #[test]
     fn install_creates_agents_md_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(install_zed_guidance(dir.path(), "/usr/bin/sqz").unwrap());
         let content = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
-        assert!(content.contains(ZED_GUIDANCE_BEGIN));
+        assert!(content.contains(BEGIN));
         assert!(content.contains("/usr/bin/sqz compress"));
-        assert!(content.contains("context_servers"));
+        assert_eq!(content, crate::codex_integration::agents_md_guidance_block("/usr/bin/sqz"));
     }
 
     #[test]
@@ -433,7 +358,7 @@ mod tests {
         assert!(install_zed_guidance(dir.path(), "sqz").unwrap());
         let content = std::fs::read_to_string(dir.path().join(".rules")).unwrap();
         assert!(content.starts_with("Always use tabs.\n"));
-        assert!(content.contains(ZED_GUIDANCE_BEGIN));
+        assert!(content.contains(BEGIN));
         // AGENTS.md must NOT be created — .rules shadows it.
         assert!(!dir.path().join("AGENTS.md").exists());
     }
@@ -444,7 +369,16 @@ mod tests {
         assert!(install_zed_guidance(dir.path(), "sqz").unwrap());
         assert!(!install_zed_guidance(dir.path(), "sqz").unwrap());
         let content = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
-        assert_eq!(content.matches(ZED_GUIDANCE_BEGIN).count(), 1);
+        assert_eq!(content.matches(BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn codex_and_zed_share_one_block() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(crate::codex_integration::install_agents_md_guidance(dir.path(), "/usr/bin/sqz").unwrap());
+        assert!(!install_zed_guidance(dir.path(), "/usr/bin/sqz").unwrap());
+        let content = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert_eq!(content.matches("<!-- BEGIN sqz-").count(), 1);
     }
 
     #[test]
@@ -453,7 +387,7 @@ mod tests {
         std::fs::write(dir.path().join(".rules"), "Always use tabs.\n").unwrap();
         install_zed_guidance(dir.path(), "sqz").unwrap();
 
-        let changed = remove_zed_guidance(dir.path()).unwrap();
+        let changed = remove_zed_guidance_at(dir.path(), false).unwrap();
         assert_eq!(changed.len(), 1);
         let content = std::fs::read_to_string(dir.path().join(".rules")).unwrap();
         assert_eq!(content, "Always use tabs.\n");
@@ -465,8 +399,39 @@ mod tests {
         install_zed_guidance(dir.path(), "sqz").unwrap();
         assert!(dir.path().join("AGENTS.md").exists());
 
-        remove_zed_guidance(dir.path()).unwrap();
+        remove_zed_guidance_at(dir.path(), false).unwrap();
         assert!(!dir.path().join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn remove_keeps_the_shared_block_while_codex_uses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let legacy = format!(
+            "<!-- BEGIN sqz-zed-guidance (auto-installed by sqz init; remove this block to disable) -->\nold\n<!-- END sqz-zed-guidance -->\n\n{}",
+            zed_guidance_block("sqz")
+        );
+        std::fs::write(&path, &legacy).unwrap();
+
+        assert_eq!(remove_zed_guidance_at(dir.path(), true).unwrap(), vec![path.clone()]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), zed_guidance_block("sqz"));
+
+        assert_eq!(remove_zed_guidance_at(dir.path(), true).unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(remove_zed_guidance_at(dir.path(), false).unwrap(), vec![path.clone()]);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_drops_the_rules_block_even_while_codex_uses_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".rules"), "Always use tabs.\n").unwrap();
+        install_zed_guidance(dir.path(), "sqz").unwrap();
+        crate::codex_integration::install_agents_md_guidance(dir.path(), "sqz").unwrap();
+
+        let changed = remove_zed_guidance_at(dir.path(), true).unwrap();
+        assert_eq!(changed, vec![dir.path().join(".rules")]);
+        assert_eq!(std::fs::read_to_string(dir.path().join(".rules")).unwrap(), "Always use tabs.\n");
+        assert!(std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap().contains(BEGIN));
     }
 
     #[test]
@@ -478,7 +443,7 @@ mod tests {
         std::fs::write(dir.path().join(".rules"), "rules here\n").unwrap();
         install_zed_guidance(dir.path(), "sqz").unwrap();
 
-        let changed = remove_zed_guidance(dir.path()).unwrap();
+        let changed = remove_zed_guidance_at(dir.path(), false).unwrap();
         assert_eq!(changed.len(), 2, "both .rules and AGENTS.md should be cleaned");
         assert_eq!(
             std::fs::read_to_string(dir.path().join(".rules")).unwrap(),
