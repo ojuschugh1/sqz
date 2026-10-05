@@ -114,7 +114,8 @@ pub(crate) fn zed_mcp_registered() -> bool {
 
 /// Remove sqz's Zed guidance block from BOTH `.rules` and `AGENTS.md`
 /// (whichever contain it) — the target can have moved between installs
-/// if the user created `.rules` later.
+/// if the user created `.rules` later. The shared block in `AGENTS.md`
+/// stays while Codex is registered.
 ///
 /// Returns the list of files that were modified. A file left empty
 /// (or whitespace-only) after stripping is deleted, matching the

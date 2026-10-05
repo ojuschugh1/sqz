@@ -384,12 +384,12 @@ pub fn remove_all_sqz_guidance(project_dir: &Path) -> Result<Vec<PathBuf>> {
 ///
 /// If `AGENTS.md` doesn't exist yet, create it with sqz's block as the
 /// sole content. If it exists, append sqz's block (separated by a blank
-/// line so it renders as a new markdown section). If the block is
-/// already present (detected by the BEGIN sentinel), return `Ok(false)`
-/// without touching the file — `sqz init` stays idempotent.
+/// line so it renders as a new markdown section). If sqz blocks are
+/// already present, the first becomes the current block and the rest
+/// are removed, so `sqz init` stays idempotent.
 ///
 /// Returns `true` when the file was created or modified, `false` when
-/// sqz's block was already present.
+/// it was left as it was.
 pub fn install_agents_md_guidance(project_dir: &Path, sqz_path: &str) -> Result<bool> {
     let path = agents_md_path(project_dir);
     let block = agents_md_guidance_block(sqz_path);
@@ -416,7 +416,8 @@ Windsurf, Amp, Devin) working in this repository. See <https://agentsmd.io>.
 
 /// Remove sqz's guidance block from `AGENTS.md`.
 ///
-/// Locates the block by its BEGIN/END sentinels and excises it. If the
+/// Locates the block by its BEGIN/END sentinels and excises it, keeping
+/// the shared block while Zed is registered and reads this file. If the
 /// resulting `AGENTS.md` is empty (modulo whitespace) or contains only
 /// the stock preamble sqz itself wrote on first install, the file is
 /// deleted entirely — leaving an empty `AGENTS.md` would be noise.
@@ -424,8 +425,8 @@ Windsurf, Amp, Devin) working in this repository. See <https://agentsmd.io>.
 /// was never installed by sqz), this is a no-op.
 ///
 /// Returns `Ok((path, removed_or_changed))`:
-///   - `removed_or_changed = true`  — the file was modified or deleted
-///   - `removed_or_changed = false` — no sqz block was found; nothing changed
+///   - `removed_or_changed = true`: the file was modified or deleted
+///   - `removed_or_changed = false`: nothing was removed
 ///
 /// Returns `Ok(None)` when `AGENTS.md` does not exist at all.
 pub fn remove_agents_md_guidance(project_dir: &Path) -> Result<Option<(PathBuf, bool)>> {
