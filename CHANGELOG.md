@@ -144,6 +144,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1 MB of JSON 378 to 490 ms, `cargo test` with failures 404 to 531 ms,
   and `kubectl get` through the shell hook 65 to 397 ms. Calls under
   10 KB are unchanged at about 40-45 ms.
+- **Safe mode is decided by structure, not by words.** A whole output
+  went to safe mode if it mentioned a panic, a password, an api key or
+  legal text anywhere, so a `git log` whose commit messages mention a
+  panic, a README with a `password: &str` example or an HTML page with a
+  privacy policy footer was cut and never stored, and nothing dropped
+  from it could be expanded. Safe mode now needs a trace header followed
+  by frames (Rust, Python, JVM, JavaScript, Go), DDL at the start of a
+  line, a PEM block, or a credential line with a real value; everything
+  else gets the normal pipeline, stored and expandable. Python
+  tracebacks now pass through whole like the others. Output that looks
+  like it holds a secret is still never stored, on every path including
+  the MCP `compress` tool.
+- **The docs say what sqz measures and does.** The integration tables
+  list Cursor, Windsurf, Cline and Kiro as advisory instead of hooked,
+  the benchmark tables, quality benchmark and white paper come from
+  fresh runs, and the latency claim (p99 under 5 ms up to 100 KB, never
+  measured) is replaced by measured numbers: about 40 ms per
+  `sqz compress` call up to 10 KB, most of it process start and building
+  the tokenizer, 76-86 ms at 100 KB and 330-525 ms at 1 MB, on an Apple
+  M4 Pro.
 
 ### Fixed
 
@@ -309,6 +329,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SQZ_NO_DEDUP=1 git log | sqz compress`, which sets it for `git log`
   only. The guidance and the `CLAUDE.md` block now put it right before
   `sqz compress`.
+- **Stack traces, migrations and keys come through whole.** sqz routes
+  them to safe mode and said they pass through unchanged, but past about
+  500 characters the pipeline still cut them, and since safe-mode output
+  is never stored the cut lines could not be expanded: in 1.9.0 a
+  40-frame Rust panic lost 40 lines, a SQL migration 26, and a key file
+  its `-----END RSA PRIVATE KEY-----` line. The per-command formatters
+  ran before the check, so `./gradlew test` turned a 22-line JUnit trace
+  into 81 bytes and a build-script panic under `cargo build` lost 42 of
+  its 55 lines. Safe-mode output now comes back unchanged apart from
+  ANSI codes, and a formatter's summary is used only when every line of
+  each paragraph holding a trace, migration, key or credential line is
+  still in it.
+- **Counts are exact after repeated lines are merged.** Ten identical
+  lines came back as one line marked `[×3]`, a folded diff reported 11
+  unchanged lines for 18, and `cargo build` after downloading crates
+  reported `ok (5 crates compiled)` for 30, because the step that merges
+  identical lines ran first. The same step shortened pretty-printed JSON
+  arrays (`[0,0,0,0,0,0,1]` came back as `[0,0,0,1]` in safe mode).
+  Counts now come from the original lines, and that step leaves JSON
+  and diffs alone.
+- **`sqz discover` no longer prints reduction figures nobody
+  measured.** Its suggestions gave a reduction range per command, none
+  of them measured, including `kubectl get`, which no longer has a
+  formatter. It now names the commands without numbers.
 
 ## [1.9.0] — 2026-09-23
 
