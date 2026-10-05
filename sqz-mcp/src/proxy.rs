@@ -34,12 +34,9 @@ const MAX_DESCRIPTION_CHARS: usize = 400;
 /// `--lazy-tools` cap: roughly one sentence per tool.
 const LAZY_DESCRIPTION_CHARS: usize = 160;
 
-const INSTRUCTIONS_NOTE: &str = "\n\nNote: tool results pass through the sqz \
-compression proxy. A result of the form §ref:HASH§ means you have already \
-seen this exact content earlier in the session; §ref:HASH:L40-80§ means \
-lines 40-80 of content you have already seen in full. If you need any \
-compressed or referenced result verbatim, call the sqz_expand tool with the \
-ref token or hash prefix.";
+const INSTRUCTIONS_NOTE: &str = "\n\nTool results pass through the sqz \
+compression proxy; sqz_expand returns the original behind any §ref:HASH§ \
+token.";
 
 const LAZY_TOOLS_NOTE: &str = " Tool descriptions are shortened to one \
 sentence to save context; call the sqz_tool_help tool with a tool name to \
@@ -183,7 +180,7 @@ impl ProxyState {
         }) {
             tools.push(serde_json::json!({
                 "name": EXPAND_TOOL_NAME,
-                "description": "Expand a §ref:HASH§ token (or bare hex prefix) from a compressed tool result back to the original verbatim content. A ranged token §ref:HASH:L40-80§ returns just those lines.",
+                "description": "Return the original content behind a ref. §ref:HASH§ stands for content already seen in this session; §ref:HASH:L40-80§ for lines 40-80 of content seen in full, and expands to just those lines.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

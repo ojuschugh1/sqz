@@ -1118,22 +1118,16 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             id: "compress".to_string(),
             name: "Compress Text".to_string(),
-            description: "Compress arbitrary text or JSON through the sqz \
-                pipeline. Returns a compressed string that preserves semantic \
-                content (filenames, identifiers, URLs, version numbers) \
-                byte-exact while collapsing repetitive patterns, stripping \
-                ANSI codes, folding diff context, and deduplicating content \
-                seen earlier in the session. Use this tool to shrink large \
-                tool outputs before re-sending them to the model. It does NOT \
-                read or write files, execute commands, or perform any I/O — \
-                it is a pure text transform."
+            description: "Compress text or JSON you already have, such as a \
+                long tool result, through the sqz pipeline. It reads no files \
+                and runs no commands."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "The text or serialized JSON to compress."
+                        "description": "Text or JSON to compress."
                     }
                 },
                 "required": ["text"]
@@ -1163,19 +1157,15 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             id: "passthrough".to_string(),
             name: "Passthrough (No Compression)".to_string(),
-            description: "Return the input text unchanged. Use this when \
-                you need the raw, uncompressed form of tool output — for \
-                example because you can't parse sqz's `§ref:HASH§` dedup \
-                tokens, or because you need to audit byte-for-byte what \
-                a command produced. This is strictly more tokens than \
-                `compress` but avoids any interpretation ambiguity."
+            description: "Return the text unchanged, for when you need it \
+                raw rather than compressed."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "The text to return unchanged."
+                        "description": "Text to return as is."
                     }
                 },
                 "required": ["text"]
@@ -1193,23 +1183,17 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             id: "expand".to_string(),
             name: "Expand Dedup Ref".to_string(),
-            description: "Resolve a `§ref:HASH§` dedup token (or a bare \
-                hex prefix) back to the original pre-compression content. \
-                Use this if you see a `§ref:…§` token in tool output and \
-                need the full text it points at. A ranged token \
-                `§ref:HASH:L40-80§` returns just those lines. Returns \
-                either the raw original bytes (for cache entries from sqz \
-                ≥ 0.10.0) or the compressed-but-legible form with a note \
-                (for older entries)."
+            description: "Return the original content behind a ref. \
+                `§ref:HASH§` stands for content sent earlier in the session; \
+                `§ref:HASH:L40-80§` for lines 40-80 of content sent in full, \
+                and expands to just those lines."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "prefix": {
                         "type": "string",
-                        "description": "The hex prefix from a `§ref:<prefix>§` token. \
-                                        Accepts the bare prefix (`a1b2c3d4`) or the \
-                                        full token pasted verbatim (`§ref:a1b2c3d4§`)."
+                        "description": "The ref token pasted whole, or its hex prefix."
                     }
                 },
                 "required": ["prefix"]
@@ -1227,25 +1211,20 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             id: "sqz_recall".to_string(),
             name: "Recall (Search Session Memory)".to_string(),
-            description: "Full-text search over everything sqz has seen: \
-                command outputs from this and previous sessions, and \
-                session summaries. Use this BEFORE re-running a command \
-                or re-reading a file to check whether the answer is \
-                already known — a hit costs a snippet plus a ~13-token \
-                ref instead of the full output. Results are BM25-ranked; \
-                pass an `output` hit's ref to the `expand` tool for the \
-                complete original content."
+            description: "Search everything sqz has seen, this session and \
+                earlier, before re-running a command or re-reading a file. \
+                Pass a hit's ref to `expand` for the full text."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search terms (implicit AND, e.g. \"auth middleware error\")."
+                        "description": "Search terms; all must match."
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max hits to return (1-25). Default 5.",
+                        "description": "Maximum number of hits, 1-25.",
                         "default": 5
                     }
                 },
@@ -1278,49 +1257,30 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             id: "sqz_read_file".to_string(),
             name: "Read File (Compressed)".to_string(),
-            description: "Read a file from disk and return its content \
-                compressed through the sqz pipeline. PREFER this tool over \
-                the built-in `Read` for any file you expect to be larger \
-                than ~2KB or that you might need to read multiple times in \
-                the same session — the dedup cache returns a 13-token \
-                reference on repeat reads instead of the full content. \
-                Use `offset` and `limit` for ranged reads, exactly like \
-                the built-in Read: if you already read the file in full \
-                earlier in the session, a ranged re-read returns a short \
-                `§ref:HASH:L40-80§` line-range reference instead of the \
-                lines, and a re-read after a small edit returns only the \
-                changed lines. \
-                \
-                Returns the file content with a header `[sqz_read_file \
-                path=... size=... lines=40-80 of 500]` followed by the \
-                body. The body is faithful: every line, identifier and \
-                line number survives, only ANSI escape codes are stripped. \
-                The saving comes from the dedup cache, not from dropping \
-                content. \
-                \
-                Use the built-in `Read` tool for tiny config files (<1KB) \
-                where the header costs more than it saves. Use \
-                `sqz_read_file` for source files >2KB, log files, JSON \
-                outputs, and any file you'll read more than once."
+            description: "Read a file faithfully, stripping only ANSI \
+                escapes. Prefer it over the built-in read for files over \
+                2KB or ones you may read again: a repeat or ranged re-read \
+                returns a short ref (see `expand`) and a re-read after an \
+                edit returns only the changed lines."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the file, relative to the working directory or absolute."
+                        "description": "File path, absolute or relative to the working directory."
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "1-based line to start from. Omit to read from the top."
+                        "description": "First line to return, 1-based."
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Number of lines to return from `offset`. Omit to read to the end."
+                        "description": "Number of lines to return."
                     },
                     "max_bytes": {
                         "type": "integer",
-                        "description": "Cap on bytes returned, cut at a line boundary. Default 262144 (256 KB); 0 = no cap. The header gives continue_with_offset when cut.",
+                        "description": "Byte cap, cut at a line boundary; 0 for no cap. When cut, the header gives continue_with_offset.",
                         "default": 262144
                     }
                 },
@@ -1339,33 +1299,26 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             id: "sqz_list_dir".to_string(),
             name: "List Directory (Compressed)".to_string(),
-            description: "List the contents of a directory and return the \
-                listing compressed. Skips `.git`, `node_modules`, `target`, \
-                `dist`, `build`, `__pycache__`, `vendor`, and other common \
-                bulk directories so the output stays focused on the files \
-                an agent actually wants to see. \
-                \
-                PREFER this over `ls -la` via Bash when you want to see a \
-                project layout: no permission/owner/date columns, bulk \
-                directories skipped, and repeat listings of an unchanged \
-                tree dedupe to a 13-token reference."
+            description: "List a directory, skipping hidden entries and \
+                node_modules, target, dist, build, vendor and __pycache__. \
+                Prefer it over `ls -la` for a project layout."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Directory to list. Defaults to the current working directory.",
+                        "description": "Directory to list.",
                         "default": "."
                     },
                     "max_depth": {
                         "type": "integer",
-                        "description": "Recursion depth. 1 = immediate children only. Default 1.",
+                        "description": "Levels to recurse; 1 lists direct children only.",
                         "default": 1
                     },
                     "max_entries": {
                         "type": "integer",
-                        "description": "Stop after this many entries. Default 1000; 0 = no cap.",
+                        "description": "Entry cap; 0 for no cap.",
                         "default": 1000
                     }
                 }
@@ -1381,48 +1334,42 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             id: "sqz_grep".to_string(),
             name: "Grep Files (Compressed)".to_string(),
-            description: "Search files under a directory for a literal \
-                string (default) or regex (if `regex: true`). Returns \
-                grep-style `path:lineno:text` lines compressed through the \
-                sqz pipeline. Stops after `max_matches` hits (default 200) \
-                so a popular term doesn't flood the context. \
-                \
-                PREFER this over the built-in `Grep` for any search that \
-                might return more than a handful of lines: the match and \
-                size caps keep one search from flooding the context, and \
-                repeat searches for the same pattern dedupe to a 13-token \
-                reference."
+            description: "Search files for a literal string or regex, \
+                returning `path:lineno:text` lines. Prefer it over the \
+                built-in grep when a search may match more than a few \
+                lines: output is capped and a repeat search returns a \
+                short ref."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Text to search for. Literal substring by default; set `regex: true` for regex mode."
+                        "description": "Text to find, a literal substring unless `regex` is true."
                     },
                     "path": {
                         "type": "string",
-                        "description": "File or directory to search in. Defaults to the current working directory.",
+                        "description": "File or directory to search.",
                         "default": "."
                     },
                     "regex": {
                         "type": "boolean",
-                        "description": "Treat `pattern` as a regex instead of a literal string. Default false.",
+                        "description": "Treat `pattern` as a regex.",
                         "default": false
                     },
                     "max_matches": {
                         "type": "integer",
-                        "description": "Stop after this many hits. Default 200.",
+                        "description": "Stop after this many matches.",
                         "default": 200
                     },
                     "max_line_chars": {
                         "type": "integer",
-                        "description": "Longer match lines are clipped to a window around the hit. Default 400; 0 = no cap.",
+                        "description": "Clip longer match lines around the hit; 0 for no cap.",
                         "default": 400
                     },
                     "max_bytes": {
                         "type": "integer",
-                        "description": "Stop once the output reaches this size. Default 100000; 0 = no cap.",
+                        "description": "Stop at this many bytes of output; 0 for no cap.",
                         "default": 100000
                     }
                 },
@@ -2309,6 +2256,33 @@ complexity_threshold = 0.4
             names.iter().any(|n| n == "expand"),
             "expand tool must be advertised; got {names:?}"
         );
+    }
+
+    #[test]
+    fn test_tool_descriptions_stay_short_and_explain_refs_once() {
+        let mut total = 0;
+        for tool in default_tool_definitions() {
+            let params: Vec<String> = tool.input_schema["properties"]
+                .as_object()
+                .map(|props| {
+                    props
+                        .values()
+                        .filter_map(|p| p["description"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for text in params.iter().chain(std::iter::once(&tool.description)) {
+                assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'), "{}: {text}", tool.id);
+                total += text.len();
+            }
+            assert_eq!(
+                tool.description.contains("§ref:HASH:L40-80§"),
+                tool.id == "expand",
+                "{}",
+                tool.id
+            );
+        }
+        assert!(total < 2000, "tool and parameter descriptions are {total} bytes");
     }
 
     #[test]
