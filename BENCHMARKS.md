@@ -1,18 +1,21 @@
 # sqz Compression Benchmarks
 
 Reproducible benchmark results from the sqz compression engine.
-All measurements use the `sqz compress` CLI on the inputs shown.
+The numbers come from `cargo test` over `SqzEngine::compress`
+(`sqz_engine/src/benchmarks.rs`) and over the per-command formatters
+(`format_command`, `sqz_engine/src/cmd_formatter_bench.rs`), not from the
+`sqz` CLI or the shell hook.
 Token counts use the `chars / 4` approximation (GPT-style).
 
 **Verified under a real tokenizer:** the formatter fixtures are also
 re-measured with the real `cl100k_base` BPE tokenizer on every test run
 (`cargo test -p sqz-engine bench_reductions_hold_under_real_bpe -- --nocapture`).
-Latest run: chars/4 reports 87.2% aggregate reduction, cl100k reports
-88.9% — a 1.7-point divergence, so the reported reductions are not an
-artifact of the token estimate. The test fails CI if divergence ever
-reaches 10 points.
+Latest run: chars/4 reports 63.7% aggregate reduction, cl100k reports
+74.0%, so on these fixtures chars/4 understates the reduction by 10.4
+points. The test fails CI if chars/4 ever overstates the cl100k reduction
+by 10 points or more.
 
-**Last updated:** May 2026 | **sqz version:** 1.2.0 | **Platform:** macOS aarch64
+**Last updated:** October 2026 | **sqz version:** main after 1.9.0 | **Platform:** macOS aarch64 (Apple M4 Pro)
 
 ---
 
@@ -20,26 +23,30 @@ reaches 10 points.
 
 | Content Type | Original tokens | sqz tokens | Reduction | Verifier confidence | Method |
 |---|---|---|---|---|---|
-| Repeated log output | 113 | 53 | **53%** | 100% ✓ | Log line folding |
-| JSON API response | 64 | 59 | **7.8%** | 100% ✓ | TOON encoding + null stripping |
-| Git diff (12 context lines) | 52 | 51 | **2%** | 100% ✓ | Diff context folding |
-| Large JSON array (20 items) | varies | varies | **20%+** | 100% ✓ | Schema sampling |
-| Prose documentation | varies | varies | **5-15%** | 70-90% ✓ | Phrase substitution + article stripping |
+| Repeated log output | 148 | 39 | **73.6%** | 100% ✓ | Repeated lines condensed, then folded into one line |
+| JSON API response | 64 | 53 | **17.2%** | 100% ✓ | Nulls stripped, `metadata` flattened, TOON encoding |
+| Git diff (15 context lines) | 61 | 54 | **11.5%** | 86% ⚠ | Diff context folding |
+| Large JSON array (20 items) | 259 | 111 | **57.1%** | 100% ✓ | TOON table: one header row, one line per item |
+| Prose documentation | 124 | 122 | **1.6%** | 100% ✓ | Token pruning removed two words |
+| Stack trace | 82 | 82 | **0.0%** | 100% ✓ | Routed to safe mode, passed through unchanged |
 
-> Note: JSON API reduction is lower than the CLI shows (17%) because the benchmark uses the
-> `SqzEngine` directly which routes through the confidence router. The CLI path may differ slightly.
 > Run `cargo test -p sqz-engine benchmarks -- --nocapture` to reproduce exact numbers.
 
-**Why sqz shows lower reduction than some competitors:**
-sqz prioritizes faithfulness over raw compression. The verifier checks 6 invariants after every
-compression and falls back to safe mode when confidence is low. This means:
-- Error lines, file paths, diff hunks, and JSON keys are always preserved
-- Stack traces and migrations are never aggressively compressed
-- You get lower token savings in some cases, but higher reliability
+**Verifier and safe mode:**
+After every compression the verifier runs 7 checks (table below) and turns them into a
+confidence score. Below 0.6, sqz re-compresses the input with the safe preset. That re-run
+skips the configured lossy JSON stages but still runs the generic stages (JSON projection,
+TOON encoding, and entropy truncation on long text), so it does not keep everything; on the
+shell hook the original is cached, and when segments were dropped a
+`[full output: sqz expand ...]` line points at it. Stack traces, credentials and SQL
+migrations are routed to safe mode up front: short ones pass through unchanged, longer ones
+(above about 500 characters) can lose low-information segments, and because the shell hook
+never caches this content those segments cannot be expanded.
 
-Use `sqz compress --verify` to see both metrics together:
+Use `sqz compress --mode default --verify` to see both metrics together (repeated log input
+below; the CLI counts cl100k tokens, not chars/4):
 ```
-[sqz] 53/113 tokens (53% reduction) | confidence 100% ✓
+[sqz] 62/230 tokens (73% reduction) | confidence 100% ✓
 ```
 
 ---
@@ -48,23 +55,30 @@ Use `sqz compress --verify` to see both metrics together:
 
 ### 1. Repeated Log Output
 
-**Input** (113 tokens):
+**Input** (148 tokens):
 ```
-2024-01-01 10:00:00 [INFO] Server started
-2024-01-01 10:00:01 [INFO] DB connected   (×9 repeated)
-2024-01-01 10:00:11 [ERROR] Connection timeout
+2024-01-01 09:59:59 [INFO] Server started
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:00 [INFO] Connected to database
+2024-01-01 10:00:11 [ERROR] Connection timeout after 30s
 ```
 
-**Output** (53 tokens, **53% reduction**):
+**Output** (39 tokens, **73.6% reduction**):
 ```
-2024-01-01 10:00:00 [INFO] Server started
-2024-01-01 10:00:01 [INFO] DB connected
-2024-01-01 10:00:01 [INFO] DB connected
-2024-01-01 10:00:01 [INFO] DB connected
-2024-01-01 10:00:11 [ERROR] Connection timeout
+2024-01-01 09:59:59 [INFO] Server started
+2024-01-01 10:00:00 [INFO] Connected to database [×3]
+2024-01-01 10:00:11 [ERROR] Connection timeout after 30s
 ```
 
-Method: `condense` stage collapses repeated identical lines to max 3.
+Method: `condense` cuts the run of identical lines to 3, then `rle` folds those 3 into one line marked `[×3]`. The marker counts the condensed lines, not the 10 lines of the input.
 Critical info preserved: ✅ ERROR line retained verbatim.
 
 ---
@@ -73,71 +87,73 @@ Critical info preserved: ✅ ERROR line retained verbatim.
 
 **Input** (64 tokens):
 ```json
-{"id":42,"name":"Alice","email":"alice@example.com","role":"admin",
- "created_at":"2024-01-01T00:00:00Z","updated_at":"2024-03-15T10:30:00Z",
- "metadata":{"plan":"pro","seats":10,"billing_cycle":"monthly",
-             "internal_id":null,"debug_info":null,"trace_id":null}}
+{"id":42,"name":"Alice","email":"alice@example.com","role":"admin","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-03-15T10:30:00Z","metadata":{"plan":"pro","seats":10,"billing_cycle":"monthly","internal_id":null,"debug_info":null,"trace_id":null}}
 ```
 
-**Output** (59 tokens, **7.8% reduction**):
+**Output** (53 tokens, **17.2% reduction**):
 ```
-TOON:{created_at:"2024-01-01T00:00:00Z",email:"alice@example.com",id:42,
-"metadata.billing_cycle":"monthly","metadata.plan":"pro","metadata.seats":10,
-name:"Alice",role:"admin",updated_at:"2024-03-15T10:30:00Z"}
+TOON:{created_at:"2024-01-01T00:00:00Z",email:"alice@example.com",id:42,"metadata.billing_cycle":"monthly","metadata.plan":"pro","metadata.seats":10,name:"Alice",role:"admin",updated_at:"2024-03-15T10:30:00Z"}
 ```
 
 Method: `strip_nulls` removes null fields, `flatten` flattens metadata, TOON encoding removes quotes from simple keys.
 Critical info preserved: ✅ All non-null fields retained.
 
 > Reproducible: `cargo test -p sqz-engine bench_json_api_response -- --nocapture`
-> Output: `[bench] json_api | 64→59 tokens | 7.8% reduction | confidence 1.00`
+> Output: `[bench] json_api | 64→53 tokens | 17.2% reduction | confidence 1.00`
 
 ---
 
 ### 3. Git Diff (Context Folding)
 
-**Input** (52 tokens):
+**Input** (61 tokens):
 ```diff
 diff --git a/src/main.rs b/src/main.rs
-@@ -1,12 +1,12 @@
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,15 +1,15 @@
  line1
  line2
  line3
  line4
  line5
  line6
--old_function
-+new_function
  line7
  line8
+-old_function_name
++new_function_name
  line9
  line10
  line11
  line12
+ line13
+ line14
+ line15
 ```
 
-**Output** (51 tokens, **2% reduction**):
+**Output** (54 tokens, **11.5% reduction**):
 ```diff
 diff --git a/src/main.rs b/src/main.rs
-@@ -1,12 +1,12 @@
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,15 +1,15 @@
  line1
  line2
-[2 unchanged lines]
- line5
- line6
--old_function
-+new_function
+[4 unchanged lines]
  line7
  line8
-[4 unchanged lines]
+-old_function_name
++new_function_name
+ line9
+ line10
+[5 unchanged lines]
 ```
 
-Method: `git_diff_fold` stage keeps 2 context lines around each change, folds the rest.
-Critical info preserved: ✅ All changed lines (+/-) and hunk headers retained.
+Method: `git_diff_fold` keeps the first two lines of the hunk and two context lines on each side of the change, and folds the other runs into `[N unchanged lines]`. Verifier confidence is 0.86 (6 of 7 checks passed), above the 0.6 fallback threshold, so this output is used.
+Critical info preserved: ✅ All changed lines (+/-), file headers and the hunk header retained.
 
 ---
 
-### 4. Per-Command Formatters (v1.2.0)
+### 4. Per-Command Formatters
 
 Command-specific formatters run before the general compression pipeline and produce
 high savings for known commands. Every number below is measured by a fixture test
@@ -149,17 +165,20 @@ these figures, and each row is gated so the numbers can't silently drift:
 | `npm install` (200 packages) | 1,186 | 13 | **99%** | Summary line only |
 | `cargo test` (15 pass, 3 suites) | 171 | 8 | **95%** | Skip pass lines, aggregate suites |
 | `cargo build` (success, 30 crates) | 233 | 23 | **90%** | Skip Compiling noise, status line |
-| `grep` (100 matches, 5 files) | 1,373 | 238 | **83%** | Group by file, cap per file |
-| `terraform plan` (2 resources) | 121 | 25 | **79%** | +N ~N -N summary + resource list |
+| `terraform plan` (2 resources) | 325 | 121 | **63%** | Drop refresh and progress lines |
 | `cargo clippy` (5 warnings) | 163 | 70 | **57%** | Group by rule + location |
 | `git status` (verbose, 10 files) | 102 | 56 | **45%** | Branch line + compact staged/modified/untracked |
+| `grep` (100 matches, 5 files) | 1,607 | 1,085 | **32%** | ripgrep heading layout: each path once, every match under it |
 
 Reductions scale with input size: the savings are largest on the verbose, repetitive
-output (package lists, passing-test runs, large match sets) and smaller on output that
+output (package lists, passing-test runs) and smaller on output that
 is already compact (a short `git status`, a handful of clippy warnings with source
-context). These formatters handle 40+ commands across 9 ecosystems. Unknown commands
-fall through to the general compression pipeline (5-58% reduction depending on content
-type).
+context). The formatters cover git, cargo, npm/pnpm/yarn/bun, tsc, eslint/biome, pytest,
+ruff, mypy, pip, go, golangci-lint, gradle, maven, xcodebuild, adb logcat, dotnet, rspec,
+rubocop, rake/rails, bundle, docker/podman (ps, images), kubectl (describe, apply),
+terraform, grep/rg/ag, tree and curl/wget (dispatch in `sqz_engine/src/cmd_formatters/mod.rs`).
+Other commands fall through to the general compression pipeline (0% to 73.6% on the
+engine benchmark inputs above, depending on content type).
 
 Reproduce: `cargo test -p sqz-engine cmd_formatter_bench -- --nocapture`
 
@@ -167,18 +186,20 @@ Reproduce: `cargo test -p sqz-engine cmd_formatter_bench -- --nocapture`
 
 ## Verifier Results
 
-The two-pass verifier checks 6 invariants after compression:
+The two-pass verifier checks 7 invariants after compression (`sqz_engine/src/verifier.rs`):
 
-| Check | Description | Pass rate |
-|---|---|---|
-| `min_retention` | Output ≥ 10% of input length | 100% |
-| `error_lines` | All error/warning lines preserved | 100% |
-| `file_paths` | File paths not truncated | 100% |
-| `json_keys` | ≥ 50% of JSON keys retained | 100% |
-| `diff_hunks` | Diff hunk headers preserved | 100% |
-| `numeric_values` | Numeric values not corrupted | 100% |
+| Check | Description |
+|---|---|
+| `min_retention` | Output is at least 10% of the input length |
+| `error_lines` | Lines with `error:`, `warning:`, `fatal:`, `panic:` or `exception:` are kept |
+| `file_paths` | The first 20 path-like lines (under 200 characters) are kept |
+| `json_keys` | At least 50% of top-level JSON keys are kept |
+| `diff_hunks` | Diff hunk headers (`@@`) are kept |
+| `numeric_values` | The first 10 numbers of two or more characters are kept |
+| `preservation` | At least 85% of paths, URLs, backticked code, environment variables and version strings are kept |
 
-Fallback rate (safe mode triggered): < 5% on typical coding session content.
+Confidence is the share of checks that passed, capped at 0.5 when `preservation` fails.
+Below 0.6, sqz falls back to the safe preset (see above).
 
 ---
 
@@ -187,15 +208,15 @@ Fallback rate (safe mode triggered): < 5% on typical coding session content.
 Run these benchmarks yourself:
 
 ```sh
-cargo install sqz-cli
+git clone https://github.com/ojuschugh1/sqz
+cd sqz
 cargo test -p sqz-engine benchmarks -- --nocapture
+cargo test -p sqz-engine cmd_formatter_bench -- --nocapture
 ```
 
 Or run the full benchmark suite:
 
 ```sh
-git clone https://github.com/ojuschugh1/sqz
-cd sqz
 cargo test --workspace
 ```
 
@@ -205,7 +226,7 @@ The benchmark suite is in `sqz_engine/src/benchmarks.rs` and runs as part of CI 
 
 ## Methodology
 
-- Token counts: `ceil(chars / 4)` approximation (GPT-style, same as tiktoken for ASCII)
+- Token counts: `ceil(chars / 4)` approximation (GPT-style)
 - Inputs: representative real-world content from coding sessions
 - No cherry-picking: all content types tested, including cases where sqz adds minimal value
 - Verifier confidence: measured on the same inputs using `Verifier::verify(original, compressed)`
@@ -219,7 +240,6 @@ Being honest about limitations:
 | Content Type | Typical Reduction | Why |
 |---|---|---|
 | Short messages (< 100 chars) | 0% | Below minimum threshold |
-| Well-written prose (no verbose phrases) | 2-8% | Limited phrase substitution hits |
-| Binary/base64 content | 90%+ (placeholder) | Replaced with `[blob:Nb]` marker |
-| Stack traces | 0% (safe mode) | Routed to safe mode, preserved verbatim |
-| Database migrations | 0% (safe mode) | High-risk content, not compressed |
+| Prose | 1.6% on the benchmark paragraph | Token pruning removes a few filler words; no other stage changes it |
+| Stack traces | 0% when short (safe mode) | Routed to safe mode; longer ones can lose low-information segments that cannot be expanded |
+| Database migrations | 0% when short (safe mode) | Same safe-mode routing as stack traces |
