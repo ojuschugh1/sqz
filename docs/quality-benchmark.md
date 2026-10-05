@@ -19,7 +19,7 @@ Each fixture is realistic command output paired with a list of facts an agent wo
 | Token reduction | `ceil(bytes / 4)` on input vs everything the agent sees: compressed stdout plus sqz's own stderr lines. The `[sqz] N/M tokens` header is counted against sqz. |
 | Critical-fact recall | Every fact must appear verbatim in the compressed stdout. One missed fact fails the test. |
 | Noise dropped | Lines the fixture expects compression to remove (progress dots, deprecation chatter, passing tests). Reported, not gated. |
-| Verbatim preservation | Stack traces and secrets must come out byte-identical to the input. |
+| Verbatim preservation | The `git show rev:path`, traceback and secrets fixtures must come out identical to the input, up to trailing whitespace. |
 | Byte-exact recovery | A second run of the same output must return a `§ref:HASH§` dedup token, and `sqz expand HASH` must return the original bytes. Sensitive content must instead never be persisted. |
 
 Facts are chosen for what an agent needs to act, not for what sqz happens to keep. When the two disagreed during development, the formatter was fixed, not the fixture (see the bug list below).
@@ -86,7 +86,7 @@ These are reported next to the savings total as a rate, not subtracted from it. 
 ## What this benchmark does not measure
 
 - **Agent task success.** Whether a model given the compressed output completes the task as often as with the raw output. This needs a live model, a task set and many runs, and it is the number that matters most. Fact recall is the proxy used here because it is deterministic and cheap enough to run on every commit.
-- **Real tokenizer counts.** The table uses bytes/4 so the numbers match what `sqz` prints in its header. `cargo test -p sqz-engine cmd_formatter_bench` re-measures the formatter fixtures with the cl100k BPE tokenizer and fails if chars/4 overstates the cl100k reduction by 10 points or more (latest run: 63.7% by chars/4, 74.0% by cl100k).
+- **Real tokenizer counts.** The table uses bytes/4; the `[sqz] N/M tokens` header counts cl100k tokens. `cargo test -p sqz-engine cmd_formatter_bench` re-measures the formatter fixtures with the cl100k BPE tokenizer and fails if chars/4 overstates the cl100k reduction by 10 points or more (latest run: 63.7% by chars/4, 74.0% by cl100k).
 - **Session-level effects.** Dedup across a whole session (the 13-token repeat) is where most real savings come from. That is measured separately in [benchmark.md](benchmark.md) and in the `sqz stats` figures on the README, which come from real usage, not fixtures.
 - **Abbreviation losses.** N-gram abbreviation replaces repeated phrases with `«A1»` symbols plus a legend. A fact inside a repeated phrase still counts as kept if it appears in the legend. Use `--no-abbrev` or `SQZ_NO_ABBREV=1` if an agent struggles with the symbols.
 

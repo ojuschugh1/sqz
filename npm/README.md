@@ -111,7 +111,7 @@ Anything the model already has in its context comes back as a reference. Measure
 | Lines 41-80 of a 200-line file read earlier | 260 | 35 | **87%** |
 | Same `cargo test` output, nothing changed | 366 | 39 | **89%** |
 
-Single-command compression in the table above ranges from 0% (stack trace) to 74% (repeated log lines) depending on content. Your mileage will vary with how repetitive your tool calls are: sessions with noisy command output and repeated commands see the biggest wins.
+Single-command compression in the first table above ranges from 0% (stack trace) to 74% (repeated log lines) depending on content. Your mileage will vary with how repetitive your tool calls are: sessions with noisy command output and repeated commands see the biggest wins.
 
 ## Install
 
