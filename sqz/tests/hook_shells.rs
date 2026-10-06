@@ -166,6 +166,13 @@ const STOP_CASES: &[&str] = &[
     "ls *.nomatchxyz; echo next",
 ];
 
+const LINE_CASES: &[&str] = &[
+    "ls $((1/0))\necho next",
+    "ls ${a b}\necho next",
+    "for i in 1; do ls $((1/0)); done\necho next",
+    "ls $((1/0)) | cat\necho next",
+];
+
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let fixture = tempfile::tempdir().unwrap();
     let dir = fixture.path().join("work");
@@ -220,9 +227,22 @@ fn claude_rewrites_behave_like_the_original() {
                 .unwrap_or_else(|| panic!("not rewritten: {command:?}"));
             assert_same(shell, command, &rewritten, &dir, &home);
         }
-        for command in STOP_CASES.iter().chain(&["ls $((1/0))\necho next"]) {
+        for command in STOP_CASES.iter().chain(LINE_CASES) {
             if let Some(rewritten) = claude(command, "bypassPermissions", shell, fixture.path()) {
                 assert_same(shell, command, &rewritten, &dir, &home);
+            }
+        }
+    }
+}
+
+#[test]
+fn rewrites_keep_the_lines_after_a_failed_one() {
+    let (fixture, dir, home) = fixture();
+    for shell in shells() {
+        for command in LINE_CASES {
+            match grouped(command, shell, fixture.path()) {
+                Some(rewritten) => assert_same(shell, command, &rewritten, &dir, &home),
+                None => assert_ne!(shell, "zsh", "not rewritten: {command:?}"),
             }
         }
     }

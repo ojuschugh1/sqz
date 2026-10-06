@@ -23,6 +23,8 @@ pub enum Skip {
     AlreadySqz,
     /// Nothing to compress once a leading `cd` is set aside.
     Empty,
+    /// A failed expansion would end one line and the shell would run the next.
+    LineError,
 }
 
 /// A command that can be piped through sqz.
@@ -49,6 +51,11 @@ const STATE_BUILTINS: &[&str] = &[
 
 /// Decide whether, and how, `command` can be piped through sqz.
 pub fn plan(command: &str) -> Result<Plan<'_>, Skip> {
+    let zsh = basename(&std::env::var("SHELL").unwrap_or_default()) == "zsh";
+    plan_for(command, if zsh { Shell::Zsh } else { Shell::Bash })
+}
+
+fn plan_for(command: &str, shell: Shell) -> Result<Plan<'_>, Skip> {
     let command = command.trim_end();
     let mut scan = Scanner::new(command);
     scan.list(false)?;
@@ -96,6 +103,13 @@ pub fn plan(command: &str) -> Result<Plan<'_>, Skip> {
     }
     if watch_text(command) {
         return Err(Skip::LongRunning);
+    }
+    let line_error = (0..rest.len()).any(|i| {
+        rest[i].fatal == Fatal::Any
+            && rest[i..rest.len() - 1].iter().any(|s| s.sep == Some(Sep::Newline))
+    });
+    if shell == Shell::Bash && line_error {
+        return Err(Skip::LineError);
     }
 
     let simple = rest.len() == 1
@@ -1310,6 +1324,32 @@ mod tests {
             "[ -f x ]; ls ~ ~/x ~+ --x=~y; echo next",
         ] {
             assert!(piped(cmd, Shell::Bash) && piped(cmd, Shell::Zsh), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn groups_never_drop_the_lines_bash_runs_after_a_failed_one() {
+        for cmd in [
+            "ls $((1/0))\necho next",
+            "echo $[1/0]\necho next",
+            "for i in 1; do ls $((1/0)); done\necho next",
+            "ls ${a b} | cat\necho next",
+            "ls ${X:?unset} && make\n\necho next",
+            "cd sub && ls \"${X^^}\"\nls",
+        ] {
+            assert_eq!(plan_for(cmd, Shell::Bash), Err(Skip::LineError), "{cmd:?}");
+            assert!(plan_for(cmd, Shell::Zsh).is_ok(), "{cmd:?}");
+        }
+        for cmd in [
+            "ls $((1/0)); echo next",
+            "echo next\nls $((1/0))",
+            "ls ${X:-default} ${X#./}\necho next",
+            "echo $(echo $((1/0)))\necho next",
+            "(ls ${a b})\necho next",
+            "cd ${D:?unset}\nls",
+            "cat <<EOF\n$((1/0))\nEOF\necho next",
+        ] {
+            assert!(plan_for(cmd, Shell::Bash).is_ok(), "{cmd:?}");
         }
     }
 
