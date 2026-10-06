@@ -1061,6 +1061,47 @@ fn test_doctor_fix_keeps_a_bare_sqz_that_is_on_path() {
 }
 
 #[test]
+#[cfg(unix)]
+fn test_init_and_uninstall_keep_json_newlines_and_modes() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let files = [
+        (
+            project.path().join(".claude").join("settings.local.json"),
+            "{\n  \"permissions\": {\n    \"allow\": [\n      \"Bash(make)\"\n    ]\n  }\n}\n",
+        ),
+        (home.path().join(".claude.json"), "{\n  \"theme\": \"dark\"\n}\n"),
+        (
+            project.path().join(".kiro").join("settings").join("mcp.json"),
+            "{\n  \"mcpServers\": {\n    \"x\": {\n      \"command\": \"x-mcp\"\n    }\n  }\n}\n",
+        ),
+        (home.path().join(".config").join("zed").join("settings.json"), "{\n  \"theme\": \"One Dark\"\n}\n"),
+    ];
+    for (path, text) in &files {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "claude,kiro,zed"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    for (path, _) in &files {
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("sqz") && text.ends_with("}\n"), "{}: {text:?}", path.display());
+        assert_eq!(mode(path), 0o644, "{}", path.display());
+    }
+
+    let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    for (path, text) in &files {
+        assert_eq!(&std::fs::read_to_string(path).unwrap(), text, "{}", path.display());
+        assert_eq!(mode(path), 0o644, "{}", path.display());
+    }
+}
+
+#[test]
 #[cfg(not(windows))]
 fn test_uninstall_keeps_the_rest_of_the_shell_rc_byte_for_byte() {
     let home = tempfile::tempdir().unwrap();

@@ -429,21 +429,21 @@ pub(crate) fn install_claude_mcp_config_at(home_override: Option<&Path>) -> Resu
         }
     }
 
-    let mut root: serde_json::Value = if path.exists() {
-        let text = std::fs::read_to_string(&path).map_err(|e| {
+    let text = if path.exists() {
+        std::fs::read_to_string(&path).map_err(|e| {
             SqzError::Other(format!("failed to read {}: {e}", path.display()))
-        })?;
-        if text.trim().is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&text).map_err(|e| {
-                SqzError::Other(format!(
-                    "~/.claude.json exists but is not valid JSON: {e}"
-                ))
-            })?
-        }
+        })?
     } else {
+        String::new()
+    };
+    let mut root: serde_json::Value = if text.trim().is_empty() {
         serde_json::json!({})
+    } else {
+        serde_json::from_str(&text).map_err(|e| {
+            SqzError::Other(format!(
+                "~/.claude.json exists but is not valid JSON: {e}"
+            ))
+        })?
     };
 
     // Ensure root is an object (Claude Code's config is always an
@@ -483,9 +483,12 @@ pub(crate) fn install_claude_mcp_config_at(home_override: Option<&Path>) -> Resu
 
     // Write back with a two-space indent (matches Claude Code's own
     // formatting so diffs stay clean).
-    let out = serde_json::to_string_pretty(&root).map_err(|e| {
+    let mut out = serde_json::to_string_pretty(&root).map_err(|e| {
         SqzError::Other(format!("failed to serialize ~/.claude.json: {e}"))
     })?;
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
     std::fs::write(&path, out).map_err(|e| {
         SqzError::Other(format!("failed to write {}: {e}", path.display()))
     })?;
@@ -564,9 +567,12 @@ pub(crate) fn remove_claude_mcp_config_at(
     };
 
     if changed {
-        let out = serde_json::to_string_pretty(&root).map_err(|e| {
+        let mut out = serde_json::to_string_pretty(&root).map_err(|e| {
             SqzError::Other(format!("failed to serialize ~/.claude.json: {e}"))
         })?;
+        if text.ends_with('\n') {
+            out.push('\n');
+        }
         std::fs::write(&path, out).map_err(|e| {
             SqzError::Other(format!("failed to write {}: {e}", path.display()))
         })?;

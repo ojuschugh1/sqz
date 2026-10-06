@@ -1598,25 +1598,25 @@ fn sqz_hook_entries(sqz_path: &str) -> [(&'static str, serde_json::Value, &'stat
 /// their project settings kept the pre-PowerShell matcher forever.
 fn merge_sqz_hooks_into_settings(path: &Path, sqz_path: &str) -> Result<bool> {
     // Parse the existing file, or start from an empty object.
-    let mut root: serde_json::Value = if path.exists() {
-        let content = std::fs::read_to_string(&path).map_err(|e| {
+    let content = if path.exists() {
+        std::fs::read_to_string(&path).map_err(|e| {
             crate::error::SqzError::Other(format!(
                 "read {}: {e}",
                 path.display()
             ))
-        })?;
-        if content.trim().is_empty() {
-            serde_json::Value::Object(serde_json::Map::new())
-        } else {
-            serde_json::from_str(&content).map_err(|e| {
-                crate::error::SqzError::Other(format!(
-                    "parse {}: {e} — please fix or move the file before re-running sqz init",
-                    path.display()
-                ))
-            })?
-        }
+        })?
     } else {
+        String::new()
+    };
+    let mut root: serde_json::Value = if content.trim().is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(&content).map_err(|e| {
+            crate::error::SqzError::Other(format!(
+                "parse {}: {e} — please fix or move the file before re-running sqz init",
+                path.display()
+            ))
+        })?
     };
 
     // Ensure root is an object (users occasionally have arrays or
@@ -1665,32 +1665,7 @@ fn merge_sqz_hooks_into_settings(path: &Path, sqz_path: &str) -> Result<bool> {
 
     // Atomic write: tempfile in same directory + rename. Keeps the old
     // file intact if serialization or write fails halfway.
-    let parent = path.parent().ok_or_else(|| {
-        crate::error::SqzError::Other(format!(
-            "path {} has no parent directory",
-            path.display()
-        ))
-    })?;
-    let tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
-        crate::error::SqzError::Other(format!(
-            "create temp file in {}: {e}",
-            parent.display()
-        ))
-    })?;
-    let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(root_obj.clone()))
-        .map_err(|e| crate::error::SqzError::Other(format!("serialize settings.json: {e}")))?;
-    std::fs::write(tmp.path(), serialized).map_err(|e| {
-        crate::error::SqzError::Other(format!(
-            "write to temp file {}: {e}",
-            tmp.path().display()
-        ))
-    })?;
-    tmp.persist(&path).map_err(|e| {
-        crate::error::SqzError::Other(format!(
-            "rename temp file into place at {}: {e}",
-            path.display()
-        ))
-    })?;
+    write_json_config(path, &serde_json::Value::Object(root_obj.clone()), &content)?;
 
     Ok(true)
 }
@@ -1779,34 +1754,7 @@ fn remove_sqz_from_claude_settings(path: PathBuf) -> Result<Option<(PathBuf, boo
     }
 
     // Atomic rewrite.
-    let parent = path.parent().ok_or_else(|| {
-        crate::error::SqzError::Other(format!(
-            "path {} has no parent directory",
-            path.display()
-        ))
-    })?;
-    let tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
-        crate::error::SqzError::Other(format!(
-            "create temp file in {}: {e}",
-            parent.display()
-        ))
-    })?;
-    let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(root_obj.clone()))
-        .map_err(|e| {
-            crate::error::SqzError::Other(format!("serialize settings.json: {e}"))
-        })?;
-    std::fs::write(tmp.path(), serialized).map_err(|e| {
-        crate::error::SqzError::Other(format!(
-            "write to temp file {}: {e}",
-            tmp.path().display()
-        ))
-    })?;
-    tmp.persist(&path).map_err(|e| {
-        crate::error::SqzError::Other(format!(
-            "rename temp file into place at {}: {e}",
-            path.display()
-        ))
-    })?;
+    write_json_config(&path, &root, &content)?;
 
     Ok(Some((path, true)))
 }
@@ -3975,6 +3923,31 @@ mod global_install_tests {
             .unwrap()
             .push(serde_json::json!({"matcher": "Bash|PowerShell", "hooks": [cmd("echo also-mine")]}));
         assert_eq!(read(), expected);
+    }
+
+    #[test]
+    fn settings_rewrites_keep_the_final_newline_and_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let text = "{\n  \"theme\": \"dark\"\n}\n";
+        std::fs::write(&settings, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        assert!(install_claude_global_at("/opt/sqz", Some(tmp.path())).unwrap());
+        assert!(std::fs::read_to_string(&settings).unwrap().ends_with("}\n"));
+        assert!(remove_claude_global_hook_at(Some(tmp.path())).unwrap().unwrap().1);
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), text);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&settings).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644);
+        }
     }
 
     #[test]

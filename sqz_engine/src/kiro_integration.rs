@@ -280,7 +280,11 @@ pub(crate) fn install_kiro_mcp_config_at(path: &Path) -> Result<KiroMcpInstall> 
     }
     servers_obj.insert("sqz".to_string(), sqz_entry);
 
-    std::fs::write(path, serde_json::to_string_pretty(&root).unwrap_or_default())
+    let mut out = serde_json::to_string_pretty(&root).unwrap_or_default();
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    std::fs::write(path, out)
         .map_err(|e| SqzError::Other(format!("write {}: {e}", path.display())))?;
     Ok(KiroMcpInstall::Merged)
 }
@@ -328,7 +332,11 @@ pub(crate) fn remove_kiro_mcp_config_at(path: &Path) -> Result<KiroMcpRemove> {
     if servers.is_empty() {
         root_obj.remove("mcpServers");
     }
-    std::fs::write(path, serde_json::to_string_pretty(&root).unwrap_or_default())
+    let mut out = serde_json::to_string_pretty(&root).unwrap_or_default();
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    std::fs::write(path, out)
         .map_err(|e| SqzError::Other(format!("write {}: {e}", path.display())))?;
     Ok(KiroMcpRemove::Removed)
 }

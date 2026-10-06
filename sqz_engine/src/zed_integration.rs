@@ -245,11 +245,12 @@ pub(crate) fn install_zed_mcp_config_at(path: &Path) -> Result<ZedMcpInstall> {
     }
     servers_obj.insert("sqz".to_string(), sqz_entry);
 
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(&root).unwrap_or_default(),
-    )
-    .map_err(|e| SqzError::Other(format!("write {}: {e}", path.display())))?;
+    let mut out = serde_json::to_string_pretty(&root).unwrap_or_default();
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    std::fs::write(path, out)
+        .map_err(|e| SqzError::Other(format!("write {}: {e}", path.display())))?;
     Ok(ZedMcpInstall::Merged)
 }
 
@@ -307,11 +308,12 @@ pub(crate) fn remove_zed_mcp_config_at(path: &Path) -> Result<ZedMcpRemove> {
     if drop_key {
         root_obj.remove("context_servers");
     }
-    std::fs::write(
-        path,
-        serde_json::to_string_pretty(&root).unwrap_or_default(),
-    )
-    .map_err(|e| SqzError::Other(format!("write {}: {e}", path.display())))?;
+    let mut out = serde_json::to_string_pretty(&root).unwrap_or_default();
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    std::fs::write(path, out)
+        .map_err(|e| SqzError::Other(format!("write {}: {e}", path.display())))?;
     Ok(ZedMcpRemove::Removed)
 }
 
