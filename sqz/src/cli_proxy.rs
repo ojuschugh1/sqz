@@ -156,7 +156,7 @@ pub fn catch_panic<T>(f: impl FnOnce() -> T) -> Option<T> {
     std::panic::set_hook(Box::new(|_| {}));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         #[cfg(debug_assertions)]
-        if std::env::var_os("SQZ_TEST_PANIC").is_some() {
+        if std::env::var_os("SQZ_TEST_PANIC").is_some_and(|v| v != "late") {
             panic!("SQZ_TEST_PANIC");
         }
         f()
@@ -470,6 +470,10 @@ impl CliProxy {
             original, compressed, &[], cmd,
             project_str.as_deref(),
         );
+        #[cfg(debug_assertions)]
+        if std::env::var_os("SQZ_TEST_PANIC").is_some_and(|v| v == "late") {
+            panic!("SQZ_TEST_PANIC");
+        }
     }
 
     /// Record a dedup hit in the compression log so `sqz stats` and

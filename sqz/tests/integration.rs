@@ -530,12 +530,12 @@ fn test_output_passes_through_when_compression_panics() {
     }
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("sqz.db");
-    let panicking = |args: &[&str], stdin: &str| {
+    let panicking_at = |at: &str, db: &std::path::Path, args: &[&str], stdin: &str| {
         use std::io::Write;
         let mut child = Command::new(sqz_bin())
             .args(args)
-            .env("SQZ_DB_PATH", &db)
-            .env("SQZ_TEST_PANIC", "1")
+            .env("SQZ_DB_PATH", db)
+            .env("SQZ_TEST_PANIC", at)
             .current_dir(workspace_root())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -545,6 +545,7 @@ fn test_output_passes_through_when_compression_panics() {
         child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
         child.wait_with_output().unwrap()
     };
+    let panicking = |args: &[&str], stdin: &str| panicking_at("1", &db, args, stdin);
     let body: String = (0..60)
         .map(|i| format!("2026-10-06T12:00:{i:02}Z INFO request served path=/health status=200 latency_ms={i}\n"))
         .collect();
@@ -571,6 +572,20 @@ fn test_output_passes_through_when_compression_panics() {
         "tool_response": {"stdout": body, "stderr": "", "interrupted": false, "isImage": false},
     });
     let o = panicking(&["hook", "claude-post"], &payload.to_string());
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "", "no replacement");
+    let late = [vec!["compress"], vec!["compress", "--cmd", "tail -60 app.log"]];
+    for (i, args) in late.iter().enumerate() {
+        let o = panicking_at("late", &dir.path().join(format!("late{i}.db")), args, &input);
+        let err = stderr(&o);
+        assert_eq!(o.status.code(), Some(3), "{args:?}: {err}");
+        assert_eq!(stdout(&o), body, "{args:?}");
+        assert!(err.contains("% reduction)"), "{args:?}: {err}");
+        let fallback = "[sqz] fallback: compression panicked, output passed through unchanged";
+        assert_eq!(err.lines().last(), Some(fallback), "{args:?}: {err}");
+    }
+    let late_db = dir.path().join("late-post.db");
+    let o = panicking_at("late", &late_db, &["hook", "claude-post"], &payload.to_string());
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(stdout(&o), "", "no replacement");
     let o = run_with_db(&db, &["hook", "claude-post"], Some(&payload.to_string()));
