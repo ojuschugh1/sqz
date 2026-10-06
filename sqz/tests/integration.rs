@@ -975,6 +975,9 @@ fn test_init_merges_the_gemini_hook_into_existing_settings() {
     assert!(stdout(&o).contains("not plain JSON"), "{}", stdout(&o));
     assert!(stdout(&o).contains("hook gemini"), "{}", stdout(&o));
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), jsonc);
+    let o = run_doctor(home.path(), project.path(), &[]);
+    assert!(stdout(&o).contains(".gemini/settings.json is not plain JSON"), "{}", stdout(&o));
+    assert!(!stdout(&o).contains("fix: sqz init --only gemini"), "{}", stdout(&o));
 }
 
 #[test]

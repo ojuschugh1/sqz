@@ -116,6 +116,8 @@ pub struct Managed {
     pub missing_binaries: Vec<String>,
     /// Hook files an older sqz wrote that current sqz no longer uses.
     pub legacy_hooks: Vec<String>,
+    /// The project's `.gemini/settings.json` is not plain JSON, so `sqz init` won't edit it.
+    pub gemini_unparseable: bool,
 }
 
 impl Managed {
@@ -135,10 +137,10 @@ const FIX_CMD: &str = "sqz doctor --fix";
 pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) -> Vec<Problem> {
     let mut problems = Vec::new();
 
-    let unconfigured: Vec<&ToolStatus> = tools
+    let (by_hand, unconfigured): (Vec<&ToolStatus>, Vec<&ToolStatus>) = tools
         .iter()
         .filter(|t| t.client == Detection::Detected && !t.config.configured())
-        .collect();
+        .partition(|t| t.name == "Gemini CLI" && managed.gemini_unparseable);
     if !unconfigured.is_empty() {
         let names: Vec<&str> = unconfigured.iter().map(|t| t.name).collect();
         let flags: Vec<&str> = unconfigured.iter().map(|t| t.only_flag).collect();
@@ -149,6 +151,12 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
                 names.join(", ")
             ),
             fix: Some(format!("sqz init --only {}", flags.join(","))),
+        });
+    }
+    if !by_hand.is_empty() {
+        problems.push(Problem {
+            message: "Gemini CLI detected, but .gemini/settings.json is not plain JSON (comments?), so sqz will not edit it".to_string(),
+            fix: Some("add sqz's BeforeTool hook to it by hand (sqz init --only gemini prints the entry)".to_string()),
         });
     }
 
@@ -770,6 +778,11 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
             .iter()
             .map(|path| path.display().to_string())
             .collect(),
+        gemini_unparseable: sqz_engine::gemini_settings_needs_update(
+            &project_dir.join(".gemini").join("settings.json"),
+            "sqz",
+        )
+        .is_err(),
     }
 }
 
@@ -961,6 +974,7 @@ mod tests {
             claude_duplicate: false,
             missing_binaries: Vec::new(),
             legacy_hooks: Vec::new(),
+            gemini_unparseable: false,
         }
     }
 
@@ -1126,6 +1140,20 @@ mod tests {
             ]
         );
         assert!(guidance_readers(&tools[2..], dir.path()).is_empty());
+    }
+
+    #[test]
+    fn gemini_settings_sqz_will_not_edit_get_a_manual_fix() {
+        let tools = vec![
+            tool("Gemini CLI", "gemini", Detection::Detected, ConfigScope::None),
+            tool("Cursor", "cursor", Detection::Detected, ConfigScope::None),
+        ];
+        let managed = Managed { gemini_unparseable: true, ..clean() };
+        let problems = diagnose(&tools, &active(), &managed);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(problems[0].fix.as_deref(), Some("sqz init --only cursor"));
+        assert!(problems[1].message.contains("not plain JSON"), "{}", problems[1].message);
+        assert!(problems[1].fix.as_deref().unwrap().starts_with("add sqz's BeforeTool hook"));
     }
 
     #[test]
