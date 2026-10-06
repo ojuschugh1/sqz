@@ -257,7 +257,9 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     // is a normal CLI argument and all three shells parse it fine.
     let is_powershell = matches!(tool_name, "PowerShell" | "powershell" | "pwsh");
     let rewritten = if platform == HookPlatform::ClaudeCode {
-        match claude_rewrite(&parsed, command, is_powershell, &claude_settings_files(&parsed)) {
+        let settings = claude_settings_files(&parsed);
+        let shell = crate::shell_scan::Shell::from_env();
+        match claude_rewrite(&parsed, command, is_powershell, &settings, shell) {
             Some(rewritten) => rewritten,
             None => return Ok(passthrough(platform, input)),
         }
@@ -2035,6 +2037,7 @@ fn claude_rewrite(
     command: &str,
     is_powershell: bool,
     settings: &[PathBuf],
+    shell: crate::shell_scan::Shell,
 ) -> Option<String> {
     let bypass = parsed.get("permission_mode").and_then(|v| v.as_str()) == Some("bypassPermissions");
     if is_powershell {
@@ -2043,7 +2046,7 @@ fn claude_rewrite(
         }
         return Some(crate::exit_marker::powershell_rewrite(command, &shell_escape(command)));
     }
-    if let Some(cmds) = crate::shell_scan::flat(command) {
+    if let Some(cmds) = crate::shell_scan::flat_for(command, shell) {
         return (bypass || claude_rules_installed(settings))
             .then(|| crate::exit_marker::posix_flat_rewrite(command, &cmds));
     }
@@ -2110,13 +2113,13 @@ pub fn claude_post_tool_use_target(input: &str) -> Option<PostToolUseTarget> {
 /// takes it, or it exits 0 and the PostToolUse hook does. Followers and
 /// background jobs never finish with output to replace.
 pub fn claude_hooks_compress(command: &str, failed: bool) -> bool {
-    use crate::shell_scan::{flat, plan, Skip};
+    use crate::shell_scan::{flat_for, plan, Shell, Skip};
     if command.contains("sqz compress") {
         return false;
     }
     match plan(command) {
         Err(Skip::AlreadySqz) => false,
-        _ if flat(command).is_some() => true,
+        _ if flat_for(command, Shell::from_env()).is_some() => true,
         Err(Skip::LongRunning | Skip::Background) => false,
         _ => !failed,
     }
@@ -2329,12 +2332,20 @@ mod tests {
     }
 
     fn claude_default(command: &str, settings: &[PathBuf]) -> Option<String> {
+        claude_default_in(command, settings, crate::shell_scan::Shell::Zsh)
+    }
+
+    fn claude_default_in(
+        command: &str,
+        settings: &[PathBuf],
+        shell: crate::shell_scan::Shell,
+    ) -> Option<String> {
         let parsed = serde_json::json!({
             "tool_name": "Bash",
             "permission_mode": "default",
             "tool_input": {"command": command}
         });
-        claude_rewrite(&parsed, command, false, settings)
+        claude_rewrite(&parsed, command, false, settings, shell)
     }
 
     fn settings_with_rules(dir: &Path, rules: &[&str]) -> PathBuf {
@@ -2375,11 +2386,34 @@ mod tests {
     }
 
     #[test]
+    fn claude_flat_form_stops_where_the_shell_would() {
+        use crate::shell_scan::Shell;
+        let dir = tempfile::tempdir().unwrap();
+        let rules = [settings_with_rules(dir.path(), &CLAUDE_ALLOW_RULES)];
+        for shell in [Shell::Bash, Shell::Zsh] {
+            assert_eq!(claude_default_in("ls ${X:?unset}; echo next", &rules, shell), None);
+            assert_eq!(claude_default_in("ls $((1/0)) || echo next", &rules, shell), None);
+            assert_eq!(
+                claude_default_in("ls ${X:?unset} && echo next", &rules, shell).as_deref(),
+                Some("set -o pipefail; ls ${X:?unset} 2>&1 | sqz compress --cmd ls && echo next")
+            );
+        }
+        assert_eq!(claude_default_in("ls *.rs; echo next", &rules, Shell::Zsh), None);
+        assert!(claude_default_in("ls *.rs; echo next", &rules, Shell::Bash).is_some());
+        // Bypass mode falls back to the grouped form, which stops with the shell.
+        let parsed = serde_json::json!({"permission_mode": "bypassPermissions"});
+        let command = "ls ${X:?unset}; echo next";
+        let cmd = claude_rewrite(&parsed, command, false, &[], Shell::Bash).unwrap();
+        assert!(cmd.starts_with("{ ( ls ${X:?unset}; echo next\n); printf"), "{cmd}");
+    }
+
+    #[test]
     fn claude_powershell_is_rewritten_only_in_bypass_mode() {
+        let zsh = crate::shell_scan::Shell::Zsh;
         let parsed = serde_json::json!({"tool_name": "PowerShell", "permission_mode": "default"});
-        assert_eq!(claude_rewrite(&parsed, "Get-ChildItem", true, &[]), None);
+        assert_eq!(claude_rewrite(&parsed, "Get-ChildItem", true, &[], zsh), None);
         let parsed = serde_json::json!({"tool_name": "PowerShell", "permission_mode": "bypassPermissions"});
-        assert!(claude_rewrite(&parsed, "Get-ChildItem", true, &[]).is_some());
+        assert!(claude_rewrite(&parsed, "Get-ChildItem", true, &[], zsh).is_some());
     }
 
     #[test]

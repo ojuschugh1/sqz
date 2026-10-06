@@ -10,11 +10,13 @@ fn sqz() -> &'static str {
     env!("CARGO_BIN_EXE_sqz")
 }
 
-/// Run `sqz hook <tool>` on `payload` with Claude Code's settings pointed
-/// at `config` (or an empty directory), returning the rewritten command.
-fn hook(tool: &str, payload: serde_json::Value, config: &Path) -> Option<String> {
+/// Run `sqz hook <tool>` on `payload` for a user whose shell is `shell`,
+/// with Claude Code's settings pointed at `config` (or an empty
+/// directory), returning the rewritten command.
+fn hook(tool: &str, payload: serde_json::Value, shell: &str, config: &Path) -> Option<String> {
     let mut child = Command::new(sqz())
         .args(["hook", tool])
+        .env("SHELL", shell)
         .env("CLAUDE_CONFIG_DIR", config)
         .env("CLAUDE_PROJECT_DIR", config)
         .stdin(Stdio::piped())
@@ -32,18 +34,18 @@ fn hook(tool: &str, payload: serde_json::Value, config: &Path) -> Option<String>
 }
 
 /// The grouped form, as Gemini CLI and the other POSIX hosts get it.
-fn grouped(command: &str, config: &Path) -> Option<String> {
+fn grouped(command: &str, shell: &str, config: &Path) -> Option<String> {
     let payload = serde_json::json!({"tool_name": "run_shell_command", "tool_input": {"command": command}});
-    hook("gemini", payload, config)
+    hook("gemini", payload, shell, config)
 }
 
-fn claude(command: &str, mode: &str, config: &Path) -> Option<String> {
+fn claude(command: &str, mode: &str, shell: &str, config: &Path) -> Option<String> {
     let payload = serde_json::json!({
         "tool_name": "Bash",
         "permission_mode": mode,
         "tool_input": {"command": command},
     });
-    hook("claude", payload, config)
+    hook("claude", payload, shell, config)
 }
 
 #[derive(Debug, PartialEq)]
@@ -137,6 +139,11 @@ const CASES: &[&str] = &[
     "sh -c 'exit 7'",
     "ls ${X:?not set}",
     "for f in *.nomatchxyz; do echo $f; done",
+    "ls ${X:?not set}; echo next",
+    "ls ${X:?not set} || echo next",
+    "ls $((1/0)); echo next",
+    "ls =nosuchcmdxyz; echo next",
+    "ls *.nomatchxyz; echo next",
 ];
 
 /// Lists only the ungrouped form takes: builtins that must keep running
@@ -194,7 +201,7 @@ fn rewrites_behave_like_the_original() {
     let (fixture, dir, home) = fixture();
     for shell in shells() {
         for command in CASES {
-            let rewritten = grouped(command, fixture.path())
+            let rewritten = grouped(command, shell, fixture.path())
                 .unwrap_or_else(|| panic!("not rewritten: {command:?}"));
             assert_same(shell, command, &rewritten, &dir, &home);
         }
@@ -206,7 +213,7 @@ fn claude_rewrites_behave_like_the_original() {
     let (fixture, dir, home) = fixture();
     for shell in claude_shells() {
         for command in CASES.iter().chain(FLAT_CASES) {
-            let rewritten = claude(command, "bypassPermissions", fixture.path())
+            let rewritten = claude(command, "bypassPermissions", shell, fixture.path())
                 .unwrap_or_else(|| panic!("not rewritten: {command:?}"));
             assert_same(shell, command, &rewritten, &dir, &home);
         }
@@ -216,7 +223,7 @@ fn claude_rewrites_behave_like_the_original() {
 #[test]
 fn claude_default_mode_needs_the_allow_rules() {
     let (fixture, _, _) = fixture();
-    assert_eq!(claude("cargo test", "default", fixture.path()), None);
+    assert_eq!(claude("cargo test", "default", "zsh", fixture.path()), None);
     std::fs::write(
         fixture.path().join("settings.json"),
         serde_json::json!({"permissions": {"allow": ["Bash(set -o pipefail)", "Bash(sqz compress --cmd *)"]}})
@@ -224,18 +231,23 @@ fn claude_default_mode_needs_the_allow_rules() {
     )
     .unwrap();
     assert_eq!(
-        claude("cargo test", "default", fixture.path()).as_deref(),
+        claude("cargo test", "default", "zsh", fixture.path()).as_deref(),
         Some("set -o pipefail; cargo test 2>&1 | sqz compress --cmd 'cargo test'")
     );
     // Grouped forms never match an allow rule, so they wait for bypass mode.
-    assert_eq!(claude("git log | head", "default", fixture.path()), None);
-    assert!(claude("git log | head", "bypassPermissions", fixture.path()).is_some());
+    assert_eq!(claude("git log | head", "default", "zsh", fixture.path()), None);
+    assert!(claude("git log | head", "bypassPermissions", "zsh", fixture.path()).is_some());
+    // Piping a command alone would let a fatal expansion in it run the rest.
+    assert_eq!(claude("ls ${X:?not set}; echo next", "default", "bash", fixture.path()), None);
+    assert_eq!(claude("ls *.nomatchxyz; echo next", "default", "zsh", fixture.path()), None);
+    assert!(claude("ls *.nomatchxyz; echo next", "default", "bash", fixture.path()).is_some());
+    assert!(claude("ls ${X:?not set} && echo next", "default", "zsh", fixture.path()).is_some());
 }
 
 #[test]
 fn state_changes_are_not_grouped() {
     let (fixture, _, _) = fixture();
     for command in ["export X=1 && make", "make && cd build", "npm run build &", "tail -f log.txt", "set -e; make"] {
-        assert_eq!(grouped(command, fixture.path()), None, "{command:?}");
+        assert_eq!(grouped(command, "zsh", fixture.path()), None, "{command:?}");
     }
 }

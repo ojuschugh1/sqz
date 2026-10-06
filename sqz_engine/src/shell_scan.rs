@@ -137,6 +137,49 @@ const QUIET: &[&str] = &[
 /// `None` for a pipeline, subshell, group, loop, conditional, heredoc or
 /// background job, or when no command is worth piping.
 pub fn flat(command: &str) -> Option<Vec<FlatCmd>> {
+    flat_segments(command).map(|(_, cmds)| cmds)
+}
+
+/// The shell a command runs in, for the expansions only zsh stops on: a
+/// glob that matches nothing, and a failed `=cmd` or `~user` lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shell {
+    Bash,
+    Zsh,
+}
+
+impl Shell {
+    /// The user's shell, from `$SHELL`. Anything but bash counts as zsh,
+    /// which stops on more.
+    pub fn from_env() -> Shell {
+        let shell = std::env::var("SHELL").unwrap_or_default();
+        if basename(&shell) == "bash" {
+            Shell::Bash
+        } else {
+            Shell::Zsh
+        }
+    }
+}
+
+/// [`flat`], unless piping its commands could run one the original never
+/// runs in `shell`. An expansion error such as `${X:?}` or `$((1/0))` stops
+/// the shell, but in a pipe it stops only that command, so a `;`, newline
+/// or `||` anywhere after it would carry on. `&&` alone stops there too,
+/// since the pipe fails.
+pub fn flat_for(command: &str, shell: Shell) -> Option<Vec<FlatCmd>> {
+    let (segs, cmds) = flat_segments(command)?;
+    let stops = |fatal| fatal == Fatal::Any || (fatal == Fatal::Zsh && shell == Shell::Zsh);
+    let runs_on = (0..segs.len()).any(|i| {
+        cmds[i].label.is_some()
+            && stops(segs[i].fatal)
+            && segs[i..segs.len() - 1]
+                .iter()
+                .any(|s| matches!(s.sep, Some(Sep::Semi | Sep::Newline | Sep::Or)))
+    });
+    (!runs_on).then_some(cmds)
+}
+
+fn flat_segments(command: &str) -> Option<(Vec<Seg>, Vec<FlatCmd>)> {
     let command = command.trim_end();
     let mut scan = Scanner::new(command);
     scan.list(false).ok()?;
@@ -170,7 +213,7 @@ pub fn flat(command: &str) -> Option<Vec<FlatCmd>> {
             FlatCmd { end: seg.last, label, merge_stderr: !seg.err }
         })
         .collect();
-    cmds.iter().any(|c| c.label.is_some()).then_some(cmds)
+    cmds.iter().any(|c| c.label.is_some()).then_some((segs, cmds))
 }
 
 /// The command word and the plain words after it, up to the first one with
@@ -330,13 +373,26 @@ enum Sep {
     Newline,
 }
 
+/// Whether an expansion error in a word stops the shell. Inside `$( )` or
+/// `( )` it stops only that subshell, so those don't count.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Fatal {
+    #[default]
+    No,
+    /// zsh stops: an unquoted glob that matches nothing, `=cmd` or `~user`.
+    Zsh,
+    /// Every shell stops, or drops the rest of the line: `${X:?}`, an
+    /// arithmetic error, a bad substitution.
+    Any,
+}
+
 #[derive(Debug)]
 enum Tok {
-    Word { start: usize, end: usize, plain: String },
+    Word { start: usize, end: usize, plain: String, fatal: Fatal },
     Sep { kind: Sep, end: usize },
     /// `out`: stdout goes somewhere other than the pipe. `err`: the
     /// command already says where stderr goes.
-    Redirect { start: usize, end: usize, out: bool, err: bool },
+    Redirect { start: usize, end: usize, out: bool, err: bool, fatal: Fatal },
     Subshell,
 }
 
@@ -355,6 +411,9 @@ struct Scanner<'a> {
     comment: bool,
     heredoc: bool,
     nesting: usize,
+    subshells: usize,
+    /// The worst expansion error in the top-level word being scanned.
+    fatal: Fatal,
 }
 
 impl<'a> Scanner<'a> {
@@ -368,6 +427,8 @@ impl<'a> Scanner<'a> {
             comment: false,
             heredoc: false,
             nesting: 0,
+            subshells: 0,
+            fatal: Fatal::No,
         }
     }
 
@@ -377,6 +438,12 @@ impl<'a> Scanner<'a> {
             return Err(Skip::Unparsed);
         }
         Ok(())
+    }
+
+    fn flag(&mut self, fatal: Fatal) {
+        if self.subshells == 0 {
+            self.fatal = self.fatal.max(fatal);
+        }
     }
 
     fn peek(&self, k: usize) -> Option<u8> {
@@ -415,6 +482,7 @@ impl<'a> Scanner<'a> {
     fn list(&mut self, nested: bool) -> Res<()> {
         if nested {
             self.nest()?;
+            self.subshells += 1;
         }
         loop {
             self.blanks();
@@ -471,6 +539,7 @@ impl<'a> Scanner<'a> {
                     if nested {
                         self.i += 1;
                         self.nesting -= 1;
+                        self.subshells -= 1;
                         return Ok(());
                     }
                     return Err(Skip::Unparsed);
@@ -495,13 +564,14 @@ impl<'a> Scanner<'a> {
 
     fn word(&mut self, nested: bool) -> Res<()> {
         let (start, plain) = self.word_text()?;
+        let fatal = std::mem::take(&mut self.fatal);
         if nested {
             // `case` patterns end in an unbalanced `)`.
             if plain == "case" {
                 return Err(Skip::Unparsed);
             }
         } else {
-            self.toks.push(Tok::Word { start, end: self.i, plain });
+            self.toks.push(Tok::Word { start, end: self.i, plain, fatal });
         }
         Ok(())
     }
@@ -511,6 +581,7 @@ impl<'a> Scanner<'a> {
     fn word_text(&mut self) -> Res<(usize, String)> {
         let start = self.i;
         let mut plain = String::new();
+        let mut glob = false;
         while let Some(c) = self.peek(0) {
             match c {
                 b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(' | b')' => break,
@@ -541,11 +612,19 @@ impl<'a> Scanner<'a> {
                     plain.push('`');
                 }
                 b'$' => self.dollar(&mut plain, false)?,
+                b'*' | b'?' | b'[' => {
+                    glob = true;
+                    self.bump(Some(&mut plain));
+                }
                 _ => self.bump(Some(&mut plain)),
             }
         }
         if self.i == start {
             return Err(Skip::Unparsed);
+        }
+        let raw = &self.s[start..self.i];
+        if (glob && raw != "[") || zsh_lookup(raw) {
+            self.flag(Fatal::Zsh);
         }
         Ok((start, plain))
     }
@@ -586,6 +665,7 @@ impl<'a> Scanner<'a> {
         plain.push('$');
         match (self.peek(1), self.peek(2)) {
             (Some(b'('), Some(b'(')) => {
+                self.flag(Fatal::Any);
                 self.i += 3;
                 self.closing(b'(', b')', 2)
             }
@@ -594,8 +674,21 @@ impl<'a> Scanner<'a> {
                 self.list(true)
             }
             (Some(b'{'), _) => {
+                if !plain_param(&self.b[self.i + 2..]) {
+                    self.flag(Fatal::Any);
+                }
                 self.i += 2;
                 self.closing(b'{', b'}', 1)
+            }
+            (Some(b'['), _) => {
+                self.flag(Fatal::Any);
+                self.i += 1;
+                Ok(())
+            }
+            (Some(b'?' | b'*'), _) => {
+                self.i += 1;
+                self.bump(Some(plain));
+                Ok(())
             }
             (Some(b'\''), _) if !quoted => {
                 self.i += 2;
@@ -645,6 +738,10 @@ impl<'a> Scanner<'a> {
                 Some(b'$') if self.peek(1) == Some(b'(') && self.peek(2) != Some(b'(') => {
                     self.i += 2;
                     self.list(true)?;
+                }
+                Some(b'$') if matches!(self.peek(1), Some(b'{' | b'[' | b'(')) => {
+                    self.flag(Fatal::Any);
+                    self.i += 1;
                 }
                 Some(c) if c == open => {
                     depth += 1;
@@ -710,6 +807,7 @@ impl<'a> Scanner<'a> {
             return Err(Skip::Unparsed);
         }
         let (_, target) = self.word_text()?;
+        let fatal = std::mem::take(&mut self.fatal);
         if let Some(strip_tabs) = heredoc {
             self.heredoc = true;
             self.pending.push((target.clone(), strip_tabs));
@@ -727,7 +825,7 @@ impl<'a> Scanner<'a> {
             _ => (false, false),
         };
         if !nested {
-            self.toks.push(Tok::Redirect { start, end: self.i, out, err });
+            self.toks.push(Tok::Redirect { start, end: self.i, out, err, fatal });
         }
         Ok(())
     }
@@ -777,6 +875,7 @@ struct Seg {
     /// A redirect sends stdout away from the pipe / already places stderr.
     out: bool,
     err: bool,
+    fatal: Fatal,
 }
 
 impl Seg {
@@ -807,11 +906,12 @@ fn segments(command: &str, toks: &[Tok]) -> Res<Vec<Seg>> {
                 at_cmd = true;
                 wrapper = false;
             }
-            Tok::Redirect { start, end, out, err } => {
+            Tok::Redirect { start, end, out, err, fatal } => {
                 let seg = segs.last_mut().expect("never empty");
                 seg.tokens += 1;
                 seg.out |= *out;
                 seg.err |= *err;
+                seg.fatal = seg.fatal.max(*fatal);
                 seg.span(*start, *end);
             }
             Tok::Subshell => {
@@ -825,9 +925,10 @@ fn segments(command: &str, toks: &[Tok]) -> Res<Vec<Seg>> {
                 seg.subshell = true;
                 at_cmd = false;
             }
-            Tok::Word { start, end, plain } => {
+            Tok::Word { start, end, plain, fatal } => {
                 let seg = segs.last_mut().expect("never empty");
                 seg.tokens += 1;
+                seg.fatal = seg.fatal.max(*fatal);
                 seg.span(*start, *end);
                 if !at_cmd {
                     seg.args.push(plain.clone());
@@ -893,6 +994,35 @@ fn is_assignment(raw: &str) -> bool {
         Some(b'+') => b.get(name + 1) == Some(&b'='),
         _ => false,
     }
+}
+
+/// A `${ }` that expands without an error whatever the variable holds: a
+/// name alone or with a default, alternate, trim or replace operator.
+/// `text` starts just after the `${`.
+fn plain_param(text: &[u8]) -> bool {
+    let name = match text.first() {
+        Some(c) if c.is_ascii_alphabetic() || *c == b'_' => {
+            text.iter().take_while(|c| c.is_ascii_alphanumeric() || **c == b'_').count()
+        }
+        Some(c) if c.is_ascii_digit() || b"@*#?$!-".contains(c) => 1,
+        _ => return false,
+    };
+    match text.get(name) {
+        Some(b'}' | b'-' | b'+' | b'#' | b'%' | b'/') => true,
+        Some(b':') => matches!(text.get(name + 1), Some(b'-' | b'+')),
+        _ => false,
+    }
+}
+
+/// A word zsh expands by a lookup it stops on when the lookup fails:
+/// `=cmd`, and `~user` or `~1` on its own or as an assignment's value.
+fn zsh_lookup(raw: &str) -> bool {
+    let tilde = |word: &str| {
+        word.strip_prefix('~')
+            .is_some_and(|rest| !matches!(rest.split('/').next(), Some("" | "+" | "-")))
+    };
+    let value = raw.split_once('=').filter(|_| is_assignment(raw)).map_or("", |(_, v)| v);
+    (raw.len() > 1 && raw.starts_with('=')) || tilde(raw) || tilde(value)
 }
 
 #[cfg(test)]
@@ -1150,6 +1280,48 @@ mod tests {
         assert_eq!(labels, [None, None, None, Some("make")]);
         // A trailing comment stays after the inserted pipe.
         assert_eq!(flat_parts("ls # list"), [("ls", Some("ls".into()), true)]);
+    }
+
+    #[test]
+    fn flat_for_never_runs_past_a_fatal_expansion() {
+        let piped = |cmd: &str, shell| flat_for(cmd, shell).is_some();
+        for cmd in [
+            "ls ${X:?unset}; echo next",
+            "ls ${X?unset}\necho next",
+            "ls \"${X:?unset}\" || echo next",
+            "ls ${X:?unset} && echo a; echo next",
+            "ls $((1/0)); echo next",
+            "ls $[1/0]; echo next",
+            "ls ${a b}; echo next",
+            "ls ${A:-${B:?unset}}; echo next",
+            "X=${Y:?unset} make; echo next",
+            "make 2> ${LOG:?unset}; echo next",
+        ] {
+            assert!(flat(cmd).is_some(), "{cmd:?}");
+            assert!(!piped(cmd, Shell::Bash) && !piped(cmd, Shell::Zsh), "{cmd:?}");
+        }
+        for cmd in [
+            "ls *.rs; echo next",
+            "curl -s http://x/?a=1; echo next",
+            "jq .a[0] f.json || echo next",
+            "ls =nosuchcmd; echo next",
+            "ls ~nosuchuser; echo next",
+            "X=~nosuchuser make; echo next",
+        ] {
+            assert!(piped(cmd, Shell::Bash) && !piped(cmd, Shell::Zsh), "{cmd:?}");
+        }
+        for cmd in [
+            "ls ${X:?unset} && echo next",
+            "ls ${X:?unset};",
+            "git status; ls ${X:?unset}",
+            "echo ${X:?unset}; git status",
+            "ls '*.rs' \\*.rs \"*\"; echo next",
+            "ls $(echo ${X:?unset} *.rs); echo next",
+            "ls ${DIR} ${DIR:-.} ${DIR#./} ${DIR//a/b} $? $*; echo next",
+            "[ -f x ]; ls ~ ~/x ~+ --x=~y; echo next",
+        ] {
+            assert!(piped(cmd, Shell::Bash) && piped(cmd, Shell::Zsh), "{cmd:?}");
+        }
     }
 
     #[test]
