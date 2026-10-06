@@ -2587,6 +2587,7 @@ fn cmd_uninstall(skip_confirm: bool) {
     .chain(
         [zed_settings, kiro_mcp, kiro_user_mcp]
             .into_iter()
+            .chain(sqz_engine::claude_user_json_path())
             .filter(|p| std::fs::read_to_string(p).is_ok_and(|s| s.trim() == "{}")),
     )
     .map(|p| p.display().to_string())

@@ -1200,6 +1200,8 @@ fn test_uninstall_lists_only_files_that_hold_sqz_entries() {
     assert!(o.status.success(), "{}", stderr(&o));
     let o = run_sandboxed(home.path(), other.path(), &["uninstall", "--yes"]);
     assert!(o.status.success(), "{}", stderr(&o));
+    let kept = stdout(&o).lines().find(|l| l.starts_with("[sqz] kept: ")).unwrap_or_default().to_string();
+    assert!(kept.contains(&home.path().join(".claude.json").display().to_string()), "{}", stdout(&o));
     let o = run_sandboxed(home.path(), other.path(), &["uninstall", "--yes"]);
     assert!(stdout(&o).contains("nothing to uninstall"), "{}", stdout(&o));
     for (path, text) in &mine {
