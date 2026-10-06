@@ -2163,7 +2163,11 @@ fn cmd_uninstall(skip_confirm: bool) {
         files_to_remove.push((sqz_engine::kiro_user_steering_path().display().to_string(), true));
     }
     let kiro_user_mcp = sqz_engine::kiro_integration::kiro_user_mcp_path();
-    if std::fs::read_to_string(&kiro_user_mcp).is_ok_and(|s| s.contains("\"sqz\"")) {
+    if std::fs::read_to_string(&kiro_user_mcp)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .is_some_and(|v| v.pointer("/mcpServers/sqz").is_some())
+    {
         files_to_remove.push((format!("{} (mcpServers.sqz only)", kiro_user_mcp.display()), true));
     }
 

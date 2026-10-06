@@ -1180,6 +1180,10 @@ fn test_uninstall_lists_only_files_that_hold_sqz_entries() {
         (home.path().join(".codex").join("config.toml"), "model = \"o3\"\n"),
         (project.path().join("opencode.json"), "{\n  \"theme\": \"x\"\n}\n"),
         (project.path().join(".claude").join("settings.local.json"), "{\n  \"permissions\": {}\n}\n"),
+        (
+            home.path().join(".kiro").join("settings").join("mcp.json"),
+            "{\n  \"mcpServers\": {\"notes\": {\"command\": \"notes-mcp\", \"args\": [\"--tag\", \"sqz\"]}}\n}\n",
+        ),
     ];
     for (path, text) in &mine {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
