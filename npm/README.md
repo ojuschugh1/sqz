@@ -42,7 +42,7 @@
   <a href="#install">Install</a> ·
   <a href="#how-it-works">How It Works</a> ·
   <a href="#supported-tools">Supported Tools</a> ·
-  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="https://github.com/ojuschugh1/sqz/blob/main/CHANGELOG.md">Changelog</a> ·
   <a href="https://discord.gg/j8EEyH5dSB">Discord</a>
 </p>
 
@@ -253,6 +253,12 @@ What doesn't get compressed:
 | Gemini CLI | BeforeTool hook (transparent) | `sqz init` |
 | Kiro | Steering + MCP server (advisory) | `sqz init` |
 | OpenCode | TypeScript plugin + MCP server (transparent) | `sqz init` |
+| Codex CLI | AGENTS.md guidance + MCP server (advisory) | `sqz init` |
+| Zed | AGENTS.md guidance + MCP server (advisory) | `sqz init` |
+| Copilot CLI | preToolUse hook (transparent), when `~/.copilot` exists | `sqz init` |
+| Copilot coding agent (CI) | Repo-level hook, self-bootstraps in the cloud sandbox | `sqz init --ci` + commit |
+| Any CI pipeline | [setup-sqz action](https://github.com/ojuschugh1/setup-sqz): compress logs before an LLM step | `uses: ojuschugh1/setup-sqz@v1` |
+| Any MCP server | `sqz-mcp proxy` wraps it, compresses its tool results | see [the MCP proxy](https://github.com/ojuschugh1/sqz#compress-any-mcp-server) |
 | VS Code | [Extension](https://marketplace.visualstudio.com/items?itemName=ojuschugh1.sqz) | Install from Marketplace |
 | JetBrains | [Plugin](https://plugins.jetbrains.com/plugin/31240-sqz--context-intelligence/) | Install from Marketplace |
 | Chrome | Browser extension | ChatGPT, Claude.ai, Gemini, Grok, Perplexity |
@@ -272,18 +278,25 @@ sqz init                      # Install hooks for just this project
 sqz init --only kiro          # Only configure Kiro (skip the rest)
 sqz init --only opencode      # Only configure OpenCode (skip the rest)
 sqz init --skip cursor        # Configure every agent except Cursor
+sqz init --ci                 # Also write .github/hooks/sqz.json for Copilot agent CI runs
 sqz compress <text>           # Compress (or pipe from stdin)
 sqz compress --no-cache       # Compress without dedup (always full output)
 sqz expand <ref>              # Recover original content from a §ref:HASH§ token
 sqz compact                   # Evict stale context to free tokens
+sqz reset                     # Clear dedup cache or compression stats
 sqz gain                      # Show daily token savings (bar chart)
 sqz gain --project .          # Per-project daily gains
 sqz gain --days 30            # Last 30 days
-sqz stats                     # Cumulative compression report
+sqz stats                     # Cumulative compression report (includes regret signals)
+sqz stats --cost              # Estimated $ saved under a prompt-cached billing model
 sqz stats --breakdown         # Per-command token usage breakdown
 sqz stats --project .         # Stats for current project only
 sqz stats --project list      # List all tracked projects
-sqz discover                  # Find missed savings
+sqz stats --share             # Five-line share card sized for a paste into an issue or post
+sqz doctor                    # Verify sqz is installed, wired into your clients, and active
+sqz discover                  # Find missed savings (incl. your weakest-compressing commands)
+sqz discover --replay         # Counterfactual replay of your agent transcripts (Claude Code, Kiro)
+sqz recall "auth timeout"     # Full-text search everything sqz has compressed
 sqz resume                    # Re-inject session context after compaction
 sqz vizit                     # Live terminal dashboard (like htop for AI agents)
 sqz hook claude               # Process a PreToolUse hook (Claude Code)
@@ -379,7 +392,7 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 4. **JSON pipeline**: strip nulls → drop bookkeeping fields (`__v`, `etag`, request and correlation ids) → flatten → collapse arrays → TOON encoding (lossless compact format)
 5. **Safe mode**: stack traces (a trace header followed by its frames), SQL DDL at the start of a line, PEM blocks and credential lines (`key=value` or `key: value` with a secret-looking key) skip the pipeline and pass through unchanged at any size, with only ANSI codes stripped, and are never cached. On the shell hook a per-command formatter still runs first. Its summary is used only when it keeps every line of each paragraph that holds one of them unchanged, so it may summarize the rest of a test run around a trace; otherwise the whole output passes through. Output that only mentions a password, key, trace or migration outside those structures is compressed as usual but is not cached either, so anything a lossy stage drops from it cannot be expanded.
 
-For the full technical details, see [docs/](docs/).
+For the full technical details, see [docs/](https://github.com/ojuschugh1/sqz/tree/main/docs).
 
 ## Configuration
 
@@ -418,13 +431,13 @@ cargo build --release
 
 ## License
 
-[Elastic License 2.0](LICENSE) (ELv2) — use, fork, modify freely. Two restrictions: no competing hosted service, no removing license notices.
+[Elastic License 2.0](https://github.com/ojuschugh1/sqz/blob/main/LICENSE) (ELv2): use, fork, modify freely. Two restrictions: no competing hosted service, no removing license notices.
 
 ## Links
 
-- [Token Savings Benchmark](docs/benchmark.md)
+- [Token Savings Benchmark](https://github.com/ojuschugh1/sqz/blob/main/docs/benchmark.md)
 - [Discord](https://discord.gg/j8EEyH5dSB)
-- [Changelog](CHANGELOG.md)
+- [Changelog](https://github.com/ojuschugh1/sqz/blob/main/CHANGELOG.md)
 
 ## Star History
 
