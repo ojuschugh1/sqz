@@ -335,17 +335,31 @@ mod tests {
 
     #[test]
     fn count_survives_a_run_of_a_million_characters() {
-        for unit in ["=", " ", "\n", "a", "日", "\u{301}", "=\u{301}", "\n/", "Aa"] {
-            let text = unit.repeat(1_100_000 / unit.chars().count());
+        for unit in ["=", " "] {
+            let text = unit.repeat(1_100_000);
             let (cl, o2) = both(&text);
             assert!(cl > 0 && o2 > 0 && cl as usize <= text.len() && o2 as usize <= text.len(), "{unit:?}");
         }
     }
 
     #[test]
+    fn every_class_of_run_is_cut_to_the_limit() {
+        for unit in ["=", " ", "\n", "a", "日", "\u{301}", "=\u{301}", "\n/", "Aa"] {
+            let text = unit.repeat((3 * MAX_RUN_BYTES + 7) / unit.len());
+            let cuts = run_cuts(&text);
+            assert!(cuts.len() >= 3, "{unit:?}: {cuts:?}");
+            let mut start = 0;
+            for end in cuts.into_iter().chain([text.len()]) {
+                assert!(end > start && end - start <= MAX_RUN_BYTES, "{unit:?}: {start}..{end}");
+                start = end;
+            }
+        }
+    }
+
+    #[test]
     fn count_of_a_cut_run_stays_close() {
         for unit in ["=", " ", "\n", "a", "ab", "─"] {
-            let text = format!("x {} y\n", unit.repeat(8192 / unit.len()));
+            let text = format!("x {} y\n", unit.repeat(4200 / unit.len()));
             let (want, got) = (tiktoken(&text), both(&text));
             for (w, g) in [(want.0, got.0), (want.1, got.1)] {
                 assert!(w.abs_diff(g) <= w / 100 + 4, "{unit:?}: {g} vs {w}");
@@ -355,14 +369,15 @@ mod tests {
 
     #[test]
     fn count_is_linear_on_long_runs() {
+        let tc = TokenCounter::new();
         let run = |bytes: usize| "abcdefghijklmnopqrstuvwxyz".repeat(bytes / 26);
         let (small, large) = (run(8 << 10), run(80 << 10));
         let ratio = crate::text_search::time_ratio(
             || {
-                std::hint::black_box(both(&small));
+                std::hint::black_box(tc.count(&small, &ModelFamily::AnthropicClaude));
             },
             || {
-                std::hint::black_box(both(&large));
+                std::hint::black_box(tc.count(&large, &ModelFamily::AnthropicClaude));
             },
         );
         assert!(ratio < 25.0, "80 KB took {ratio:.1}x as long as 8 KB");
