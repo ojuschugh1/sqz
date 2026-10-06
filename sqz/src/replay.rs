@@ -1171,6 +1171,7 @@ mod tests {
         assert_eq!(classify(Client::ClaudeCode, &failed("Bash", "export X=1 && make")), Reach::ShellHooked);
         assert_eq!(classify(Client::ClaudeCode, &out("Bash", "git log | head")), Reach::ShellHooked);
         assert_eq!(classify(Client::ClaudeCode, &failed("Bash", "git log | head")), Reach::Shell);
+        assert_eq!(classify(Client::ClaudeCode, &failed("Bash", "ls ${X:?unset}; echo next")), Reach::Shell);
         assert_eq!(classify(Client::ClaudeCode, &out("Bash", "tail -f app.log")), Reach::Shell);
         // Kiro has no rewrite hook at all.
         assert_eq!(classify(Client::KiroIde, &out("execute_bash", "git status")), Reach::Shell);
