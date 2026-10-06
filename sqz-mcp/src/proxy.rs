@@ -433,13 +433,17 @@ pub fn run_proxy(
         }
     }
 
+    let settle = || {
+        let deadline = Instant::now() + UPSTREAM_EXIT_GRACE;
+        while !upstream_thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
     drop(child_stdin);
-    let deadline = Instant::now() + UPSTREAM_EXIT_GRACE;
-    while !upstream_thread.is_finished() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    settle();
     let _ = child.kill();
     let _ = child.wait();
+    settle();
     Ok(())
 }
 

@@ -146,6 +146,29 @@ fn proxy_stops_an_upstream_that_ignores_end_of_input() {
     assert!(!running, "upstream {pid} outlived the proxy");
 }
 
+#[cfg(unix)]
+#[test]
+fn proxy_finishes_passing_on_a_result_after_the_upstream_is_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = r#"read -r line; printf '{"jsonrpc":"2.0","id":0,"result":{}}\n'; read -r line; sleep 1; printf '{"jsonrpc":"2.0","id":1,"result":{"text":"'; head -c 1000000 /dev/zero | tr '\0' a; printf '"}}\n'"#;
+    let mut child = spawn(dir.path(), &["proxy", "--", "sh", "-c", upstream]);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":0,"method":"resources/list"}}"#).unwrap();
+    let mut first = String::new();
+    stdout.read_line(&mut first).unwrap();
+    assert!(first.contains(r#""id":0"#), "{first}");
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"resources/list"}}"#).unwrap();
+    drop(stdin);
+    std::thread::sleep(Duration::from_millis(3500));
+    let mut out = String::new();
+    stdout.read_to_string(&mut out).unwrap();
+    let reply: serde_json::Value = serde_json::from_str(out.trim_end()).expect("the whole result");
+    assert_eq!(reply["id"], 1);
+    assert_eq!(reply["result"]["text"].as_str().map(str::len), Some(1_000_000));
+    assert!(wait_for(&mut child, 10).is_some_and(|s| s.success()));
+}
+
 #[test]
 fn unknown_flags_still_start_the_server() {
     let dir = tempfile::tempdir().unwrap();
