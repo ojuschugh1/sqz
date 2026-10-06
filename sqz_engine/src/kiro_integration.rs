@@ -107,7 +107,7 @@ pub fn kiro_steering_state(path: &Path, global: bool) -> SteeringState {
     } else {
         kiro_steering_content(sqz_path)
     };
-    if content == expected {
+    if content.replace("\r\n", "\n") == expected {
         SteeringState::Current
     } else {
         SteeringState::Stale

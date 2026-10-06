@@ -316,8 +316,9 @@ pub(crate) fn guidance_state(content: &str) -> SteeringState {
     };
     let text = &content[block.start..block.end];
     let current = block.kind == BlockKind::Shared
-        && embedded_sqz_path(text)
-            .is_some_and(|p| text == agents_md_guidance_block(p).trim_end_matches('\n'));
+        && embedded_sqz_path(text).is_some_and(|p| {
+            text.replace("\r\n", "\n") == agents_md_guidance_block(p).trim_end_matches('\n')
+        });
     if current {
         SteeringState::Current
     } else {

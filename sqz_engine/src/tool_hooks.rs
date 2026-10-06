@@ -379,7 +379,7 @@ pub fn sqz_rules_content(tool_name: &str, sqz_path: &str) -> String {
 fn is_sqz_rules(content: &str) -> bool {
     content.contains(SQZ_RULES_SENTINEL)
         || content.starts_with(LEGACY_RULES_HEADING)
-        || content.starts_with(LEGACY_CURSOR_FRONTMATTER)
+        || content.replace("\r\n", "\n").starts_with(LEGACY_CURSOR_FRONTMATTER)
 }
 
 fn legacy_rules_end(content: &str) -> Option<usize> {
@@ -457,7 +457,7 @@ pub fn sqz_rules_state(path: &Path, tool_name: &str) -> crate::kiro_integration:
         return SteeringState::UserAuthored;
     }
     match crate::kiro_integration::embedded_sqz_path(&content) {
-        Some(p) if content == sqz_rules_content(tool_name, p) => SteeringState::Current,
+        Some(p) if content.replace("\r\n", "\n") == sqz_rules_content(tool_name, p) => SteeringState::Current,
         _ => SteeringState::Stale,
     }
 }
@@ -2838,6 +2838,30 @@ mod tests {
         ] {
             assert_eq!(bash_rule_allows(rule, command), expected, "{rule} vs {command}");
         }
+    }
+
+    #[test]
+    fn crlf_copies_of_current_files_are_current() {
+        use crate::kiro_integration::SteeringState;
+        let dir = tempfile::tempdir().unwrap();
+        let crlf = |s: String| s.replace('\n', "\r\n");
+        let write = |name: &str, text: String| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+
+        let cursor = write("sqz.mdc", crlf(sqz_rules_content("Cursor", "/opt/sqz")));
+        assert_eq!(sqz_rules_state(&cursor, "Cursor"), SteeringState::Current);
+        let legacy = write("old.mdc", crlf(format!("{LEGACY_CURSOR_FRONTMATTER}alwaysApply: true\n---\nold\n")));
+        assert_eq!(sqz_rules_state(&legacy, "Cursor"), SteeringState::Stale);
+        let kiro = write("kiro.md", crlf(crate::kiro_integration::kiro_steering_content("/opt/sqz")));
+        assert_eq!(crate::kiro_integration::kiro_steering_state(&kiro, false), SteeringState::Current);
+        let block = crate::codex_integration::agents_md_guidance_block("/opt/sqz");
+        let agents = write("AGENTS.md", crlf(format!("# Mine\n\n{block}")));
+        assert_eq!(crate::codex_integration::agents_md_guidance_state(&agents), SteeringState::Current);
+        write("CLAUDE.md", crlf(crate::claude_md_integration::claude_md_guidance_block("/opt/sqz")));
+        assert_eq!(crate::claude_md_integration::claude_md_guidance_state(dir.path()), SteeringState::Current);
     }
 
     #[test]

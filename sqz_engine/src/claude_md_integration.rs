@@ -223,7 +223,7 @@ pub fn claude_md_guidance_state(project_dir: &Path) -> SteeringState {
     };
     let block = &content[start..end];
     match claude_md_block_sqz_path(block) {
-        Some(p) if block == claude_md_guidance_block(p).trim_end_matches('\n') => {
+        Some(p) if block.replace("\r\n", "\n") == claude_md_guidance_block(p).trim_end_matches('\n') => {
             SteeringState::Current
         }
         _ => SteeringState::Stale,
