@@ -1355,6 +1355,26 @@ fn install_tool_hooks_at(
             continue;
         }
 
+        // User-level hooks already run here; a project copy would run them twice.
+        if config.tool_name == "Claude Code"
+            && home_override
+                .map(|h| h.join(".claude").join("settings.json"))
+                .or_else(claude_user_settings_path)
+                .is_some_and(|p| claude_settings_have_sqz_hooks(&p))
+        {
+            let md_changed = crate::claude_md_integration::install_claude_md_guidance(
+                project_dir, sqz_path,
+            )
+            .unwrap_or(false);
+            let mcp_changed =
+                crate::claude_md_integration::install_claude_mcp_config_at(home_override)
+                    .unwrap_or(false);
+            if (md_changed || mcp_changed) && !installed.iter().any(|n| n == "Claude Code") {
+                installed.push("Claude Code".to_string());
+            }
+            continue;
+        }
+
         let full_path = project_dir.join(&config.config_path);
 
         // Don't overwrite existing hook configs
@@ -1699,7 +1719,7 @@ fn remove_claude_global_hook_at(
             None => return Ok(None),
         },
     };
-    remove_sqz_from_claude_settings(path)
+    remove_sqz_from_claude_settings(path, true)
 }
 
 /// Remove sqz's entries from a project's `.claude/settings.local.json`,
@@ -1707,12 +1727,33 @@ fn remove_claude_global_hook_at(
 /// saves there when you pick "don't ask again". Same results as
 /// [`remove_claude_global_hook`].
 pub fn remove_claude_project_hook(project_dir: &Path) -> Result<Option<(PathBuf, bool)>> {
-    remove_sqz_from_claude_settings(project_dir.join(".claude").join("settings.local.json"))
+    remove_sqz_from_claude_settings(project_dir.join(".claude").join("settings.local.json"), true)
 }
 
-/// Strip sqz's hook entries and allow rules from the Claude Code settings
-/// file at `path`, deleting the file if nothing else is left in it.
-fn remove_sqz_from_claude_settings(path: PathBuf) -> Result<Option<(PathBuf, bool)>> {
+/// Remove sqz's hooks from the project's `.claude/settings.local.json`, keeping every permission.
+pub fn remove_claude_project_hooks_only(project_dir: &Path) -> Result<Option<(PathBuf, bool)>> {
+    remove_sqz_from_claude_settings(project_dir.join(".claude").join("settings.local.json"), false)
+}
+
+/// Whether the Claude Code settings file at `path` holds any of sqz's hooks.
+pub fn claude_settings_have_sqz_hooks(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
+    sqz_hook_entries("").iter().any(|(event, _, args)| {
+        root.pointer(&format!("/hooks/{event}"))
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| a.iter().any(|e| hook_entry_runs_sqz(e, args)))
+    })
+}
+
+/// Whether `~/.claude/settings.json` holds sqz's hooks, which run in every project.
+pub fn claude_user_hooks_installed() -> bool {
+    claude_user_settings_path().is_some_and(|p| claude_settings_have_sqz_hooks(&p))
+}
+
+/// Strip sqz's hook entries, and its allow rules with `rules`, from the Claude Code
+/// settings file at `path`, deleting the file if nothing else is left in it.
+fn remove_sqz_from_claude_settings(path: PathBuf, rules: bool) -> Result<Option<(PathBuf, bool)>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -1734,7 +1775,7 @@ fn remove_sqz_from_claude_settings(path: PathBuf) -> Result<Option<(PathBuf, boo
         return Ok(Some((path, false)));
     };
 
-    let changed = strip_sqz_claude_entries(root_obj, true);
+    let changed = strip_sqz_claude_entries(root_obj, rules);
 
     if !changed {
         return Ok(Some((path, false)));
@@ -3923,6 +3964,37 @@ mod global_install_tests {
             .unwrap()
             .push(serde_json::json!({"matcher": "Bash|PowerShell", "hooks": [cmd("echo also-mine")]}));
         assert_eq!(read(), expected);
+    }
+
+    #[test]
+    fn project_install_leaves_claude_hooks_to_the_user_level_ones() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        install_claude_global_at("/opt/sqz", Some(home.path())).unwrap();
+        let filter = ToolFilter::Only(vec!["claudecode".to_string()]);
+        let installed =
+            install_tool_hooks_at(project.path(), "/opt/sqz", InstallScope::Project, &filter, Some(home.path()));
+        assert_eq!(installed, vec!["Claude Code"]);
+        assert!(!project.path().join(".claude").join("settings.local.json").exists());
+        assert!(project.path().join("CLAUDE.md").exists());
+    }
+
+    #[test]
+    fn duplicate_project_hooks_go_and_permissions_stay() {
+        let project = tempfile::tempdir().unwrap();
+        let local = project.path().join(".claude").join("settings.local.json");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, claude_settings_content("/opt/sqz")).unwrap();
+        assert!(claude_settings_have_sqz_hooks(&local));
+        assert!(remove_claude_project_hooks_only(project.path()).unwrap().unwrap().1);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&local).unwrap()).unwrap();
+        assert_eq!(v, serde_json::json!({"permissions": {"allow": CLAUDE_ALLOW_RULES}}));
+        assert!(!claude_settings_have_sqz_hooks(&local));
+
+        let hook = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"sqz hook claude"}]}]}}"#;
+        std::fs::write(&local, hook).unwrap();
+        assert!(remove_claude_project_hooks_only(project.path()).unwrap().unwrap().1);
+        assert!(!local.exists());
     }
 
     #[test]

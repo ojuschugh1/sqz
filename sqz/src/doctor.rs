@@ -110,6 +110,8 @@ pub struct Managed {
     /// A Claude Code settings file has the sqz hook without the allow rules
     /// and PostToolUse hook current sqz writes next to it.
     pub claude_stale: bool,
+    /// sqz's Claude Code hooks are in both the user-level and the project settings.
+    pub claude_duplicate: bool,
 }
 
 impl Managed {
@@ -196,6 +198,12 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
         problems.push(Problem {
             message: "the Claude Code hook comes from an older sqz install: without the two allow rules for its pipe it leaves commands uncompressed, and the PostToolUse hook is missing".to_string(),
             fix: Some(format!("{FIX_CMD}   (adds Bash(set -o pipefail) and Bash(sqz compress --cmd *) to the allow list)")),
+        });
+    }
+    if managed.claude_duplicate {
+        problems.push(Problem {
+            message: "the sqz Claude Code hooks are installed twice (user-level and this project's .claude/settings.local.json), so a Bash call can go through sqz twice".to_string(),
+            fix: Some(format!("{FIX_CMD}   (removes them from the project file and keeps its permissions; the user-level ones cover every project)")),
         });
     }
     if managed.shell_block_stale {
@@ -628,6 +636,20 @@ fn apply_fixes(store: &sqz_engine::SessionStore, managed: &Managed, project_dir:
         }
     }
 
+    if managed.claude_duplicate {
+        match sqz_engine::remove_claude_project_hooks_only(project_dir) {
+            Ok(Some((path, true))) if path.exists() => println!(
+                "  ok  --fix: removed the sqz hooks from {} (the user-level ones cover every project)",
+                path.display()
+            ),
+            Ok(Some((path, true))) => println!(
+                "  ok  --fix: removed {} (it held only sqz hooks the user-level ones cover)",
+                path.display()
+            ),
+            Ok(_) => {}
+            Err(e) => println!("  ERR --fix: could not remove the project's sqz hooks: {e}"),
+        }
+    }
     for path in claude_settings_paths(project_dir) {
         if !sqz_engine::claude_settings_stale(&path) {
             continue;
@@ -661,6 +683,10 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
         claude_stale: claude_settings_paths(project_dir)
             .iter()
             .any(|p| sqz_engine::claude_settings_stale(p)),
+        claude_duplicate: sqz_engine::claude_user_hooks_installed()
+            && sqz_engine::claude_settings_have_sqz_hooks(
+                &project_dir.join(".claude").join("settings.local.json"),
+            ),
     }
 }
 
@@ -840,6 +866,7 @@ mod tests {
             cline_rules: SteeringState::Missing,
             shell_block_stale: false,
             claude_stale: false,
+            claude_duplicate: false,
         }
     }
 
@@ -1005,6 +1032,16 @@ mod tests {
             ]
         );
         assert!(guidance_readers(&tools[2..], dir.path()).is_empty());
+    }
+
+    #[test]
+    fn claude_hooks_at_both_scopes_are_flagged() {
+        let tools = vec![tool("Claude Code", "claude", Detection::Detected, ConfigScope::Both)];
+        let managed = Managed { claude_duplicate: true, ..clean() };
+        let problems = diagnose(&tools, &active(), &managed);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("installed twice"));
+        assert!(problems[0].fix.as_deref().unwrap().starts_with(FIX_CMD));
     }
 
     #[test]

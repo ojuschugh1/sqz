@@ -1061,6 +1061,48 @@ fn test_doctor_fix_keeps_a_bare_sqz_that_is_on_path() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn test_init_leaves_claude_hooks_to_the_user_level_ones() {
+    let home = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let o = run_sandboxed(home.path(), first.path(), &["init", "--yes", "--global", "--only", "claude"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+
+    let project = tempfile::tempdir().unwrap();
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "claude"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("so sqz will not add them"), "{}", stdout(&o));
+    assert!(!stdout(&o).contains("installed at project scope"), "{}", stdout(&o));
+    assert!(!project.path().join(".claude").join("settings.local.json").exists());
+    assert!(std::fs::read_to_string(project.path().join("CLAUDE.md")).unwrap().contains("sqz-claude-guidance"));
+}
+
+#[test]
+#[cfg(not(windows))]
+fn test_doctor_fix_removes_project_claude_hooks_the_user_level_ones_cover() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--global", "--only", "claude"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let local = project.path().join(".claude").join("settings.local.json");
+    std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+    let mine = serde_json::json!({
+        "permissions": {"allow": ["Bash(make)"]},
+        "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "sqz hook claude"}]}]}
+    });
+    std::fs::write(&local, serde_json::to_string_pretty(&mine).unwrap()).unwrap();
+
+    let o = run_doctor(home.path(), project.path(), &[]);
+    assert!(stdout(&o).contains("hooks are installed twice"), "{}", stdout(&o));
+    let o = run_doctor(home.path(), project.path(), &["--fix"]);
+    assert!(!stdout(&o).contains("hooks are installed twice"), "{}", stdout(&o));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&local).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"permissions": {"allow": ["Bash(make)"]}}));
+    let user = std::fs::read_to_string(home.path().join(".claude").join("settings.json")).unwrap();
+    assert!(user.contains(" hook claude-post"), "{user}");
+}
+
+#[test]
 #[cfg(unix)]
 fn test_init_and_uninstall_keep_json_newlines_and_modes() {
     use std::os::unix::fs::PermissionsExt;

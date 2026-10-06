@@ -155,7 +155,8 @@ pub use mdl_selector::{select_stages, profile_content, ContentProfile, MdlSelect
 pub use tool_hooks::{process_hook, process_hook_cursor, process_hook_gemini, process_hook_kiro, process_hook_windsurf, process_hook_copilot, generate_hook_configs, has_sqz_rules, refresh_sqz_rules, remove_sqz_rules, sqz_rules_change, sqz_rules_content, sqz_rules_path, sqz_rules_state, install_tool_hooks, install_tool_hooks_scoped, install_tool_hooks_scoped_filtered, claude_user_settings_path, claude_project_settings_needs_update, remove_claude_global_hook, remove_claude_project_hook, claude_settings_stale, refresh_claude_settings, claude_post_tool_use_target, claude_hooks_compress, PostToolUseTarget, CLAUDE_ALLOW_RULES, copilot_hooks_path, install_copilot_hook, remove_copilot_hook, ci_hooks_path, ci_hook_content, install_ci_hook, remove_ci_hook, canonicalize_tool_name, parse_tool_list, integration_tier, InstallScope, IntegrationTier, ToolFilter, ToolHookConfig, HookScope, HookPlatform, SUPPORTED_TOOL_NAMES};
 pub use tool_hooks::{
     gemini_settings_has_sqz, gemini_settings_needs_update, merge_sqz_gemini_hook,
-    remove_sqz_from_gemini_settings, resolve_sqz_binary,
+    remove_sqz_from_gemini_settings, resolve_sqz_binary, claude_settings_have_sqz_hooks,
+    claude_user_hooks_installed, remove_claude_project_hooks_only,
 };
 pub use opencode_plugin::{
     generate_opencode_plugin, install_opencode_plugin, update_opencode_config,

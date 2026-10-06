@@ -652,6 +652,8 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
 
     // AI tool hooks
     let tool_configs = sqz_engine::generate_hook_configs(&sqz_path);
+    let claude_user_hooks =
+        scope != sqz_engine::InstallScope::Global && sqz_engine::claude_user_hooks_installed();
     // Cache whether the existing OpenCode .jsonc would lose comments
     // during the merge — surface it in the plan below and again after
     // install as a nudge.
@@ -957,6 +959,24 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             ));
         }
 
+        if config.tool_name == "Claude Code" && claude_user_hooks {
+            if let Some(user) = sqz_engine::claude_user_settings_path() {
+                println!(
+                    "[sqz] note: the Claude Code hooks in {} already run in every project, so sqz will not add them to .claude/settings.local.json.",
+                    user.display()
+                );
+            }
+            let claude_md = sqz_engine::claude_md_path(&project_dir);
+            if !sqz_engine::claude_md_has_guidance(&project_dir) {
+                plan.push((
+                    claude_md.display().to_string(),
+                    "Claude Code guidance".to_string(),
+                    !claude_md.exists(),
+                ));
+            }
+            continue;
+        }
+
         // Claude Code at global scope: we merge into ~/.claude/settings.json
         // instead of creating a project-level .claude/settings.local.json.
         // Show the real target in the plan so the user can see we're
@@ -1153,7 +1173,7 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
 
     println!();
     println!("[sqz] init complete. Restart your shell or source the RC file.");
-    if !global && installed_tools.iter().any(|t| t == "Claude Code") {
+    if !global && !claude_user_hooks && installed_tools.iter().any(|t| t == "Claude Code") {
         // Tell the user the hook they just installed only fires inside
         // *this* project. This is the bit 76vangel missed: they expected
         // sqz to work across "multiple projects" after one install.
