@@ -221,7 +221,7 @@ static RESIZE_REQUESTED: AtomicBool = AtomicBool::new(false);
 #[cfg(unix)]
 fn register_sigwinch_handler() {
     unsafe {
-        libc::signal(libc::SIGWINCH, sigwinch_handler as libc::sighandler_t);
+        libc::signal(libc::SIGWINCH, sigwinch_handler as *const () as libc::sighandler_t);
     }
 }
 
