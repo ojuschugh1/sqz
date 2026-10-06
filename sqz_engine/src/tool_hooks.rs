@@ -969,11 +969,14 @@ pub fn copilot_hook_content(sqz_path: &str) -> String {
 /// is not installed (no `~/.copilot` directory), `Ok(Some(changed))`
 /// otherwise. Refreshes the file in place when the content is stale.
 pub fn install_copilot_hook(sqz_path: &str) -> Result<Option<bool>> {
-    let home = copilot_home();
+    install_copilot_hook_at(&copilot_home(), sqz_path)
+}
+
+fn install_copilot_hook_at(home: &Path, sqz_path: &str) -> Result<Option<bool>> {
     if !home.exists() {
         return Ok(None);
     }
-    let path = copilot_hooks_path();
+    let path = home.join("hooks").join("sqz.json");
     let content = copilot_hook_content(sqz_path);
     if path.exists() {
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -1138,8 +1141,22 @@ pub fn install_tool_hooks_scoped_filtered(
     scope: InstallScope,
     filter: &ToolFilter,
 ) -> Vec<String> {
+    install_tool_hooks_at(project_dir, sqz_path, scope, filter, None)
+}
+
+/// Internal: home-dir-injectable counterpart used by tests. See
+/// `install_claude_global_at` for rationale.
+fn install_tool_hooks_at(
+    project_dir: &Path,
+    sqz_path: &str,
+    scope: InstallScope,
+    filter: &ToolFilter,
+    home_override: Option<&Path>,
+) -> Vec<String> {
     let configs = generate_hook_configs(sqz_path);
     let mut installed = Vec::new();
+    let kiro_root =
+        home_override.map_or_else(crate::kiro_integration::kiro_user_root, |h| h.join(".kiro"));
 
     for config in &configs {
         // Apply the user's agent filter before we touch anything.
@@ -1181,8 +1198,10 @@ pub fn install_tool_hooks_scoped_filtered(
                 project_dir, sqz_path,
             )
             .unwrap_or(false);
-            let mcp_changed = crate::codex_integration::install_codex_mcp_config()
-                .unwrap_or(false);
+            let mcp_changed = crate::codex_integration::install_codex_mcp_config_at(
+                home_override.map(|h| h.join(".codex")).as_deref(),
+            )
+            .unwrap_or(false);
             if (agents_changed || mcp_changed)
                 && !installed.iter().any(|n| n == "Codex")
             {
@@ -1232,7 +1251,8 @@ pub fn install_tool_hooks_scoped_filtered(
 
         // Copilot CLI: user-level hook file, only when Copilot is installed.
         if config.tool_name == "Copilot CLI" {
-            if let Ok(Some(changed)) = install_copilot_hook(sqz_path) {
+            let copilot_root = home_override.map_or_else(copilot_home, |h| h.join(".copilot"));
+            if let Ok(Some(changed)) = install_copilot_hook_at(&copilot_root, sqz_path) {
                 if changed && !installed.iter().any(|n| n == "Copilot CLI") {
                     installed.push("Copilot CLI".to_string());
                 }
@@ -1246,19 +1266,29 @@ pub fn install_tool_hooks_scoped_filtered(
         // workspace; at project scope they stay in the workspace.
         if config.tool_name == "Kiro" {
             let _ = crate::kiro_integration::remove_kiro_legacy_hook(project_dir);
+            let user_steering = kiro_root.join("steering").join("sqz.md");
             let (steering_changed, mcp_changed) = if scope == InstallScope::Global {
-                let steering =
-                    crate::kiro_integration::install_kiro_user_steering(sqz_path)
-                        .unwrap_or(false);
+                let steering = crate::kiro_integration::install_kiro_steering_at(
+                    &user_steering,
+                    &crate::kiro_integration::kiro_user_steering_content(sqz_path),
+                )
+                .unwrap_or(false);
                 let mcp = matches!(
-                    crate::kiro_integration::install_kiro_user_mcp_config(),
+                    crate::kiro_integration::install_kiro_mcp_config_at(
+                        &kiro_root.join("settings").join("mcp.json")
+                    ),
                     Ok(crate::kiro_integration::KiroMcpInstall::Created)
                         | Ok(crate::kiro_integration::KiroMcpInstall::Merged)
                 );
                 (steering, mcp)
             } else {
                 // The user-level copy already reaches this workspace.
-                let steering = !crate::kiro_integration::user_steering_installed()
+                let user_installed = matches!(
+                    crate::kiro_integration::kiro_steering_state(&user_steering, true),
+                    crate::kiro_integration::SteeringState::Current
+                        | crate::kiro_integration::SteeringState::Stale
+                );
+                let steering = !user_installed
                     && crate::kiro_integration::install_kiro_steering(project_dir, sqz_path)
                         .unwrap_or(false);
                 let mcp = matches!(
@@ -1282,8 +1312,12 @@ pub fn install_tool_hooks_scoped_filtered(
             let guidance_changed =
                 crate::zed_integration::install_zed_guidance(project_dir, sqz_path)
                     .unwrap_or(false);
+            let zed_settings = home_override.map_or_else(
+                crate::zed_integration::zed_settings_path,
+                |h| h.join(".config").join("zed").join("settings.json"),
+            );
             let mcp_changed = matches!(
-                crate::zed_integration::install_zed_mcp_config(),
+                crate::zed_integration::install_zed_mcp_config_at(&zed_settings),
                 Ok(crate::zed_integration::ZedMcpInstall::Created)
                     | Ok(crate::zed_integration::ZedMcpInstall::Merged)
             );
@@ -1303,7 +1337,7 @@ pub fn install_tool_hooks_scoped_filtered(
         // belong to Claude Code conceptually — if you're installing the
         // hook, you want the guidance and MCP wiring too.
         if config.tool_name == "Claude Code" && scope == InstallScope::Global {
-            let hook_installed = match install_claude_global(sqz_path) {
+            let hook_installed = match install_claude_global_at(sqz_path, home_override) {
                 Ok(v) => v,
                 Err(_) => false,
             };
@@ -1312,7 +1346,7 @@ pub fn install_tool_hooks_scoped_filtered(
             )
             .unwrap_or(false);
             let mcp_changed =
-                crate::claude_md_integration::install_claude_mcp_config()
+                crate::claude_md_integration::install_claude_mcp_config_at(home_override)
                     .unwrap_or(false);
             if (hook_installed || md_changed || mcp_changed)
                 && !installed.iter().any(|n| n == "Claude Code")
@@ -1343,7 +1377,7 @@ pub fn install_tool_hooks_scoped_filtered(
                     )
                     .unwrap_or(false);
                 let mcp_changed =
-                    crate::claude_md_integration::install_claude_mcp_config()
+                    crate::claude_md_integration::install_claude_mcp_config_at(home_override)
                         .unwrap_or(false);
                 if (hook_changed || md_changed || mcp_changed)
                     && !installed.iter().any(|n| n == "Claude Code")
@@ -1373,7 +1407,7 @@ pub fn install_tool_hooks_scoped_filtered(
                 let _ = crate::claude_md_integration::install_claude_md_guidance(
                     project_dir, sqz_path,
                 );
-                let _ = crate::claude_md_integration::install_claude_mcp_config();
+                let _ = crate::claude_md_integration::install_claude_mcp_config_at(home_override);
             }
         }
     }
@@ -1389,7 +1423,11 @@ pub fn install_tool_hooks_scoped_filtered(
     // Leaving it there would surprise them on their next OpenCode run
     // (sqz would start firing uninvited, reverting the skip).
     if filter.includes("OpenCode") {
-        if let Ok(true) = crate::opencode_plugin::install_opencode_plugin(sqz_path) {
+        let plugin = home_override.map_or_else(
+            crate::opencode_plugin::opencode_plugin_path,
+            |h| h.join(".config").join("opencode").join("plugins").join("sqz.ts"),
+        );
+        if let Ok(true) = crate::opencode_plugin::install_opencode_plugin_at(&plugin, sqz_path) {
             if !installed.iter().any(|n| n == "OpenCode") {
                 installed.push("OpenCode".to_string());
             }
@@ -1429,11 +1467,8 @@ pub fn claude_user_settings_path() -> Option<PathBuf> {
 ///
 /// Returns `Ok(true)` if the file was created or changed, `Ok(false)`
 /// if our hook entries were already present identically.
-fn install_claude_global(sqz_path: &str) -> Result<bool> {
-    install_claude_global_at(sqz_path, None)
-}
-
-/// Internal: home-dir-injectable counterpart used by tests. Avoids
+///
+/// `home_override` replaces the home directory in tests. Avoids
 /// `std::env::set_var("HOME")` which races with parallel tests that
 /// also read HOME (e.g. the api_proxy property tests that open
 /// `~/.sqz/sessions.db`).
@@ -1657,7 +1692,7 @@ fn merge_sqz_hooks_into_settings(path: &Path, sqz_path: &str) -> Result<bool> {
 }
 
 /// Remove sqz's hook entries from `~/.claude/settings.json` without
-/// touching any other keys. Symmetric with [`install_claude_global`].
+/// touching any other keys. Symmetric with [`install_claude_global_at`].
 ///
 /// Returns:
 /// * `Ok(Some((path, true)))` — file existed, sqz entries found and
@@ -3022,10 +3057,41 @@ mod tests {
         assert_eq!(shell_escape("git log --oneline"), "'git log --oneline'");
     }
 
+    fn install_in(project: &Path, home: &Path, sqz: &str) -> Vec<String> {
+        install_tool_hooks_at(project, sqz, InstallScope::Project, &ToolFilter::All, Some(home))
+    }
+
+    #[test]
+    fn user_level_files_go_to_the_given_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".copilot")).unwrap();
+        install_in(dir.path(), home.path(), "/opt/sqz");
+        for rel in [
+            ".claude.json",
+            ".codex/config.toml",
+            ".config/zed/settings.json",
+            ".config/opencode/plugins/sqz.ts",
+            ".copilot/hooks/sqz.json",
+        ] {
+            assert!(home.path().join(rel).exists(), "{rel}");
+        }
+        let copilot = std::fs::read_to_string(home.path().join(".copilot/hooks/sqz.json")).unwrap();
+        assert!(copilot.contains("/opt/sqz hook copilot"));
+
+        let global = tempfile::tempdir().unwrap();
+        let filter = ToolFilter::All;
+        install_tool_hooks_at(dir.path(), "/opt/sqz", InstallScope::Global, &filter, Some(global.path()));
+        for rel in [".claude/settings.json", ".kiro/steering/sqz.md", ".kiro/settings/mcp.json"] {
+            assert!(global.path().join(rel).exists(), "{rel}");
+        }
+    }
+
     #[test]
     fn test_install_tool_hooks_creates_files() {
         let dir = tempfile::tempdir().unwrap();
-        let installed = install_tool_hooks(dir.path(), "sqz");
+        let home = tempfile::tempdir().unwrap();
+        let installed = install_in(dir.path(), home.path(), "sqz");
         // Should install at least some hooks
         assert!(!installed.is_empty(), "should install at least one hook config");
         // Verify files were created. Copilot CLI installs at user scope
@@ -3037,13 +3103,7 @@ mod tests {
             }
             let configs = generate_hook_configs("sqz");
             let config = configs.iter().find(|c| &c.tool_name == name).unwrap();
-            // With user-level Kiro steering on this machine, project scope
-            // writes only the MCP config.
-            let path = if name == "Kiro" && crate::kiro_integration::user_steering_installed() {
-                dir.path().join(".kiro/settings/mcp.json")
-            } else {
-                dir.path().join(&config.config_path)
-            };
+            let path = dir.path().join(&config.config_path);
             assert!(path.exists(), "hook config should exist: {}", path.display());
         }
     }
@@ -3051,15 +3111,16 @@ mod tests {
     #[test]
     fn test_install_tool_hooks_does_not_overwrite() {
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         // First install
-        install_tool_hooks(dir.path(), "sqz");
+        install_in(dir.path(), home.path(), "sqz");
         // Write a custom file to one of the paths. It is deliberately NOT
         // valid JSON: the Claude Code merge path refuses to touch files it
         // can't parse, and every other tool's config is skip-if-exists.
         let custom_path = dir.path().join(".claude/settings.local.json");
         std::fs::write(&custom_path, "custom content").unwrap();
         // Second install must leave the unparseable file alone.
-        install_tool_hooks(dir.path(), "sqz");
+        install_in(dir.path(), home.path(), "sqz");
         let content = std::fs::read_to_string(&custom_path).unwrap();
         assert_eq!(content, "custom content", "should not overwrite existing config");
     }
@@ -3095,7 +3156,8 @@ mod tests {
         });
         std::fs::write(&settings_path, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
 
-        install_tool_hooks(dir.path(), "/new/path/sqz");
+        let home = tempfile::tempdir().unwrap();
+        install_in(dir.path(), home.path(), "/new/path/sqz");
 
         let content = std::fs::read_to_string(&settings_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -3143,7 +3205,8 @@ mod tests {
     #[test]
     fn test_windsurf_installs_to_rules_directory() {
         let dir = tempfile::tempdir().unwrap();
-        install_tool_hooks(dir.path(), "sqz");
+        let home = tempfile::tempdir().unwrap();
+        install_in(dir.path(), home.path(), "sqz");
         assert!(dir.path().join(".windsurf/rules/sqz.md").exists());
         assert!(!dir.path().join(".windsurfrules").exists());
     }
@@ -3157,8 +3220,9 @@ mod tests {
     #[test]
     fn test_windsurf_migrates_legacy_sqz_rules_file() {
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".windsurfrules"), legacy_rules("sqz")).unwrap();
-        install_tool_hooks(dir.path(), "sqz");
+        install_in(dir.path(), home.path(), "sqz");
         assert!(dir.path().join(".windsurf/rules/sqz.md").exists());
         assert!(!dir.path().join(".windsurfrules").exists(), "legacy file migrated");
     }
@@ -3166,9 +3230,10 @@ mod tests {
     #[test]
     fn test_windsurf_migration_keeps_user_rules_after_the_sqz_text() {
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         let legacy = dir.path().join(".windsurfrules");
         std::fs::write(&legacy, format!("{}\n## Team rules\n\nUse tabs.\n", legacy_rules("sqz"))).unwrap();
-        install_tool_hooks(dir.path(), "sqz");
+        install_in(dir.path(), home.path(), "sqz");
         assert!(dir.path().join(".windsurf/rules/sqz.md").exists());
         assert_eq!(std::fs::read_to_string(&legacy).unwrap(), "## Team rules\n\nUse tabs.\n");
     }
@@ -3176,8 +3241,9 @@ mod tests {
     #[test]
     fn test_windsurf_leaves_user_legacy_rules_alone() {
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".windsurfrules"), "my own rules\n").unwrap();
-        install_tool_hooks(dir.path(), "sqz");
+        install_in(dir.path(), home.path(), "sqz");
         assert!(dir.path().join(".windsurf/rules/sqz.md").exists());
         assert_eq!(
             std::fs::read_to_string(dir.path().join(".windsurfrules")).unwrap(),
@@ -3188,9 +3254,10 @@ mod tests {
     #[test]
     fn test_cline_installs_into_rules_directory_when_present() {
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".clinerules")).unwrap();
         std::fs::write(dir.path().join(".clinerules/mine.md"), "user rule\n").unwrap();
-        install_tool_hooks(dir.path(), "sqz");
+        install_in(dir.path(), home.path(), "sqz");
         assert!(dir.path().join(".clinerules/sqz.md").exists());
         assert!(dir.path().join(".clinerules/mine.md").exists());
     }
@@ -3198,8 +3265,9 @@ mod tests {
     #[test]
     fn test_cline_single_file_untouched_when_user_authored() {
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".clinerules"), "user rules\n").unwrap();
-        install_tool_hooks(dir.path(), "sqz");
+        install_in(dir.path(), home.path(), "sqz");
         assert_eq!(
             std::fs::read_to_string(dir.path().join(".clinerules")).unwrap(),
             "user rules\n"
@@ -3210,11 +3278,12 @@ mod tests {
     #[test]
     fn test_reinit_is_idempotent_at_project_scope() {
         let dir = tempfile::tempdir().unwrap();
-        install_tool_hooks(dir.path(), "/usr/bin/sqz");
+        let home = tempfile::tempdir().unwrap();
+        install_in(dir.path(), home.path(), "/usr/bin/sqz");
         let settings_path = dir.path().join(".claude").join("settings.local.json");
         let first = std::fs::read_to_string(&settings_path).unwrap();
 
-        install_tool_hooks(dir.path(), "/usr/bin/sqz");
+        install_in(dir.path(), home.path(), "/usr/bin/sqz");
         let second = std::fs::read_to_string(&settings_path).unwrap();
 
         let a: serde_json::Value = serde_json::from_str(&first).unwrap();
@@ -3869,12 +3938,14 @@ mod issue_11_tool_filter_tests {
         // issue #11: no Cursor rules, no Windsurf rules, no Cline
         // rules, no Gemini settings, no AGENTS.md, no .claude/.
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         let filter = ToolFilter::Only(vec!["opencode".to_string()]);
-        let _installed = install_tool_hooks_scoped_filtered(
+        let _installed = install_tool_hooks_at(
             dir.path(),
             "sqz",
             InstallScope::Project,
             &filter,
+            Some(home.path()),
         );
 
         // OpenCode SHOULD be there.
@@ -3903,12 +3974,14 @@ mod issue_11_tool_filter_tests {
     fn filtered_install_skip_cursor_omits_only_cursor() {
         // Symmetric: --skip cursor should leave everything else intact.
         let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
         let filter = ToolFilter::Skip(vec!["cursor".to_string()]);
-        let _installed = install_tool_hooks_scoped_filtered(
+        let _installed = install_tool_hooks_at(
             dir.path(),
             "sqz",
             InstallScope::Project,
             &filter,
+            Some(home.path()),
         );
 
         // Cursor rules must NOT exist.

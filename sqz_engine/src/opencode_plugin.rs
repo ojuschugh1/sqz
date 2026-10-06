@@ -232,7 +232,10 @@ pub fn opencode_plugin_path() -> PathBuf {
 /// Returns `true` if the file was created or updated, `false` if the
 /// content was already identical (no disk write needed).
 pub fn install_opencode_plugin(sqz_path: &str) -> Result<bool> {
-    let plugin_path = opencode_plugin_path();
+    install_opencode_plugin_at(&opencode_plugin_path(), sqz_path)
+}
+
+pub(crate) fn install_opencode_plugin_at(plugin_path: &Path, sqz_path: &str) -> Result<bool> {
     let new_content = generate_opencode_plugin(sqz_path);
 
     // Skip the write if the file already has identical content.
@@ -1153,14 +1156,11 @@ mod tests {
     #[test]
     fn test_install_opencode_plugin_creates_file() {
         let dir = tempfile::tempdir().unwrap();
-        // Override HOME to use temp dir
-        std::env::set_var("HOME", dir.path());
-        let result = install_opencode_plugin("sqz");
-        assert!(result.is_ok());
-        // Plugin should be created at ~/.config/opencode/plugins/sqz.ts
         let plugin_path = dir
             .path()
             .join(".config/opencode/plugins/sqz.ts");
+        let result = install_opencode_plugin_at(&plugin_path, "sqz");
+        assert!(result.is_ok());
         assert!(plugin_path.exists(), "plugin file should exist");
         let content = std::fs::read_to_string(&plugin_path).unwrap();
         assert!(content.contains("SqzPlugin"));

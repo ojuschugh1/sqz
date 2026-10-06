@@ -35,9 +35,21 @@ fn workspace_root() -> PathBuf {
     }
 }
 
+fn sandboxed<'a>(cmd: &'a mut Command, home: &std::path::Path) -> &'a mut Command {
+    cmd.env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("APPDATA", home.join("AppData"))
+        .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+        .env("KIRO_HOME", home.join(".kiro"))
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("COPILOT_HOME", home.join(".copilot"))
+        .env("SQZ_DB_PATH", home.join("sessions.db"))
+}
+
 fn run(args: &[&str]) -> Output {
-    Command::new(sqz_bin())
-        .args(args)
+    let home = tempfile::tempdir().unwrap();
+    sandboxed(Command::new(sqz_bin()).args(args), home.path())
         .current_dir(workspace_root())
         .output()
         .expect("failed to run sqz binary")
@@ -45,8 +57,8 @@ fn run(args: &[&str]) -> Output {
 
 fn run_with_stdin(args: &[&str], stdin: &str) -> Output {
     use std::io::Write;
-    let mut child = Command::new(sqz_bin())
-        .args(args)
+    let home = tempfile::tempdir().unwrap();
+    let mut child = sandboxed(Command::new(sqz_bin()).args(args), home.path())
         .current_dir(workspace_root())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -818,18 +830,9 @@ fn test_toon_output_keeps_text_and_escapes_controls() {
 /// project directory pointed at throwaway dirs, so the test can't touch the
 /// developer's real shell rc, agent configs or this repo.
 fn run_init_sandboxed(home: &std::path::Path, project: &std::path::Path) -> Output {
-    Command::new(sqz_bin())
-        .args(["init", "--yes"])
+    sandboxed(Command::new(sqz_bin()).args(["init", "--yes"]), home)
         .current_dir(project)
-        .env("HOME", home)
-        .env("USERPROFILE", home)
         .env("SHELL", "/bin/zsh")
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("APPDATA", home.join("AppData"))
-        .env("KIRO_HOME", home.join(".kiro"))
-        .env("CODEX_HOME", home.join(".codex"))
-        .env("COPILOT_HOME", home.join(".copilot"))
-        .env("SQZ_DB_PATH", home.join("sessions.db"))
         .stdin(std::process::Stdio::null())
         .output()
         .expect("failed to run sqz init")

@@ -14,10 +14,11 @@ mod smoke_tests {
     /// No network requests are made (offline operation, Requirement 23.1).
     #[test]
     fn test_engine_initialises_without_network() {
-        let engine = SqzEngine::new();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("sessions.db"));
         assert!(
             engine.is_ok(),
-            "SqzEngine::new() must succeed: {:?}",
+            "the engine must initialise: {:?}",
             engine.err()
         );
     }

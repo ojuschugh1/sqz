@@ -674,13 +674,15 @@ mod tests {
 
     #[test]
     fn test_engine_new() {
-        let engine = SqzEngine::new();
-        assert!(engine.is_ok(), "SqzEngine::new() should succeed");
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db"));
+        assert!(engine.is_ok(), "engine with the default preset should start");
     }
 
     #[test]
     fn test_compress_or_passthrough_returns_result_on_valid_input() {
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let result = engine.compress_or_passthrough("hello world");
         assert_eq!(result.data, "hello world");
         assert!(result.tokens_original > 0);
@@ -688,7 +690,8 @@ mod tests {
 
     #[test]
     fn test_compress_or_passthrough_never_panics_on_empty() {
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let result = engine.compress_or_passthrough("");
         assert_eq!(result.data, "");
         assert_eq!(result.compression_ratio, 1.0);
@@ -696,7 +699,8 @@ mod tests {
 
     #[test]
     fn test_compress_or_passthrough_handles_json() {
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let result = engine.compress_or_passthrough(r#"{"key":"value"}"#);
         // Should compress successfully — data may be TOON-encoded
         assert!(!result.data.is_empty());
@@ -704,7 +708,8 @@ mod tests {
 
     #[test]
     fn test_compress_or_passthrough_handles_binary_garbage() {
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         // Feed it something weird — should never panic, always return something
         let garbage = "\x00\x01\x02\x7f invalid control chars \t\n\r";
         let result = engine.compress_or_passthrough(garbage);
@@ -713,7 +718,8 @@ mod tests {
 
     #[test]
     fn test_compress_plain_text() {
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let result = engine.compress("hello world");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().data, "hello world");
@@ -721,7 +727,8 @@ mod tests {
 
     #[test]
     fn test_compress_json_applies_toon() {
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let result = engine.compress(r#"{"name":"Alice","age":30}"#).unwrap();
         assert!(result.data.starts_with("TOON:"), "JSON should be TOON-encoded");
     }
@@ -811,7 +818,8 @@ mod tests {
     #[test]
     fn json_values_survive_every_mode() {
         use crate::confidence_router::CompressionMode;
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let pretty = "[\n  0,\n  0,\n  0,\n  0,\n  0,\n  0,\n  1\n]\n";
         let expected = serde_json::json!([0, 0, 0, 0, 0, 0, 1]);
         let mut outputs = vec![engine.compress(pretty).unwrap().data];
@@ -878,7 +886,8 @@ mod tests {
 
     #[test]
     fn test_usage_report_starts_at_zero() {
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let report = engine.usage_report("default");
         assert_eq!(report.consumed, 0);
         assert_eq!(report.available, report.allocated);
@@ -900,7 +909,8 @@ mod tests {
 
     #[test]
     fn test_reload_preset_updates_state() {
-        let mut engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let toml = r#"
 [preset]
 name = "reloaded"
@@ -935,21 +945,24 @@ complexity_threshold = 0.4
 
     #[test]
     fn test_reload_invalid_preset_returns_error() {
-        let mut engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let result = engine.reload_preset("not valid toml [[[");
         assert!(result.is_err(), "invalid TOML should return error");
     }
 
     #[test]
     fn test_export_nonexistent_session_returns_error() {
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let result = engine.export_ctx("does-not-exist");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_import_invalid_ctx_returns_error() {
-        let engine = SqzEngine::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
         let result = engine.import_ctx("not valid json {{{");
         assert!(result.is_err());
     }

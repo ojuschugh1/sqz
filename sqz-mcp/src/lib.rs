@@ -1944,7 +1944,9 @@ mod tests {
     #[test]
     fn test_preset_hot_reload_latency() {
         let dir = TempDir::new().expect("tempdir");
-        let server = McpServer::new(dir.path()).expect("McpServer::new");
+        let store = TempDir::new().expect("tempdir");
+        let server = McpServer::new_with_store(dir.path(), &store.path().join("sessions.db"))
+            .expect("McpServer::new_with_store");
 
         // Start watching.
         let _watcher = server.watch_presets().expect("watch_presets");
@@ -2003,7 +2005,9 @@ complexity_threshold = 0.4
     #[test]
     fn test_invalid_toml_keeps_previous_preset() {
         let dir = TempDir::new().expect("tempdir");
-        let server = McpServer::new(dir.path()).expect("McpServer::new");
+        let store = TempDir::new().expect("tempdir");
+        let server = McpServer::new_with_store(dir.path(), &store.path().join("sessions.db"))
+            .expect("McpServer::new_with_store");
         let _watcher = server.watch_presets().expect("watch_presets");
 
         // Write invalid TOML.

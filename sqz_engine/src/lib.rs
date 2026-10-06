@@ -8,6 +8,8 @@
 //!
 //! ```rust
 //! use sqz_engine::SqzEngine;
+//! # let dir = tempfile::tempdir().unwrap();
+//! # std::env::set_var("SQZ_DB_PATH", dir.path().join("sessions.db"));
 //!
 //! let engine = SqzEngine::new().expect("failed to init engine");
 //!
