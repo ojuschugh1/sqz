@@ -1208,8 +1208,14 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
             std::process::exit(c);
         }
     };
-    let pass_through = || {
-        eprintln!("[sqz] fallback: compression panicked, output passed through unchanged");
+    let pass_through = |at: Option<String>| {
+        let backtrace = std::env::var_os("RUST_BACKTRACE").is_some_and(|v| v != "0");
+        match at {
+            Some(at) if backtrace => {
+                eprintln!("[sqz] fallback: compression panicked at {at}, output passed through unchanged")
+            }
+            _ => eprintln!("[sqz] fallback: compression panicked, output passed through unchanged"),
+        }
         print!("{input}");
         finish(marker_exit);
     };
@@ -1246,12 +1252,14 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
                 return;
             }
         };
-        let Some(compressed) =
-            cli_proxy::catch_panic(|| proxy.intercept_output_with_options(&label, &input, opts))
-        else {
-            pass_through();
-            return;
-        };
+        let compressed =
+            match cli_proxy::catch_panic(|| proxy.intercept_output_with_options(&label, &input, opts)) {
+                Ok(compressed) => compressed,
+                Err(at) => {
+                    pass_through(at);
+                    return;
+                }
+            };
         print!("{}", compressed);
         if input.ends_with('\n') && !compressed.ends_with('\n') {
             println!();
@@ -1264,7 +1272,7 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
     let engine = require_engine();
 
     // Apply mode override if specified
-    let Some(result) = cli_proxy::catch_panic(|| match mode {
+    let result = match cli_proxy::catch_panic(|| match mode {
         "safe" => {
             if engine.route_compression_mode(&input) == sqz_engine::CompressionMode::Safe {
                 eprintln!("[sqz] mode: safe (preserving all content)");
@@ -1281,10 +1289,14 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
             engine.compress_with_mode(&input, sqz_engine::CompressionMode::Default)
         }
         _ => engine.compress(&input), // auto: confidence router decides
-    }) else {
-        pass_through();
-        return;
-    };    match result {
+    }) {
+        Ok(result) => result,
+        Err(at) => {
+            pass_through(at);
+            return;
+        }
+    };
+    match result {
         Ok(c) => {
             print!("{}", c.data);
             let reduction = (1.0 - c.compression_ratio) * 100.0;

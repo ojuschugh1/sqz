@@ -19,7 +19,7 @@ pub fn claude_post_tool_use(input: &str) -> Option<String> {
             continue;
         }
         let compressed =
-            catch_panic(|| proxy.intercept_output_with_options(&target.label, text, opts))?;
+            catch_panic(|| proxy.intercept_output_with_options(&target.label, text, opts)).ok()?;
         if text.len().saturating_sub(compressed.len()) / 4 >= MIN_SAVING_TOKENS {
             response.insert(field.to_string(), serde_json::Value::String(compressed));
             changed = true;

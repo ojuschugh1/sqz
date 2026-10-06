@@ -150,10 +150,13 @@ fn quiet() -> bool {
     sqz_engine::SqzEngine::quiet_stderr()
 }
 
-/// Run `f`, or return `None` if it panics, without printing the panic message.
-pub fn catch_panic<T>(f: impl FnOnce() -> T) -> Option<T> {
+/// Run `f`, or return where it panicked, without printing the panic message.
+pub fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, Option<String>> {
+    thread_local!(static PANICKED_AT: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) });
     let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    std::panic::set_hook(Box::new(|info| {
+        let _ = PANICKED_AT.try_with(|at| at.set(info.location().map(|l| l.to_string())));
+    }));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         #[cfg(debug_assertions)]
         if std::env::var_os("SQZ_TEST_PANIC").is_some_and(|v| v != "late") {
@@ -162,7 +165,7 @@ pub fn catch_panic<T>(f: impl FnOnce() -> T) -> Option<T> {
         f()
     }));
     std::panic::set_hook(hook);
-    result.ok()
+    result.map_err(|_| PANICKED_AT.take())
 }
 
 const NET_WIN_MIN_TOKENS: u32 = 16;
