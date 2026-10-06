@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::io::{BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use sqz_engine::{Result, SqzEngine, SqzError};
 
@@ -33,6 +34,7 @@ const HELP_TOOL_NAME: &str = "sqz_tool_help";
 const MAX_DESCRIPTION_CHARS: usize = 400;
 /// `--lazy-tools` cap: roughly one sentence per tool.
 const LAZY_DESCRIPTION_CHARS: usize = 160;
+const UPSTREAM_EXIT_GRACE: Duration = Duration::from_millis(2500);
 
 const INSTRUCTIONS_NOTE: &str = "\n\nTool results pass through the sqz \
 compression proxy; sqz_expand returns the original behind any §ref:HASH§ \
@@ -398,7 +400,10 @@ pub fn run_proxy(
     }
 
     drop(child_stdin);
-    let _ = upstream_thread.join();
+    let deadline = Instant::now() + UPSTREAM_EXIT_GRACE;
+    while !upstream_thread.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let _ = child.kill();
     let _ = child.wait();
     Ok(())

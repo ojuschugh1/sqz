@@ -126,6 +126,28 @@ fn proxy_passes_on_an_upstream_line_that_is_not_utf8() {
     assert!(wait_for(&mut child, 10).is_some_and(|s| s.success()));
 }
 
+#[cfg(unix)]
+#[test]
+fn proxy_stops_an_upstream_that_ignores_end_of_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("upstream.pid");
+    let upstream = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+    let mut child = spawn(dir.path(), &["proxy", "--", "sh", "-c", &upstream]);
+    let started = Instant::now();
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&pid_file).ok().filter(|s| s.ends_with('\n')) {
+            break pid.trim().to_string();
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "upstream never started");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    drop(child.stdin.take());
+    let status = wait_for(&mut child, 15);
+    assert!(status.is_some_and(|s| s.success()), "proxy still running after its input closed");
+    let running = Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
+    assert!(!running, "upstream {pid} outlived the proxy");
+}
+
 #[test]
 fn unknown_flags_still_start_the_server() {
     let dir = tempfile::tempdir().unwrap();
