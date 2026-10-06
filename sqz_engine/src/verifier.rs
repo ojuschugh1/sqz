@@ -305,7 +305,7 @@ const MAX_TOKENS: usize = 500;
 /// Scan input for preservation tokens: filesystem paths, URLs, backtick-quoted
 /// code identifiers, environment variable names, and version numbers.
 fn extract_preservation_tokens(input: &str) -> Vec<String> {
-    let scan = &input[..input.len().min(MAX_SCAN_BYTES)];
+    let scan = crate::text_boundary::truncate_str(input, MAX_SCAN_BYTES);
     let bytes = scan.as_bytes();
     let mut tokens: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
@@ -758,6 +758,13 @@ mod tests {
         let tokens = extract_preservation_tokens("We completed 3/4 of the tasks");
         assert!(tokens.iter().all(|t| !t.contains("3/4")),
             "fraction should not be extracted as path: {:?}", tokens);
+    }
+
+    #[test]
+    fn extract_scan_cap_lands_on_a_char_boundary() {
+        let input = format!("{}{}", "x".repeat(MAX_SCAN_BYTES - 1), "日".repeat(50));
+        assert!(Verifier::verify(&input, &input).passed);
+        assert!(extract_preservation_tokens(&input).is_empty());
     }
 
     #[test]
