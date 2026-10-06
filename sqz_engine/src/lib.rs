@@ -173,8 +173,8 @@ pub use codex_integration::{
     remove_codex_mcp_config, sqz_guidance, GuidanceBlock, GuidanceChange,
 };
 pub use claude_md_integration::{
-    claude_md_guidance_block, claude_md_path, claude_user_json_path,
-    install_claude_md_guidance, install_claude_mcp_config,
+    claude_mcp_config_managed, claude_md_guidance_block, claude_md_has_guidance, claude_md_path,
+    claude_user_json_path, install_claude_md_guidance, install_claude_mcp_config,
     remove_claude_md_guidance, remove_claude_mcp_config,
 };
 pub use zed_integration::{

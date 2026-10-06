@@ -2062,6 +2062,11 @@ fn cmd_uninstall(skip_confirm: bool) {
     for path in &guidance_files {
         files_to_remove.push((format!("{} (sqz guidance blocks only)", path.display()), true));
     }
+    let claude_md = sqz_engine::claude_md_path(&project_dir);
+    let claude_md_has_block = sqz_engine::claude_md_has_guidance(&project_dir);
+    if claude_md_has_block {
+        files_to_remove.push((format!("{} (sqz guidance block only)", claude_md.display()), true));
+    }
 
     // Codex user-level ~/.codex/config.toml: remove [mcp_servers.sqz]
     // while preserving any other MCP servers the user registered.
@@ -2127,6 +2132,10 @@ fn cmd_uninstall(skip_confirm: bool) {
             format!("{} (sqz hook entries only)", path.display()),
             true,
         ));
+    }
+    let claude_json_has_sqz = sqz_engine::claude_mcp_config_managed();
+    if let (Some(path), true) = (sqz_engine::claude_user_json_path(), claude_json_has_sqz) {
+        files_to_remove.push((format!("{} (mcpServers.sqz only)", path.display()), true));
     }
 
     // OpenCode user-level TypeScript plugin. Unlike the other tool
@@ -2330,6 +2339,16 @@ fn cmd_uninstall(skip_confirm: bool) {
             Err(e) => eprintln!("[sqz] ✗ could not clean up sqz guidance: {e}"),
         }
     }
+    if claude_md_has_block {
+        match sqz_engine::remove_claude_md_guidance(&project_dir) {
+            Ok(Some((path, true))) if path.exists() => {
+                println!("[sqz] ✓ removed sqz guidance from {}", path.display())
+            }
+            Ok(Some((path, true))) => println!("[sqz] ✓ removed {}", path.display()),
+            Ok(_) => {}
+            Err(e) => eprintln!("[sqz] ✗ could not clean up {}: {e}", claude_md.display()),
+        }
+    }
 
     // Surgically remove [mcp_servers.sqz] from ~/.codex/config.toml.
     // Other MCP servers and comments are preserved by toml_edit.
@@ -2465,6 +2484,15 @@ fn cmd_uninstall(skip_confirm: bool) {
                     eprintln!("[sqz] ✗ could not resolve ~/.claude/settings.json: {e}");
                 }
             }
+        }
+    }
+    if claude_json_has_sqz {
+        match sqz_engine::remove_claude_mcp_config() {
+            Ok(Some((path, true))) => {
+                println!("[sqz] ✓ removed mcpServers.sqz from {}", path.display())
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("[sqz] ✗ could not clean up ~/.claude.json: {e}"),
         }
     }
 

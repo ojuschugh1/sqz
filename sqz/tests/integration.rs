@@ -972,6 +972,36 @@ fn test_init_merges_the_gemini_hook_into_existing_settings() {
 }
 
 #[test]
+fn test_uninstall_removes_the_claude_md_block_and_mcp_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let claude_md = project.path().join("CLAUDE.md");
+    std::fs::write(&claude_md, "# Mine\n\nKeep me.\n").unwrap();
+    let claude_json = home.path().join(".claude.json");
+    std::fs::write(&claude_json, "{\n  \"theme\": \"dark\"\n}\n").unwrap();
+
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "claude"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(std::fs::read_to_string(&claude_md).unwrap().contains("sqz-claude-guidance"));
+    assert!(std::fs::read_to_string(&claude_json).unwrap().contains("\"sqz\""));
+
+    let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let plan = stdout(&o);
+    assert!(plan.contains("CLAUDE.md (sqz guidance block only)"), "{plan}");
+    assert!(plan.contains(".claude.json (mcpServers.sqz only)"), "{plan}");
+    assert_eq!(std::fs::read_to_string(&claude_md).unwrap(), "# Mine\n\nKeep me.\n");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"theme": "dark"}));
+
+    std::fs::remove_file(&claude_md).unwrap();
+    run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "claude"]);
+    assert!(claude_md.exists());
+    run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(!claude_md.exists(), "a CLAUDE.md sqz created goes");
+}
+
+#[test]
 fn test_init_exits_zero() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();

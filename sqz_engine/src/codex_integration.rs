@@ -177,8 +177,12 @@ fn has_sqz_marker(content: &str) -> bool {
 }
 
 fn excise(content: &str, block: Block) -> String {
-    let head = &content[..block.start];
-    let after = &content[block.end..];
+    excise_range(content, block.start, block.end)
+}
+
+pub(crate) fn excise_range(content: &str, start: usize, end: usize) -> String {
+    let head = &content[..start];
+    let after = &content[end..];
     let tail = after.strip_prefix('\n').unwrap_or(after);
     let kept_head = head.trim_end_matches('\n');
     let kept_tail = tail.trim_start_matches('\n');

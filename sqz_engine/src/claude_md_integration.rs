@@ -180,6 +180,13 @@ fn claude_md_has_sqz_block(content: &str) -> bool {
     content.contains(CLAUDE_MD_BEGIN)
 }
 
+/// Whether the project's `CLAUDE.md` holds a sqz block uninstall can remove.
+pub fn claude_md_has_guidance(project_dir: &Path) -> bool {
+    std::fs::read_to_string(claude_md_path(project_dir)).is_ok_and(|s| {
+        s.find(CLAUDE_MD_BEGIN).is_some_and(|i| s[i..].contains(CLAUDE_MD_END))
+    })
+}
+
 /// Install sqz's guidance block into `CLAUDE.md` at `project_dir`.
 ///
 /// If `CLAUDE.md` doesn't exist yet, create it with a minimal preamble
@@ -259,8 +266,8 @@ pub fn remove_claude_md_guidance(
         Some(i) => i,
         None => return Ok(Some((path, false))),
     };
-    let after_end_idx = match content.find(CLAUDE_MD_END) {
-        Some(i) => i + CLAUDE_MD_END.len(),
+    let after_end_idx = match content[begin_idx..].find(CLAUDE_MD_END) {
+        Some(i) => begin_idx + i + CLAUDE_MD_END.len(),
         None => {
             // BEGIN without END — file was edited by hand. Leave it
             // alone rather than risk mutilating user content.
@@ -268,27 +275,8 @@ pub fn remove_claude_md_guidance(
         }
     };
 
-    // Extend the removed range backwards to include one preceding
-    // blank line if present, so we don't leave a trailing `\n\n`
-    // that looks accidental.
-    let mut start = begin_idx;
-    let bytes = content.as_bytes();
-    while start > 0 && (bytes[start - 1] == b'\n') {
-        start -= 1;
-        if start > 0 && bytes[start - 1] != b'\n' {
-            break;
-        }
-    }
-    // And forwards to include the trailing newline on the END line.
-    let mut end = after_end_idx;
-    while end < content.len() && content.as_bytes()[end] == b'\n' {
-        end += 1;
-        break; // Exactly one trailing newline.
-    }
-
-    let mut new_content = String::with_capacity(content.len() - (end - start));
-    new_content.push_str(&content[..start]);
-    new_content.push_str(&content[end..]);
+    // Same cut as the AGENTS.md block: the separator install added goes too.
+    let new_content = crate::codex_integration::excise_range(&content, begin_idx, after_end_idx);
 
     // If nothing meaningful remains (just our preamble or whitespace),
     // delete the file — don't leave an empty marker behind.
@@ -442,6 +430,15 @@ pub fn remove_claude_mcp_config() -> Result<Option<(PathBuf, bool)>> {
     remove_claude_mcp_config_at(None)
 }
 
+/// Whether `~/.claude.json` holds the `mcpServers.sqz` entry sqz installed.
+pub fn claude_mcp_config_managed() -> bool {
+    claude_user_json_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.pointer(&format!("/mcpServers/sqz/{SQZ_MCP_SENTINEL_KEY}"))?.as_bool())
+        .unwrap_or(false)
+}
+
 /// Internal: home-dir-injectable counterpart used by tests. See
 /// `install_claude_mcp_config_at` for rationale.
 pub(crate) fn remove_claude_mcp_config_at(
@@ -485,7 +482,11 @@ pub(crate) fn remove_claude_mcp_config_at(
         if !is_managed {
             return Ok(Some((path, false)));
         }
-        mcp.remove("sqz").is_some()
+        let removed = mcp.remove("sqz").is_some();
+        if mcp.is_empty() {
+            root_obj.remove("mcpServers");
+        }
+        removed
     };
 
     if changed {
@@ -611,6 +612,27 @@ mod tests {
             "user's rules must survive uninstall"
         );
         assert!(content.contains("Be polite"));
+    }
+
+    #[test]
+    fn remove_gives_back_the_user_text_byte_for_byte() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let mine = "# My project rules\n\n- Always use 2-space indent\n- Be polite\n";
+        std::fs::write(&path, mine).unwrap();
+        install_claude_md_guidance(dir.path(), "/usr/local/bin/sqz").unwrap();
+        assert!(claude_md_has_guidance(dir.path()));
+        remove_claude_md_guidance(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
+        assert!(!claude_md_has_guidance(dir.path()));
+
+        install_claude_md_guidance(dir.path(), "/usr/local/bin/sqz").unwrap();
+        let after = "\n## After sqz\n\nKeep commits small.\n";
+        let mut content = std::fs::read_to_string(&path).unwrap();
+        content.push_str(after);
+        std::fs::write(&path, content).unwrap();
+        remove_claude_md_guidance(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{mine}{after}"));
     }
 
     #[test]
