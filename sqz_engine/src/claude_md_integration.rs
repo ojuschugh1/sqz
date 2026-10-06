@@ -230,8 +230,7 @@ pub fn claude_md_guidance_state(project_dir: &Path) -> SteeringState {
     }
 }
 
-/// Rewrite a stale `CLAUDE.md` block in place, keeping the binary it points
-/// at when that still exists (else `fallback_sqz_path`).
+/// Rewrite a stale `CLAUDE.md` block in place, keeping its sqz binary while that resolves.
 pub fn refresh_claude_md_guidance(project_dir: &Path, fallback_sqz_path: &str) -> Result<bool> {
     if claude_md_guidance_state(project_dir) != SteeringState::Stale {
         return Ok(false);
@@ -241,7 +240,7 @@ pub fn refresh_claude_md_guidance(project_dir: &Path, fallback_sqz_path: &str) -
         .map_err(|e| SqzError::Other(format!("failed to read {}: {e}", path.display())))?;
     let sqz_path = claude_md_block_range(&content)
         .and_then(|(start, end)| claude_md_block_sqz_path(&content[start..end]))
-        .filter(|p| Path::new(p).is_file())
+        .filter(|p| crate::tool_hooks::resolve_sqz_binary(p).is_some())
         .unwrap_or(fallback_sqz_path)
         .to_string();
     write_claude_md_block(&path, &content, &sqz_path)

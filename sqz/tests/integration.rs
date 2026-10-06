@@ -1040,6 +1040,28 @@ fn test_doctor_fix_and_init_refresh_an_old_claude_md_block() {
 
 #[test]
 #[cfg(not(windows))]
+fn test_doctor_fix_keeps_a_bare_sqz_that_is_on_path() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("sqz"), "").unwrap();
+    let settings = project.path().join(".claude").join("settings.local.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let hook = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"sqz hook claude"}]}]}}"#;
+    std::fs::write(&settings, hook).unwrap();
+    let claude_md = project.path().join("CLAUDE.md");
+    let old = "<!-- BEGIN sqz-claude-guidance (auto-installed by sqz init; remove this block to disable) -->\n\n- Shell: `sqz expand a1b2c3d4` (or paste the whole token\n\n<!-- END sqz-claude-guidance -->\n";
+    std::fs::write(&claude_md, old).unwrap();
+
+    let o = run_doctor(home.path(), project.path(), &["--fix"]);
+    let refreshed = std::fs::read_to_string(&claude_md).unwrap();
+    assert_eq!(refreshed, sqz_engine::claude_md_guidance_block("sqz"), "{}", stdout(&o));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "sqz hook claude-post", "{}", stdout(&o));
+    assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "sqz hook claude");
+}
+
+#[test]
+#[cfg(not(windows))]
 fn test_uninstall_keeps_the_rest_of_the_shell_rc_byte_for_byte() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();

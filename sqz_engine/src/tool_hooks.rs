@@ -1868,6 +1868,26 @@ fn unquoted(bin: &str) -> &str {
         .unwrap_or(bin)
 }
 
+/// The file a config's sqz binary names: a bare name is looked up on PATH, nothing is run.
+pub fn resolve_sqz_binary(bin: &str) -> Option<PathBuf> {
+    let path = unquoted(bin);
+    if !path.contains(['/', '\\']) {
+        let dirs = std::env::var_os("PATH")?;
+        return std::env::split_paths(&dirs).find_map(|dir| {
+            let exe = dir.join(format!("{path}.exe"));
+            [dir.join(path)]
+                .into_iter()
+                .chain(cfg!(windows).then_some(exe))
+                .find(|p| p.is_file())
+        });
+    }
+    let file = match path.strip_prefix("~/").filter(|_| path == bin) {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => PathBuf::from(path),
+    };
+    file.is_file().then_some(file)
+}
+
 /// Whether a hook entry's commands include sqz's `args` command.
 fn hook_entry_runs_sqz(entry: &serde_json::Value, args: &str) -> bool {
     entry
@@ -2009,7 +2029,7 @@ pub fn refresh_claude_settings(path: &Path, fallback_sqz: &str) -> Result<bool> 
     let root: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| crate::error::SqzError::Other(format!("parse {}: {e}", path.display())))?;
     let sqz_path = claude_settings_sqz_path(&root)
-        .filter(|p| Path::new(p).exists())
+        .filter(|p| resolve_sqz_binary(p).is_some())
         .unwrap_or_else(|| fallback_sqz.to_string());
     merge_sqz_hooks_into_settings(path, &sqz_path)
 }
@@ -3893,6 +3913,19 @@ mod global_install_tests {
         ] {
             assert!(sqz_command_binary(command, args).is_none(), "{command}");
         }
+    }
+
+    #[test]
+    fn hook_binaries_resolve_to_files_without_running_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("my tools").join("sqz");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "").unwrap();
+        let shown = bin.to_string_lossy().to_string();
+        assert_eq!(resolve_sqz_binary(&shown), Some(bin.clone()));
+        assert_eq!(resolve_sqz_binary(&format!("\"{shown}\"")), Some(bin.clone()));
+        assert_eq!(resolve_sqz_binary(&format!("{shown}-gone")), None);
+        assert_eq!(resolve_sqz_binary("sqz-not-on-any-path-xyz"), None);
     }
 
     #[test]
