@@ -526,7 +526,17 @@ impl McpServer {
             CacheResult::Dedup { inline_ref, token_cost } => (inline_ref, token_cost),
             CacheResult::Delta { delta_text, token_cost, .. } if allow_delta => (delta_text, token_cost),
             CacheResult::Delta { .. } => return self.compress_fresh(text, lossless),
-            CacheResult::Fresh { output } => (output.data, output.tokens_compressed),
+            CacheResult::Fresh { output } => {
+                let truncated = output.stages_applied.iter().any(|s| s == "entropy_truncate");
+                if truncated && !self.engine.never_store(text) {
+                    let hash = sqz_engine::CacheManager::sha256_hex(text.as_bytes());
+                    let data = format!("{}\n[full output: call expand with prefix \"{}\"]", output.data, &hash[..16]);
+                    let tokens = self.engine.count_tokens(&data);
+                    (data, tokens)
+                } else {
+                    (output.data, output.tokens_compressed)
+                }
+            }
         })
     }
 
@@ -1199,6 +1209,7 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 "log_fold: repeated log lines with timestamps folded to [xN]".to_string(),
                 "path_shorten: common path prefixes replaced with ~/".to_string(),
                 "truncate_strings: strings > 500 chars are truncated with '...'".to_string(),
+                "entropy_truncate: low-information segments are dropped and marked; the output then ends with the expand prefix of the full original".to_string(),
                 "safe_fallback: error/warning lines always preserved verbatim".to_string(),
                 "preservation_verifier: path-like and identifier tokens are \
                  checked for byte-exact survival; compression is discarded if \
@@ -1913,6 +1924,38 @@ mod tests {
         let head: String = resp.output.chars().take(200).collect();
         assert!(!resp.output.starts_with("TOON:{text:"), "{head}");
         assert!(resp.output.contains("disk full"), "{head}");
+    }
+
+    #[test]
+    fn test_compress_tool_names_the_expand_prefix_when_it_drops_segments() {
+        let (mut server, _dir) = make_server();
+        let mut text = String::from("run marker for the compress spill test\n\n");
+        for i in 0..12u8 {
+            let word: String = std::iter::repeat((b'a' + i) as char).take(10).collect();
+            text.push_str(&format!("{} filler-{i}\n\n", format!("{word} ").repeat(30)));
+        }
+        text.push_str("The quick brown fox jumps over the lazy dog by silver rivers today.\n");
+        let call = |server: &mut McpServer, tool: &str, input: serde_json::Value| {
+            server
+                .handle_tool_call(ToolCallRequest { tool_id: tool.to_string(), input, intent: None })
+                .unwrap()
+        };
+
+        let resp = call(&mut server, "compress", serde_json::json!({ "text": text }));
+        let hash = sqz_engine::CacheManager::sha256_hex(text.as_bytes());
+        assert!(resp.output.contains("low-information segments omitted"), "{}", resp.output);
+        assert!(
+            resp.output.ends_with(&format!("\n[full output: call expand with prefix \"{}\"]", &hash[..16])),
+            "{}",
+            resp.output
+        );
+        assert_eq!(resp.tokens_compressed, server.engine.count_tokens(&resp.output));
+
+        let expanded = call(&mut server, "expand", serde_json::json!({ "prefix": &hash[..16] }));
+        assert_eq!(expanded.output, format!("[sqz:expand hash={hash}]\n{text}"));
+
+        let compress = default_tool_definitions().into_iter().find(|t| t.id == "compress").unwrap();
+        assert!(compress.compression_transforms.iter().any(|t| t.starts_with("entropy_truncate:")));
     }
 
     fn high_risk_texts() -> Vec<(&'static str, String)> {
