@@ -10,15 +10,7 @@ use std::path::PathBuf;
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn sqz_bin() -> PathBuf {
-    // Use the debug build so tests run without --release.
-    let mut p = std::env::current_exe().unwrap();
-    p.pop(); // remove test binary name
-    // Cargo puts integration test binaries in deps/, step up one more.
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("sqz");
-    p
+    PathBuf::from(env!("CARGO_BIN_EXE_sqz"))
 }
 
 /// Workspace root — integration tests may run from a different cwd.

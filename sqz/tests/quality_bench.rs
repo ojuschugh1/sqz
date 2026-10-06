@@ -63,13 +63,7 @@ impl Outcome {
 }
 
 fn sqz_bin() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("sqz");
-    p
+    PathBuf::from(env!("CARGO_BIN_EXE_sqz"))
 }
 
 fn sqz(db: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output {
