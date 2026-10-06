@@ -497,10 +497,8 @@ impl McpServer {
     ///     path the README advertises.
     ///   * `Delta` → emit a compact diff against a near-duplicate. Not
     ///     as compact as a full ref but still well below fresh
-    ///     compression for iterated edits. Only with `allow_delta`.
+    ///     compression for iterated edits.
     ///   * `Fresh` → cache miss; emit the full compressed output.
-    ///
-    /// `text` of at most `REF_TOKENS` tokens skips the cache.
     ///
     /// Added in response to issue #12 follow-up: `handle_sqz_read_file`
     /// (and the grep / list_dir siblings) were calling
@@ -1146,9 +1144,7 @@ impl McpServer {
     }
 }
 
-/// Read one line into `buf` without its `\n` or `\r\n`, as `BufRead::lines`
-/// does, but as bytes: a line that is not UTF-8 is left to the caller
-/// instead of ending the stream. `false` at end of input.
+/// One line into `buf` as `BufRead::lines` splits it, but as bytes; `false` at end of input.
 fn read_line_bytes(reader: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<bool> {
     buf.clear();
     if reader.read_until(b'\n', buf)? == 0 {

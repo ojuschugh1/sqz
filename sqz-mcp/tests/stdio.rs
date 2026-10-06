@@ -1,5 +1,4 @@
-//! The sqz-mcp binary over real stdio: command-line flags, line framing,
-//! and how the proxy treats its upstream.
+//! The sqz-mcp binary over real stdio: flags, line framing and the proxy's upstream.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -24,8 +23,7 @@ fn spawn(dir: &Path, args: &[&str]) -> Child {
         .unwrap()
 }
 
-/// The child's exit status, or `None` (after killing it) when it is still
-/// running `secs` seconds later.
+/// The child's exit status, or `None` after killing it if it outlives `secs` seconds.
 fn wait_for(child: &mut Child, secs: u64) -> Option<ExitStatus> {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {

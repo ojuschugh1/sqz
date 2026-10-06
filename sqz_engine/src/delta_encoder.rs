@@ -517,7 +517,6 @@ mod tests {
         assert!(!ops.is_empty());
     }
 
-    /// Apply a delta to the old lines the way its reader would.
     fn replay(old: &[String], delta: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut at = 0;
