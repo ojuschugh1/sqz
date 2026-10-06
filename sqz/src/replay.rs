@@ -190,12 +190,14 @@ fn is_sqz_tool(name: &str) -> bool {
 /// A command that already pipes through sqz, or runs sqz itself. The
 /// hook skips these too.
 fn already_through_sqz(command: &str) -> bool {
+    let command = command.trim_start();
+    let first = match command.chars().next() {
+        Some(quote @ ('"' | '\'')) => command[1..].split(quote).next(),
+        _ => command.split_whitespace().next(),
+    };
     command.contains("sqz compress")
         || command.contains("sqz.exe compress")
-        || command
-            .split_whitespace()
-            .next()
-            .map_or(false, |first| sqz_engine::shell_scan::basename(first) == "sqz")
+        || first.map_or(false, |first| sqz_engine::shell_scan::basename(first) == "sqz")
 }
 
 /// Which way sqz could have reached `output` on `client`.
@@ -1175,6 +1177,8 @@ mod tests {
         assert_eq!(classify(Client::KiroIde, &out("execute_bash", "git diff 2>&1 | sqz compress")), Reach::AlreadySqz);
         assert_eq!(classify(Client::KiroIde, &out("execute_bash", "C:\\tools\\sqz.EXE gain")), Reach::AlreadySqz);
         assert_eq!(classify(Client::ClaudeCode, &out("Bash", "C:\\Users\\me\\sqz.exe stats")), Reach::AlreadySqz);
+        assert_eq!(classify(Client::ClaudeCode, &out("Bash", "\"C:\\Users\\John Smith\\sqz.exe\" stats")), Reach::AlreadySqz);
+        assert_eq!(classify(Client::KiroIde, &out("execute_bash", "'/opt/my tools/sqz' gain")), Reach::AlreadySqz);
         assert_eq!(classify(Client::KiroIde, &out("readFile", "readFile")), Reach::FileRead);
         assert_eq!(classify(Client::KiroIde, &out("grep_search", "grep_search")), Reach::FileRead);
         assert_eq!(classify(Client::KiroIde, &out("mcp_sqz_sqz_read_file", "x")), Reach::AlreadySqz);
