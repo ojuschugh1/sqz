@@ -1140,6 +1140,41 @@ fn test_doctor_fix_repoints_hooks_whose_sqz_binary_is_gone() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn test_doctor_and_uninstall_remove_hooks_an_older_sqz_wrote() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let windsurf = project.path().join(".windsurf").join("hooks.json");
+    std::fs::create_dir_all(windsurf.parent().unwrap()).unwrap();
+    std::fs::write(&windsurf, r#"{"hooks":{"pre_run_command":[{"command":"/opt/sqz hook windsurf"}]}}"#).unwrap();
+    let cursor = project.path().join(".cursor").join("hooks.json");
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    let both = r#"{"version":1,"hooks":{"preToolUse":[{"command":"sqz hook cursor","matcher":"Shell"},{"command":"./audit.sh","matcher":"Shell"}]}}"#;
+    std::fs::write(&cursor, both).unwrap();
+
+    let o = run_doctor(home.path(), project.path(), &[]);
+    assert!(stdout(&o).contains("hook files that current sqz no longer uses"), "{}", stdout(&o));
+    let o = run_doctor(home.path(), project.path(), &["--fix"]);
+    assert!(!stdout(&o).contains("no longer uses"), "{}", stdout(&o));
+    assert!(!windsurf.exists());
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cursor).unwrap()).unwrap();
+    assert_eq!(v, serde_json::json!({"version": 1, "hooks": {"preToolUse": [{"command": "./audit.sh", "matcher": "Shell"}]}}));
+
+    let script = project.path().join(".clinerules").join("hooks").join("PreToolUse");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "#!/usr/bin/env bash\n# sqz hook for Cline \u{2014} passes through all tool calls.\n# Cline's PreToolUse cannot rewrite commands, so compression\n# is handled by the sqz-mcp server instead.\necho '{\"cancel\": false}'\nexit 0\n").unwrap();
+    let preset = home.path().join(".sqz").join("presets").join("default.toml");
+    std::fs::create_dir_all(preset.parent().unwrap()).unwrap();
+    std::fs::write(&preset, "[meta]\n").unwrap();
+    let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("PreToolUse (hooks from an older sqz)"), "{}", stdout(&o));
+    assert!(stdout(&o).contains(&format!("kept: {}", preset.display())), "{}", stdout(&o));
+    assert!(!script.exists());
+    assert!(preset.exists());
+}
+
+#[test]
 #[cfg(unix)]
 fn test_init_and_uninstall_keep_json_newlines_and_modes() {
     use std::os::unix::fs::PermissionsExt;

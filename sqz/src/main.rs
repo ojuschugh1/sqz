@@ -2182,6 +2182,11 @@ fn cmd_uninstall(skip_confirm: bool) {
         files_to_remove.push((opencode_plugin.display().to_string(), true));
     }
 
+    let legacy_hooks = sqz_engine::legacy_sqz_hook_files(&project_dir);
+    for path in &legacy_hooks {
+        files_to_remove.push((format!("{} (hooks from an older sqz)", path.display()), true));
+    }
+
     if files_to_remove.is_empty() {
         println!("[sqz] nothing to uninstall — no sqz files found.");
         return;
@@ -2525,6 +2530,45 @@ fn cmd_uninstall(skip_confirm: bool) {
             Ok(_) => {}
             Err(e) => eprintln!("[sqz] ✗ could not clean up ~/.claude.json: {e}"),
         }
+    }
+
+    if !legacy_hooks.is_empty() {
+        match sqz_engine::remove_legacy_sqz_hooks(&project_dir) {
+            Ok(changed) => {
+                for (path, deleted) in changed {
+                    if deleted {
+                        println!("[sqz] ✓ removed {}", path.display());
+                    } else {
+                        println!("[sqz] ✓ removed sqz entries from {}", path.display());
+                    }
+                }
+            }
+            Err(e) => eprintln!("[sqz] ✗ could not clean up the old sqz hook files: {e}"),
+        }
+    }
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let kept: Vec<String> = [
+        default_preset_dir().join("default.toml"),
+        home.join(".zsh").join("completions").join("_sqz"),
+        home.join(".local").join("share").join("bash-completion").join("completions").join("sqz"),
+        home.join(".config").join("fish").join("completions").join("sqz.fish"),
+        home.join(".config").join("nushell").join("completions").join("sqz.nu"),
+    ]
+    .into_iter()
+    .filter(|p| p.exists())
+    .chain(
+        [zed_settings, kiro_mcp, sqz_engine::kiro_integration::kiro_user_mcp_path()]
+            .into_iter()
+            .filter(|p| std::fs::read_to_string(p).is_ok_and(|s| s.trim() == "{}")),
+    )
+    .map(|p| p.display().to_string())
+    .collect();
+    if !kept.is_empty() {
+        println!("\n[sqz] kept: {} (remove them by hand if you no longer want them)", kept.join(", "));
     }
 
     println!("\n[sqz] uninstall complete.");

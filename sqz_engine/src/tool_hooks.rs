@@ -1877,6 +1877,103 @@ pub fn resolve_sqz_binary(bin: &str) -> Option<PathBuf> {
     file.is_file().then_some(file)
 }
 
+/// The Cline hook script sqz wrote before it moved Cline to rules only.
+const LEGACY_CLINE_SCRIPT: &str = "#!/usr/bin/env bash\n# sqz hook for Cline \u{2014} passes through all tool calls.\n# Cline's PreToolUse cannot rewrite commands, so compression\n# is handled by the sqz-mcp server instead.\necho '{\"cancel\": false}'\nexit 0\n";
+
+/// Hook files older sqz versions wrote, with the command sqz put in each (`None`: the Cline script).
+fn legacy_hook_files(
+    project_dir: &Path,
+    home_override: Option<&Path>,
+) -> Vec<(PathBuf, Option<&'static str>)> {
+    let mut files = vec![
+        (project_dir.join(".cursor").join("hooks.json"), Some("hook cursor")),
+        (project_dir.join(".windsurf").join("hooks.json"), Some("hook windsurf")),
+        (project_dir.join(".cline").join("hooks.json"), Some("hook cline")),
+        (project_dir.join(".clinerules").join("hooks").join("PreToolUse"), None),
+    ];
+    let home = home_override.map(Path::to_path_buf).or_else(|| {
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+    });
+    if let Some(home) = home {
+        files.push((home.join(".cursor").join("hooks.json"), Some("hook cursor")));
+    }
+    files
+}
+
+/// The file's JSON without sqz's hooks; `Some(None)` when nothing else is left, `None` without sqz hooks.
+fn legacy_hooks_cut(text: &str, args: Option<&str>) -> Option<Option<serde_json::Value>> {
+    let Some(args) = args else {
+        return (text.replace("\r\n", "\n") == LEGACY_CLINE_SCRIPT).then_some(None);
+    };
+    let mut root: serde_json::Value = serde_json::from_str(text).ok()?;
+    let obj = root.as_object_mut()?;
+    let hooks = obj.get_mut("hooks")?.as_object_mut()?;
+    let mut changed = false;
+    let mut emptied = Vec::new();
+    for (event, entries) in hooks.iter_mut() {
+        let Some(arr) = entries.as_array_mut() else { continue };
+        let before = arr.len();
+        arr.retain(|e| !hook_runs_sqz(e, args));
+        if remove_sqz_hook_commands(arr, args) || arr.len() != before {
+            changed = true;
+            if arr.is_empty() {
+                emptied.push(event.clone());
+            }
+        }
+    }
+    if !changed {
+        return None;
+    }
+    for event in &emptied {
+        hooks.remove(event);
+    }
+    if hooks.is_empty() {
+        obj.remove("hooks");
+    }
+    let only_version = obj.len() == 1 && obj.get("version") == Some(&serde_json::json!(1));
+    Some((!obj.is_empty() && !only_version).then_some(root))
+}
+
+/// Hook files an older sqz wrote that still hold its hooks.
+pub fn legacy_sqz_hook_files(project_dir: &Path) -> Vec<PathBuf> {
+    legacy_sqz_hook_files_at(project_dir, None)
+}
+
+fn legacy_sqz_hook_files_at(project_dir: &Path, home_override: Option<&Path>) -> Vec<PathBuf> {
+    legacy_hook_files(project_dir, home_override)
+        .into_iter()
+        .filter(|(path, args)| {
+            std::fs::read_to_string(path).is_ok_and(|text| legacy_hooks_cut(&text, *args).is_some())
+        })
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// Remove sqz's hooks from those files, deleting emptied ones; returns each changed file and if it went.
+pub fn remove_legacy_sqz_hooks(project_dir: &Path) -> Result<Vec<(PathBuf, bool)>> {
+    remove_legacy_sqz_hooks_at(project_dir, None)
+}
+
+fn remove_legacy_sqz_hooks_at(
+    project_dir: &Path,
+    home_override: Option<&Path>,
+) -> Result<Vec<(PathBuf, bool)>> {
+    let mut changed = Vec::new();
+    for (path, args) in legacy_hook_files(project_dir, home_override) {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        match legacy_hooks_cut(&text, args) {
+            None => continue,
+            Some(None) => std::fs::remove_file(&path).map_err(|e| {
+                crate::error::SqzError::Other(format!("remove {}: {e}", path.display()))
+            })?,
+            Some(Some(rest)) => write_json_config(&path, &rest, &text)?,
+        }
+        let deleted = !path.exists();
+        changed.push((path, deleted));
+    }
+    Ok(changed)
+}
+
 /// Every command a sqz version has written into a hook file, after the binary.
 const SQZ_HOOK_ARGS: [&str; 9] = [
     "hook claude",
@@ -3955,6 +4052,49 @@ mod global_install_tests {
         ] {
             assert!(sqz_command_binary(command, args).is_none(), "{command}");
         }
+    }
+
+    #[test]
+    fn legacy_hook_files_lose_only_sqz_hooks() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let p = project.path();
+        let cursor = write(
+            p,
+            ".cursor/hooks.json",
+            r#"{"version":1,"hooks":{"beforeShellExecution":[{"command":"/opt/sqz hook cursor"},{"command":"./audit.sh"}]}}"#,
+        );
+        let windsurf = write(p, ".windsurf/hooks.json", r#"{"hooks":{"pre_run_command":[{"command":"/opt/sqz hook windsurf"}]}}"#);
+        let cline = write(
+            p,
+            ".cline/hooks.json",
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"sqz hook cline"}]}]}}"#,
+        );
+        let script = write(p, ".clinerules/hooks/PreToolUse", &LEGACY_CLINE_SCRIPT.replace('\n', "\r\n"));
+        let user_cursor = write(
+            home.path(),
+            ".cursor/hooks.json",
+            r#"{"version":1,"hooks":{"preToolUse":[{"command":"C:/tools/sqz.exe hook cursor","matcher":"Shell"}]}}"#,
+        );
+
+        let all = vec![cursor.clone(), windsurf.clone(), cline.clone(), script.clone(), user_cursor.clone()];
+        assert_eq!(legacy_sqz_hook_files_at(p, Some(home.path())), all);
+        assert_eq!(
+            remove_legacy_sqz_hooks_at(p, Some(home.path())).unwrap(),
+            vec![(cursor.clone(), false), (windsurf, true), (cline, true), (script.clone(), true), (user_cursor, true)]
+        );
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cursor).unwrap()).unwrap();
+        assert_eq!(v, serde_json::json!({"version": 1, "hooks": {"beforeShellExecution": [{"command": "./audit.sh"}]}}));
+        assert!(legacy_sqz_hook_files_at(p, Some(home.path())).is_empty());
+
+        write(p, ".clinerules/hooks/PreToolUse", &LEGACY_CLINE_SCRIPT.replace("exit 0", "exit 1"));
+        assert!(legacy_sqz_hook_files_at(p, Some(home.path())).is_empty(), "an edited script is the user's");
     }
 
     #[test]

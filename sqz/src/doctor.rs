@@ -114,6 +114,8 @@ pub struct Managed {
     pub claude_duplicate: bool,
     /// Hook and plugin files that run a sqz binary that does not exist, as `file (binary)`.
     pub missing_binaries: Vec<String>,
+    /// Hook files an older sqz wrote that current sqz no longer uses.
+    pub legacy_hooks: Vec<String>,
 }
 
 impl Managed {
@@ -200,6 +202,15 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
         problems.push(Problem {
             message: "the Claude Code hook comes from an older sqz install: without the two allow rules for its pipe it leaves commands uncompressed, and the PostToolUse hook is missing".to_string(),
             fix: Some(format!("{FIX_CMD}   (adds Bash(set -o pipefail) and Bash(sqz compress --cmd *) to the allow list)")),
+        });
+    }
+    if !managed.legacy_hooks.is_empty() {
+        problems.push(Problem {
+            message: format!(
+                "an older sqz left hook files that current sqz no longer uses: {}",
+                managed.legacy_hooks.join(", ")
+            ),
+            fix: Some(format!("{FIX_CMD}   (removes sqz's hooks from them; anything else in them stays)")),
         });
     }
     if !managed.missing_binaries.is_empty() {
@@ -691,6 +702,20 @@ fn apply_fixes(store: &sqz_engine::SessionStore, managed: &Managed, project_dir:
             Err(e) => println!("  ERR --fix: could not update {}: {e}", path.display()),
         }
     }
+    if !managed.legacy_hooks.is_empty() {
+        match sqz_engine::remove_legacy_sqz_hooks(project_dir) {
+            Ok(changed) => {
+                for (path, deleted) in changed {
+                    if deleted {
+                        println!("  ok  --fix: removed {} (an older sqz wrote it)", path.display());
+                    } else {
+                        println!("  ok  --fix: removed the old sqz hooks from {}", path.display());
+                    }
+                }
+            }
+            Err(e) => println!("  ERR --fix: could not remove the old sqz hooks: {e}"),
+        }
+    }
     Ok(())
 }
 
@@ -744,6 +769,10 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
         missing_binaries: missing_hook_binaries(project_dir)
             .into_iter()
             .map(|(path, bin)| format!("{} ({bin})", path.display()))
+            .collect(),
+        legacy_hooks: sqz_engine::legacy_sqz_hook_files(project_dir)
+            .iter()
+            .map(|path| path.display().to_string())
             .collect(),
     }
 }
@@ -935,6 +964,7 @@ mod tests {
             claude_stale: false,
             claude_duplicate: false,
             missing_binaries: Vec::new(),
+            legacy_hooks: Vec::new(),
         }
     }
 
