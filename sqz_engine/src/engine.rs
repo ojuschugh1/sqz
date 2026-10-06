@@ -621,6 +621,13 @@ impl SqzEngine {
         let preset = self.preset.lock().unwrap();
         self.pipeline.lock().unwrap().count_tokens(text, &preset)
     }
+
+    /// Clear the lock poison a caught panic left, so the engine stays usable.
+    pub fn clear_poison(&self) {
+        self.preset.clear_poison();
+        self.pipeline.clear_poison();
+        self.model_router.clear_poison();
+    }
 }
 
 /// Smallest saving, in tokens, worth replacing an MCP tool result for: the
@@ -753,6 +760,23 @@ mod tests {
         assert!(second.text.starts_with("§ref:") && second.repeat, "{}", second.text);
         let uncached = engine.compress_tool_result(&rows, false).expect("no cache");
         assert!(!uncached.text.starts_with("§ref:") && !uncached.text.contains("sqz_expand"));
+    }
+
+    #[test]
+    fn clear_poison_after_a_caught_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SqzEngine::with_preset_and_store(Preset::default(), &dir.path().join("store.db")).unwrap();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _preset = engine.preset.lock().unwrap();
+            let _pipeline = engine.pipeline.lock().unwrap();
+            panic!("a bug while compressing");
+        }));
+        assert!(caught.is_err());
+        assert!(engine.compress("hello world").is_err());
+
+        engine.clear_poison();
+        assert_eq!(engine.compress("hello world").unwrap().data, "hello world");
+        assert!(engine.count_tokens("hello world") > 0);
     }
 
     fn high_risk_inputs() -> Vec<(&'static str, String)> {

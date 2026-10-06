@@ -121,11 +121,15 @@ impl ProxyState {
             return line.to_string();
         }
 
-        match kind {
+        let rewritten = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
             Pending::Initialize => self.rewrite_initialize(&mut msg),
             Pending::ToolsList => self.rewrite_tools_list(&mut msg),
             Pending::ToolCall { name } => self.rewrite_tool_result(&mut msg, &name),
             Pending::Other => {}
+        }));
+        if rewritten.is_err() {
+            self.engine.clear_poison();
+            return line.to_string();
         }
         serde_json::to_string(&msg).unwrap_or_else(|_| line.to_string())
     }
@@ -242,6 +246,8 @@ impl ProxyState {
     /// The gating (size, Safe routing, net win) lives in the engine so
     /// `sqz discover --replay` estimates exactly what the proxy does.
     fn compress_text(&mut self, text: &str, tool_name: &str) -> Option<String> {
+        #[cfg(test)]
+        crate::tests::maybe_panic();
         let c = self.engine.compress_tool_result(text, !self.no_cache)?;
         let _ = self.engine.session_store().log_compression_with_project(
             c.tokens_original,
@@ -365,7 +371,7 @@ pub fn run_proxy(
             if line.trim().is_empty() {
                 continue;
             }
-            let out = state_up.lock().unwrap().on_upstream_message(&line);
+            let out = state_up.lock().unwrap_or_else(|e| e.into_inner()).on_upstream_message(&line);
             let mut handle = stdout.lock();
             if writeln!(handle, "{out}").and_then(|_| handle.flush()).is_err() {
                 break;
@@ -381,7 +387,16 @@ pub fn run_proxy(
         if line.trim().is_empty() {
             continue;
         }
-        let local_response = state.lock().unwrap().on_client_message(&line)?;
+        let local_response = {
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| state.on_client_message(&line))) {
+                Ok(response) => response?,
+                Err(_) => {
+                    state.engine.clear_poison();
+                    None
+                }
+            }
+        };
         match local_response {
             Some(resp) => {
                 let stdout = std::io::stdout();
@@ -391,7 +406,7 @@ pub fn run_proxy(
                 }
             }
             None => {
-                let mut cs = child_stdin.lock().unwrap();
+                let mut cs = child_stdin.lock().unwrap_or_else(|e| e.into_inner());
                 if writeln!(cs, "{line}").and_then(|_| cs.flush()).is_err() {
                     break;
                 }
@@ -607,6 +622,30 @@ mod tests {
         assert_eq!(parsed["result"]["isError"], false);
         let text = parsed.pointer("/result/content/0/text").unwrap().as_str().unwrap();
         assert_eq!(text, big, "expand must return the original verbatim");
+    }
+
+    #[test]
+    fn panicking_compression_passes_the_result_on_unchanged() {
+        let (mut state, _dir) = test_state();
+        let big: String = (0..80)
+            .map(|i| format!("issue row {i} status open priority medium assignee nobody\n"))
+            .collect();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "jira_search", "arguments": {} }
+        });
+        assert!(state.on_client_message(&req.to_string()).unwrap().is_none());
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": { "content": [{ "type": "text", "text": big }], "isError": false }
+        })
+        .to_string();
+        crate::tests::panic_next_compression();
+        assert_eq!(state.on_upstream_message(&resp), resp);
+
+        let next = call_and_respond(&mut state, 2, "jira_search", &big);
+        let text = next.pointer("/result/content/0/text").unwrap().as_str().unwrap();
+        assert!(text.len() < big.len(), "compression works again: {text}");
     }
 
     #[test]

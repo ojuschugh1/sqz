@@ -314,8 +314,19 @@ impl McpServer {
                 .map_err(|e| SqzError::Other(format!("input serialization error: {e}")))?,
         };
 
-        let tokens_original = self.engine.count_tokens(&raw_input);
-        let (output, tokens_compressed) = self.compress_cached(&raw_input, false)?;
+        let compressed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let tokens_original = self.engine.count_tokens(&raw_input);
+            self.compress_cached(&raw_input, false)
+                .map(|(output, tokens_compressed)| (output, tokens_original, tokens_compressed))
+        }));
+        let (output, tokens_original, tokens_compressed) = match compressed {
+            Ok(result) => result?,
+            Err(_) => {
+                self.engine.clear_poison();
+                let tokens = estimate_tokens(&raw_input);
+                (raw_input, tokens, tokens)
+            }
+        };
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
         Ok(ToolCallResponse {
@@ -497,6 +508,8 @@ impl McpServer {
     /// the advertised behaviour.
     fn compress_cached(&self, text: &str, lossless: bool) -> Result<(String, u32)> {
         use sqz_engine::CacheResult;
+        #[cfg(test)]
+        tests::maybe_panic();
         // The file-read tools (sqz_read_file / sqz_grep / sqz_list_dir) read
         // faithfully (lossless); the general `compress` tool stays aggressive.
         let result = if lossless {
@@ -1008,7 +1021,8 @@ impl McpServer {
             return None;
         }
 
-        Some(match req.method.as_str() {
+        let id = req.id.clone();
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match req.method.as_str() {
             "tools/list" => {
                 let intent = req.params
                     .as_ref()
@@ -1054,11 +1068,11 @@ impl McpServer {
             "tools/call" => {
                 let params = match req.params {
                     Some(p) => p,
-                    None => return Some(JsonRpcResponse::err(req.id, -32602, "missing params")),
+                    None => return JsonRpcResponse::err(req.id, -32602, "missing params"),
                 };
                 let tool_id = match params.get("name").and_then(|v| v.as_str()) {
                     Some(id) => id.to_string(),
-                    None => return Some(JsonRpcResponse::err(req.id, -32602, "missing params.name")),
+                    None => return JsonRpcResponse::err(req.id, -32602, "missing params.name"),
                 };
                 let input = params.get("arguments").cloned().unwrap_or(Value::Null);
                 let intent = params.get("intent").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -1097,7 +1111,11 @@ impl McpServer {
             "ping" => JsonRpcResponse::ok(req.id, serde_json::json!({})),
 
             _ => JsonRpcResponse::err(req.id, -32601, format!("method not found: {}", req.method)),
-        })
+        }));
+        Some(response.unwrap_or_else(|_| {
+            self.engine.clear_poison();
+            JsonRpcResponse::err(id, -32603, format!("internal error: {} panicked", req.method))
+        }))
     }
 }
 
@@ -1794,6 +1812,22 @@ mod tests {
         (server, dir)
     }
 
+    thread_local! {
+        static PANIC_NEXT_COMPRESSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Make the next compression on this thread panic, standing in for a
+    /// bug anywhere in the engine.
+    pub(crate) fn panic_next_compression() {
+        PANIC_NEXT_COMPRESSION.with(|p| p.set(true));
+    }
+
+    pub(crate) fn maybe_panic() {
+        if PANIC_NEXT_COMPRESSION.with(|p| p.replace(false)) {
+            panic!("injected compression panic");
+        }
+    }
+
     // ── Task 25.3: Integration tests ─────────────────────────────────────────
 
     /// Test tool call processing through the compression pipeline.
@@ -2118,6 +2152,48 @@ complexity_threshold = 0.4
         assert!(resp.error.is_none(), "tools/call should not error: {:?}", resp.error);
         let result = resp.result.expect("tools/call should have result");
         assert!(result.get("content").is_some());
+    }
+
+    /// Test a panic while compressing answers compress with the text as given.
+    #[test]
+    fn test_jsonrpc_compress_panic_returns_the_text() {
+        let (mut server, _dir) = make_server();
+        let text = "2026-10-06T12:00:00Z INFO worker finished job in 3 ms\n".repeat(40);
+        let call = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "compress", "arguments": { "text": text } }
+        })
+        .to_string();
+        panic_next_compression();
+        let resp = server.handle_jsonrpc_line_unwrap(&call);
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        assert_eq!(resp.result.unwrap()["content"][0]["text"], text.as_str());
+
+        let resp = server.handle_jsonrpc_line_unwrap(&call);
+        let out = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(out.len() < text.len(), "compression works again: {out}");
+    }
+
+    /// Test a panic in any other tool returns -32603 and the server keeps serving.
+    #[test]
+    fn test_jsonrpc_tool_panic_returns_an_error() {
+        let (mut server, dir) = make_server();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "first line of notes\nsecond line of notes\n").unwrap();
+        let call = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "sqz_read_file", "arguments": { "path": file.to_string_lossy() } }
+        })
+        .to_string();
+        panic_next_compression();
+        let resp = server.handle_jsonrpc_line_unwrap(&call);
+        assert_eq!(resp.id, Some(serde_json::json!(2)));
+        assert_eq!(resp.error.expect("an error").code, -32603);
+
+        let resp = server.handle_jsonrpc_line_unwrap(&call);
+        assert!(resp.error.is_none(), "{:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(text.contains("second line of notes"), "{text}");
     }
 
     /// Test JSON-RPC ping returns an empty result.
