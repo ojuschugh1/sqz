@@ -40,6 +40,9 @@ const INSTRUCTIONS_NOTE: &str = "\n\nTool results pass through the sqz \
 compression proxy; sqz_expand returns the original behind any §ref:HASH§ \
 token.";
 
+const NO_CACHE_NOTE: &str = "\n\nTool results pass through the sqz \
+compression proxy.";
+
 const LAZY_TOOLS_NOTE: &str = " Tool descriptions are shortened to one \
 sentence to save context; call the sqz_tool_help tool with a tool name to \
 read the full original documentation.";
@@ -140,7 +143,8 @@ impl ProxyState {
             .get("instructions")
             .and_then(|i| i.as_str())
             .unwrap_or("");
-        let mut combined = format!("{existing}{INSTRUCTIONS_NOTE}");
+        let note = if self.no_cache { NO_CACHE_NOTE } else { INSTRUCTIONS_NOTE };
+        let mut combined = format!("{existing}{note}");
         if self.lazy_tools {
             combined.push_str(LAZY_TOOLS_NOTE);
         }
@@ -181,9 +185,11 @@ impl ProxyState {
                 }
             }
         }
-        if !tools.iter().any(|t| {
-            t.get("name").and_then(|n| n.as_str()) == Some(EXPAND_TOOL_NAME)
-        }) {
+        if !self.no_cache
+            && !tools.iter().any(|t| {
+                t.get("name").and_then(|n| n.as_str()) == Some(EXPAND_TOOL_NAME)
+            })
+        {
             tools.push(serde_json::json!({
                 "name": EXPAND_TOOL_NAME,
                 "description": "Return the original content behind a ref. §ref:HASH§ stands for content already seen in this session; §ref:HASH:L40-80§ for lines 40-80 of content seen in full, and expands to just those lines.",
@@ -526,6 +532,34 @@ mod tests {
         let out = state.on_client_message(&req.to_string()).unwrap().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed.pointer("/result/isError"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn no_cache_leaves_sqz_expand_out() {
+        let (mut state, _dir) = test_state();
+        state.no_cache = true;
+        let tools = list_tools(
+            &mut state,
+            serde_json::json!([{ "name": "t1", "description": "Compact enough already.", "inputSchema": {} }]),
+        );
+        let names: Vec<&str> = tools
+            .as_array().unwrap().iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(names, ["t1"]);
+
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+        state.on_client_message(&req.to_string()).unwrap();
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": { "protocolVersion": "2025-06-18", "capabilities": {}, "instructions": "Upstream notes." }
+        });
+        let out: serde_json::Value =
+            serde_json::from_str(&state.on_upstream_message(&resp.to_string())).unwrap();
+        assert_eq!(
+            out.pointer("/result/instructions").unwrap(),
+            "Upstream notes.\n\nTool results pass through the sqz compression proxy."
+        );
     }
 
     #[test]
