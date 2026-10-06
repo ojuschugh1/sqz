@@ -316,7 +316,7 @@ fn lcs_table(old: &[&str], new: &[&str]) -> Vec<Vec<usize>> {
 /// Format delta operations into a compact text representation.
 fn format_delta(
     ops: &[DeltaOp],
-    _new_lines: &[&str],
+    new_lines: &[&str],
     hash_prefix: &str,
     context_lines: usize,
 ) -> (String, usize) {
@@ -324,19 +324,30 @@ fn format_delta(
     output.push(format!("§delta:{hash_prefix}§"));
 
     let mut line_num = 0usize;
+    let mut new_line = 0usize;
     let mut lines_changed = 0usize;
 
-    for op in ops {
+    for (i, op) in ops.iter().enumerate() {
         match op {
             DeltaOp::Keep(n) => {
-                if *n > context_lines * 2 {
-                    let skip = n - context_lines * 2;
+                let kept = &new_lines[new_line..new_line + n];
+                let lead = if i == 0 { 0 } else { context_lines.min(*n) };
+                let trail = if i + 1 == ops.len() { 0 } else { context_lines.min(n - lead) };
+                for line in &kept[..lead] {
+                    output.push(format!(" {line}"));
+                }
+                let skip = n - lead - trail;
+                if skip > 0 {
                     output.push(format!(" @@ skip {skip} unchanged lines @@"));
                 }
+                for line in &kept[n - trail..] {
+                    output.push(format!(" {line}"));
+                }
                 line_num += n;
+                new_line += n;
             }
             DeltaOp::Delete(n) => {
-                output.push(format!("-[{n} lines removed at L{line_num}]"));
+                output.push(format!("-[{n} lines removed at L{}]", line_num + 1));
                 line_num += n;
                 lines_changed += n;
             }
@@ -344,6 +355,7 @@ fn format_delta(
                 for line in lines {
                     output.push(format!("+{line}"));
                 }
+                new_line += lines.len();
                 lines_changed += lines.len();
             }
         }
@@ -457,6 +469,30 @@ mod tests {
     }
 
     #[test]
+    fn test_delta_numbers_lines_from_one_and_accounts_for_each() {
+        let enc = DeltaEncoder::new();
+        let old: String = (1..=20).map(|i| format!("row {i:02}\n")).collect();
+
+        let removed = old.replace("row 03\n", "");
+        let delta = enc.encode(&old, &removed, "f1").unwrap().unwrap();
+        assert_eq!(
+            delta.delta_text,
+            "§delta:f1§\n @@ skip 1 unchanged lines @@\n row 02\n-[1 lines removed at L3]\n row 04\n @@ skip 16 unchanged lines @@"
+        );
+
+        let edited = old.replace("row 10\n", "row ten\n");
+        let delta = enc.encode(&old, &edited, "f1").unwrap().unwrap();
+        assert_eq!(
+            delta.delta_text,
+            "§delta:f1§\n @@ skip 8 unchanged lines @@\n row 09\n-[1 lines removed at L10]\n+row ten\n row 11\n @@ skip 9 unchanged lines @@"
+        );
+
+        let appended = format!("{old}row 21\nrow 22\n");
+        let delta = enc.encode(&old, &appended, "f1").unwrap().unwrap();
+        assert_eq!(delta.delta_text, "§delta:f1§\n @@ skip 19 unchanged lines @@\n row 20\n+row 21\n+row 22");
+    }
+
+    #[test]
     fn test_compute_diff_basic() {
         let old = vec!["a", "b", "c"];
         let new = vec!["a", "x", "c"];
@@ -479,6 +515,31 @@ mod tests {
         let new = vec!["a", "c"];
         let ops = compute_diff(&old, &new);
         assert!(!ops.is_empty());
+    }
+
+    /// Apply a delta to the old lines the way its reader would.
+    fn replay(old: &[String], delta: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        for line in delta.lines().skip(1) {
+            if let Some(rest) = line.strip_prefix(" @@ skip ") {
+                let n: usize = rest.split(' ').next().unwrap().parse().unwrap();
+                out.extend_from_slice(&old[at..at + n]);
+                at += n;
+            } else if let Some(rest) = line.strip_prefix("-[") {
+                let (n, pos) = rest.trim_end_matches(']').split_once(" lines removed at L").unwrap();
+                assert_eq!(pos.parse::<usize>().unwrap(), at + 1, "{delta}");
+                at += n.parse::<usize>().unwrap();
+            } else if let Some(added) = line.strip_prefix('+') {
+                out.push(added.to_string());
+            } else {
+                assert_eq!(line.strip_prefix(' '), Some(old[at].as_str()), "{delta}");
+                out.push(old[at].clone());
+                at += 1;
+            }
+        }
+        assert_eq!(at, old.len(), "{delta}");
+        out
     }
 
     // ── Property tests ────────────────────────────────────────────────────────
@@ -508,6 +569,31 @@ mod tests {
                 (sim - 1.0).abs() < 1e-9,
                 "identical content should have similarity 1.0, got {sim}"
             );
+        }
+
+        /// Replaying a delta over the old lines gives the new lines.
+        #[test]
+        fn prop_delta_replays_to_the_new_text(
+            old in prop::collection::vec("[a-z]{1,6}", 3..30),
+            edits in prop::collection::vec((0usize..40, prop::option::of("[a-z]{1,6}")), 1..4),
+        ) {
+            let mut new = old.clone();
+            for (at, line) in edits {
+                let at = at % (new.len() + 1);
+                match line {
+                    Some(line) => new.insert(at, line),
+                    None if at < new.len() => {
+                        new.remove(at);
+                    }
+                    None => {}
+                }
+            }
+            prop_assume!(!new.is_empty());
+            let enc = DeltaEncoder::new();
+            let (old_text, new_text) = (old.join("\n") + "\n", new.join("\n") + "\n");
+            if let Some(delta) = enc.encode(&old_text, &new_text, "p").unwrap() {
+                prop_assert_eq!(replay(&old, &delta.delta_text), new);
+            }
         }
 
         /// Delta text always starts with the §delta: header when produced.
