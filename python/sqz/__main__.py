@@ -10,18 +10,21 @@ import sys
 import platform
 import urllib.request
 import tarfile
+import zipfile
 import stat
 import subprocess
+from importlib.metadata import version
 from pathlib import Path
+from typing import Tuple
 
-VERSION = "0.1.0"
+VERSION = version("sqz")
 REPO = "ojuschugh1/sqz"
 
 # Store the binary alongside this package
 _BIN_DIR = Path(__file__).parent / "_bin"
 
 
-def _platform_target() -> tuple[str, str]:
+def _platform_target() -> Tuple[str, str]:
     """Return (rust_target_triple, binary_extension) for the current platform."""
     system = platform.system()
     machine = platform.machine().lower()
@@ -52,7 +55,8 @@ def _download_binary(name: str) -> Path:
 
     _BIN_DIR.mkdir(parents=True, exist_ok=True)
 
-    archive_name = f"{name}-v{VERSION}-{target}.tar.gz"
+    archive_ext = "zip" if ext == ".exe" else "tar.gz"
+    archive_name = f"{name}-v{VERSION}-{target}.{archive_ext}"
     url = f"https://github.com/{REPO}/releases/download/v{VERSION}/{archive_name}"
     archive_path = _BIN_DIR / archive_name
 
@@ -66,10 +70,14 @@ def _download_binary(name: str) -> Path:
             f"{binary_path}"
         ) from exc
 
-    with tarfile.open(archive_path, "r:gz") as tar:
-        member_name = f"{name}{ext}"
-        member = tar.getmember(member_name)
-        tar.extract(member, path=_BIN_DIR)
+    member_name = f"{name}{ext}"
+    if archive_ext == "zip":
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extract(member_name, path=_BIN_DIR)
+    else:
+        with tarfile.open(archive_path, "r:gz") as tar:
+            member = tar.getmember(member_name)
+            tar.extract(member, path=_BIN_DIR)
 
     archive_path.unlink(missing_ok=True)
 
