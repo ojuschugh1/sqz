@@ -54,6 +54,8 @@ pub enum HookScope {
 pub enum HookPlatform {
     /// Claude Code: hookSpecificOutput with updatedInput (camelCase)
     ClaudeCode,
+    /// Cursor: no answer, so Cursor's own approval applies
+    Cursor,
     /// Gemini CLI: decision + hookSpecificOutput.tool_input
     GeminiCli,
     /// Windsurf: exit-code based (no JSON rewriting support confirmed)
@@ -137,6 +139,9 @@ pub fn process_hook_copilot(input: &str) -> Result<String> {
 /// input format, rewrites it, and returns the response in the correct format
 /// for the target platform.
 fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<String> {
+    if platform == HookPlatform::Cursor {
+        return process_hook_cursor(input);
+    }
     let mut parsed: serde_json::Value = serde_json::from_str(input)
         .map_err(|e| crate::error::SqzError::Other(format!("hook: invalid JSON input: {e}")))?;
     // Copilot CLI documents `toolArgs` as a JSON string.
@@ -317,6 +322,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
                 "updatedInput": updated_input
             }
         }),
+        HookPlatform::Cursor => return process_hook_cursor(input),
         HookPlatform::GeminiCli => serde_json::json!({
             "hookSpecificOutput": {
                 "tool_input": updated_input
@@ -3158,6 +3164,7 @@ mod tests {
             "not json",
         ] {
             assert!(process_hook_cursor(input).is_err(), "{input}");
+            assert!(process_hook_for_platform(input, HookPlatform::Cursor).is_err(), "{input}");
         }
     }
 
