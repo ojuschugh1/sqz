@@ -46,7 +46,7 @@ Rather than treating all text uniformly (as token-level compression methods do),
 
 - **Test output** → failures only (passing tests stripped)
 - **Git status** → compact change summary
-- **JSON responses** → nulls stripped, bookkeeping fields (`__v`, `etag`, request and correlation ids) dropped, arrays of objects written as lossless TOON tables
+- **JSON responses** → fields that are null or an empty string, array or object stripped, bookkeeping fields (`__v`, `etag`, request and correlation ids) dropped, strings over 500 characters cut, arrays of objects written as lossless TOON tables
 - **Docker** → compact `docker ps` and `docker images` tables; `kubectl get` and `logs` go through the generic pipeline
 - **Build logs** → error-focused summarization
 

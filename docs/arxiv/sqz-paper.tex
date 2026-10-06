@@ -93,7 +93,7 @@ Rather than treating all text uniformly (as token-level compression methods do),
 \begin{itemize}
   \item \textbf{Test output} $\rightarrow$ failures only (passing tests stripped)
   \item \textbf{Git status} $\rightarrow$ compact change summary
-  \item \textbf{JSON responses} $\rightarrow$ nulls stripped, bookkeeping fields (\texttt{\_\_v}, \texttt{etag}, request and correlation ids) dropped, arrays of objects written as lossless TOON tables
+  \item \textbf{JSON responses} $\rightarrow$ fields that are null or an empty string, array or object stripped, bookkeeping fields (\texttt{\_\_v}, \texttt{etag}, request and correlation ids) dropped, strings over 500 characters cut, arrays of objects written as lossless TOON tables
   \item \textbf{Docker} $\rightarrow$ compact \texttt{docker ps} and \texttt{docker images} tables; \texttt{kubectl get} and \texttt{logs} go through the generic pipeline
   \item \textbf{Build logs} $\rightarrow$ error-focused summarization
 \end{itemize}

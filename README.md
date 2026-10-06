@@ -304,7 +304,7 @@ Claude → git status → [sqz hook rewrites] → compressed output
 
 What gets compressed:
 - **Shell output**: per-command formatters (git, cargo, npm/pnpm/yarn/bun, pytest, ruff, mypy, go, docker ps/images, kubectl describe/apply, terraform, gradle, maven, xcodebuild, adb logcat, dotnet, grep/rg, tree, curl, and more)
-- **JSON** — strips nulls, compact encoding, TOON format
+- **JSON**: strips nulls and empty values, cuts strings over 500 characters, compact encoding, TOON format
 - **Logs** — collapses repeated lines
 - **Test output** — shows failures only (state-machine parsers for Rust, Go, Python, JS, JVM)
 
@@ -562,7 +562,7 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 2. **Table compactor** — aligned-column output from tools without a dedicated formatter (`ps aux`, `netstat`, database CLIs) collapses its padding runs to two-space separators. The detector is strict — indented lines, code, YAML, and JSON never match.
 3. **Structural summaries**: the engine has an API that reduces a code file to imports, function signatures and a call graph. The hook and MCP paths do not use it; they serve source in full.
 4. **Dedup cache**: SHA-256 content hash, persistent across sessions. Byte-identical output the model already has = 13-token reference. A line range of a file the model already has in full (`sed -n '40,80p'`, `sqz_read_file` with `offset`/`limit`) = `§ref:HASH:L40-80§`. A re-read after a small edit = only the changed lines, through the sqz MCP tools (the shell hook sends the edited file again). References are only served while the original is still in context (30-minute window, tunable via `SQZ_REF_TTL_SECS`, reset on compaction).
-5. **JSON pipeline**: strip nulls → drop bookkeeping fields (`__v`, `etag`, request and correlation ids) → flatten → collapse arrays → TOON encoding (lossless compact format)
+5. **JSON pipeline**: strip nulls → drop bookkeeping fields (`__v`, `etag`, request and correlation ids) → flatten → collapse arrays → TOON encoding (lossless compact format). Fields whose value is an empty string, array or object are dropped at any depth, and strings over 500 characters are cut to their first 500 characters followed by `...`.
 6. **Safe mode**: stack traces (a trace header followed by its frames), SQL DDL at the start of a line, PEM blocks and credential lines (`key=value` or `key: value` with a secret-looking key) skip the pipeline and pass through unchanged at any size, with only ANSI codes stripped, and are never cached. On the shell hook a per-command formatter still runs first. Its summary is used only when it keeps every line of each paragraph that holds one of them unchanged, so it may summarize the rest of a test run around a trace; otherwise the whole output passes through. Output that only mentions a password, key, trace or migration outside those structures is compressed as usual but is not cached either, so anything a lossy stage drops from it cannot be expanded.
 
 Measured quality, including what each stage drops and what it never touches: [quality benchmark](docs/quality-benchmark.md). For the full technical details, see [docs/](docs/README.md).
