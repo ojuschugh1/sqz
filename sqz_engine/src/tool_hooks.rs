@@ -2871,8 +2871,12 @@ mod tests {
         let block = crate::codex_integration::agents_md_guidance_block("/opt/sqz");
         let agents = write("AGENTS.md", crlf(format!("# Mine\n\n{block}")));
         assert_eq!(crate::codex_integration::agents_md_guidance_state(&agents), SteeringState::Current);
-        write("CLAUDE.md", crlf(crate::claude_md_integration::claude_md_guidance_block("/opt/sqz")));
+        let claude_md = write("CLAUDE.md", crlf(crate::claude_md_integration::claude_md_guidance_block("/opt/sqz")));
         assert_eq!(crate::claude_md_integration::claude_md_guidance_state(dir.path()), SteeringState::Current);
+        assert!(!crate::claude_md_integration::claude_md_block_outdated(dir.path(), "/opt/sqz"));
+        let before = std::fs::read(&claude_md).unwrap();
+        assert!(!crate::claude_md_integration::install_claude_md_guidance(dir.path(), "/opt/sqz").unwrap());
+        assert_eq!(std::fs::read(&claude_md).unwrap(), before);
     }
 
     #[test]

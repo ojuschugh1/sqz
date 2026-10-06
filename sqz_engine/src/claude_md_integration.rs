@@ -186,7 +186,7 @@ fn claude_md_has_sqz_block(content: &str) -> bool {
 pub fn claude_md_block_outdated(project_dir: &Path, sqz_path: &str) -> bool {
     std::fs::read_to_string(claude_md_path(project_dir)).is_ok_and(|content| {
         claude_md_block_range(&content).is_some_and(|(start, end)| {
-            content[start..end] != *claude_md_guidance_block(sqz_path).trim_end_matches('\n')
+            content[start..end].replace("\r\n", "\n") != claude_md_guidance_block(sqz_path).trim_end_matches('\n')
         })
     })
 }
@@ -252,10 +252,10 @@ fn write_claude_md_block(path: &Path, content: &str, sqz_path: &str) -> Result<b
         return Ok(false);
     };
     let block = claude_md_guidance_block(sqz_path);
-    let updated = format!("{}{}{}", &content[..start], block.trim_end_matches('\n'), &content[end..]);
-    if updated == content {
+    if content[start..end].replace("\r\n", "\n") == block.trim_end_matches('\n') {
         return Ok(false);
     }
+    let updated = format!("{}{}{}", &content[..start], block.trim_end_matches('\n'), &content[end..]);
     std::fs::write(path, updated)
         .map_err(|e| SqzError::Other(format!("failed to write {}: {e}", path.display())))?;
     Ok(true)
