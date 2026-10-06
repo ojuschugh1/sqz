@@ -76,13 +76,14 @@ pub fn powershell_rewrite(command: &str, escaped_label: &str) -> String {
 /// Split a trailing `__SQZ_EXIT_<n>__` marker off `input`.
 ///
 /// Returns the input with the marker (and the separator newline the
-/// producer added) removed, plus the parsed status. When no marker is
-/// present the input is returned unchanged with `None`.
+/// producer added) removed, plus the status to exit with. When no marker
+/// is present the input is returned unchanged with `None`.
 ///
 /// The match is deliberately strict: the marker must be the final
-/// non-empty line, consist of nothing but the literal frame and 1–10
-/// digits, and sit at the very end of the stream. A command whose real
-/// output happens to contain the string mid-stream is left alone.
+/// non-empty line, consist of nothing but the literal frame, an optional
+/// `-` and 1 to 10 digits, and sit at the very end of the stream. A
+/// command whose real output happens to contain the string mid-stream is
+/// left alone.
 pub fn strip_exit_marker(input: &str) -> (String, Option<i32>) {
     let (head, code) = strip_exit_marker_bytes(input.as_bytes());
     // `head` is a prefix of `input` that ends before an ASCII newline.
@@ -107,10 +108,11 @@ pub fn strip_exit_marker_bytes(input: &[u8]) -> (&[u8], Option<i32>) {
     let Some(digits) = last_line.strip_prefix(PREFIX).and_then(|r| r.strip_suffix(SUFFIX)) else {
         return (input, None);
     };
-    if digits.is_empty() || digits.len() > 10 || !digits.iter().all(u8::is_ascii_digit) {
+    let unsigned = digits.strip_prefix(b"-").unwrap_or(digits);
+    if unsigned.is_empty() || unsigned.len() > 10 || !unsigned.iter().all(u8::is_ascii_digit) {
         return (input, None);
     }
-    let Some(code) = std::str::from_utf8(digits).ok().and_then(|d| d.parse::<i32>().ok()) else {
+    let Some(code) = std::str::from_utf8(digits).ok().and_then(|d| d.parse::<i64>().ok()) else {
         return (input, None);
     };
 
@@ -121,7 +123,19 @@ pub fn strip_exit_marker_bytes(input: &[u8]) -> (&[u8], Option<i32>) {
         .strip_suffix(b"\r\n")
         .or_else(|| head.strip_suffix(b"\n"))
         .unwrap_or(head);
-    (head, Some(code))
+    (head, Some(exit_status(code)))
+}
+
+/// What a process can exit with for `code`: all 32 bits on Windows, where
+/// PowerShell reports a crash as a negative `$LASTEXITCODE`, and the low
+/// byte on Unix. A failure never comes out as 0.
+fn exit_status(code: i64) -> i32 {
+    let kept = if cfg!(windows) { code as i32 } else { (code & 0xFF) as i32 };
+    if kept == 0 && code != 0 {
+        1
+    } else {
+        kept
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -180,6 +194,9 @@ mod tests {
             "x\n__SQZ_EXIT___\n",
             "x\n__SQZ_EXIT_12a__\n",
             "x\n__SQZ_EXIT_12345678901__\n",
+            "x\n__SQZ_EXIT_-__\n",
+            "x\n__SQZ_EXIT_--5__\n",
+            "x\n__SQZ_EXIT_+5__\n",
             "x\n__SQZ_EXIT_5_\n",
             "x\nSQZ_EXIT_5__\n",
         ] {
@@ -187,6 +204,21 @@ mod tests {
             assert_eq!(out, input, "must not strip: {input:?}");
             assert_eq!(code, None);
         }
+    }
+
+    #[test]
+    fn negative_and_wide_codes_still_fail() {
+        let (out, code) = strip_exit_marker("fatal: crashed\n\n__SQZ_EXIT_-1073741819__\n");
+        assert_eq!(out, "fatal: crashed\n");
+        assert_eq!(code, Some(if cfg!(windows) { -1073741819 } else { 5 }));
+        let (_, code) = strip_exit_marker("x\n__SQZ_EXIT_3221225477__\n");
+        assert_eq!(code, Some(if cfg!(windows) { -1073741819 } else { 5 }));
+        let (_, code) = strip_exit_marker("x\n__SQZ_EXIT_256__\n");
+        assert_eq!(code, Some(if cfg!(windows) { 256 } else { 1 }));
+        assert_eq!(strip_exit_marker("x\n__SQZ_EXIT_4294967296__\n").1, Some(1));
+        assert_eq!(strip_exit_marker("x\n__SQZ_EXIT_-0__\n").1, Some(0));
+        let (_, code) = strip_exit_marker_bytes(b"\xff\n__SQZ_EXIT_-1__\n");
+        assert_eq!(code, Some(if cfg!(windows) { -1 } else { 255 }));
     }
 
     #[test]
