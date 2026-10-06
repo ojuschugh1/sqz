@@ -212,6 +212,9 @@ jobs:
           "
           echo "Publishing sqz-cli@${VERSION} to npm"
 
+      - name: Copy LICENSE into the package
+        run: cp LICENSE npm/LICENSE
+
       - name: Publish
         run: |
           VERSION="${GITHUB_REF_NAME#v}"

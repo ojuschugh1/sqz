@@ -30,6 +30,9 @@ jobs:
           cd npm
           npm version "$VERSION" --no-git-tag-version --allow-same-version
 
+      - name: Copy LICENSE into the package
+        run: cp LICENSE npm/LICENSE
+
       - name: Publish to npm
         run: |
           VERSION="${{ github.event.release.tag_name || github.event.inputs.tag_name }}"
