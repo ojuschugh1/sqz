@@ -1746,6 +1746,15 @@ pub fn claude_settings_have_sqz_hooks(path: &Path) -> bool {
     })
 }
 
+/// Whether uninstall would take sqz's hooks or allow rules out of the settings file at `path`.
+pub fn claude_settings_have_sqz(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(mut root) => root.as_object_mut().is_some_and(|o| strip_sqz_claude_entries(o, true)),
+        Err(_) => text.contains("sqz"),
+    }
+}
+
 /// Whether `~/.claude/settings.json` holds sqz's hooks, which run in every project.
 pub fn claude_user_hooks_installed() -> bool {
     claude_user_settings_path().is_some_and(|p| claude_settings_have_sqz_hooks(&p))

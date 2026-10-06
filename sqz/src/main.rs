@@ -2045,13 +2045,14 @@ fn cmd_uninstall(skip_confirm: bool) {
             continue;
         }
         let full = project_dir.join(&config.config_path);
+        if config.tool_name == "Claude Code" {
+            if sqz_engine::claude_settings_have_sqz(&full) {
+                files_to_remove.push((format!("{} (sqz entries only)", full.display()), true));
+            }
+            continue;
+        }
         if full.exists() {
-            let shown = if config.tool_name == "Claude Code" {
-                format!("{} (sqz entries only)", full.display())
-            } else {
-                full.display().to_string()
-            };
-            files_to_remove.push((shown, true));
+            files_to_remove.push((full.display().to_string(), true));
         }
     }
 
@@ -2073,7 +2074,20 @@ fn cmd_uninstall(skip_confirm: bool) {
     // removed entirely. This replaces the pre-issue-#6 behaviour of
     // wiping the whole file — which would have destroyed user config
     // merged in at `sqz init` time.
-    let opencode_config = sqz_engine::find_opencode_config(&project_dir);
+    let opencode_config = sqz_engine::find_opencode_config(&project_dir).filter(|path| {
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let text = if path.extension().is_some_and(|e| e == "jsonc") {
+            sqz_engine::strip_jsonc_comments(&raw)
+        } else {
+            raw
+        };
+        serde_json::from_str::<serde_json::Value>(&text).is_ok_and(|v| {
+            v.pointer("/mcp/sqz").is_some()
+                || v.get("plugin")
+                    .and_then(|p| p.as_array())
+                    .is_some_and(|a| a.iter().any(|x| x.as_str() == Some("sqz")))
+        })
+    });
     let opencode_config_display = opencode_config
         .as_ref()
         .map(|p| p.display().to_string());
@@ -2102,8 +2116,8 @@ fn cmd_uninstall(skip_confirm: bool) {
     // Codex user-level ~/.codex/config.toml: remove [mcp_servers.sqz]
     // while preserving any other MCP servers the user registered.
     let codex_toml = sqz_engine::codex_config_path();
-    let codex_toml_exists = codex_toml.exists();
-    if codex_toml_exists {
+    let codex_toml_has_sqz = sqz_engine::codex_mcp_registered();
+    if codex_toml_has_sqz {
         files_to_remove.push((
             format!("{} ([mcp_servers.sqz] only)", codex_toml.display()),
             true,
@@ -2146,6 +2160,13 @@ fn cmd_uninstall(skip_confirm: bool) {
     if kiro_legacy.exists() {
         files_to_remove.push((kiro_legacy.display().to_string(), true));
     }
+    if sqz_engine::kiro_integration::user_steering_installed() {
+        files_to_remove.push((sqz_engine::kiro_user_steering_path().display().to_string(), true));
+    }
+    let kiro_user_mcp = sqz_engine::kiro_integration::kiro_user_mcp_path();
+    if std::fs::read_to_string(&kiro_user_mcp).is_ok_and(|s| s.contains("\"sqz\"")) {
+        files_to_remove.push((format!("{} (mcpServers.sqz only)", kiro_user_mcp.display()), true));
+    }
 
     // Claude Code user-level ~/.claude/settings.json: surgically remove
     // sqz's hook entries while preserving the user's permissions, env,
@@ -2154,11 +2175,10 @@ fn cmd_uninstall(skip_confirm: bool) {
     // only, this is a no-op (the file either doesn't exist or has no
     // sqz entries).
     let claude_user_settings = sqz_engine::claude_user_settings_path();
-    let claude_user_settings_exists = claude_user_settings
+    let claude_user_settings_has_sqz = claude_user_settings
         .as_ref()
-        .map(|p| p.exists())
-        .unwrap_or(false);
-    if let (Some(path), true) = (&claude_user_settings, claude_user_settings_exists) {
+        .is_some_and(|p| sqz_engine::claude_settings_have_sqz(p));
+    if let (Some(path), true) = (&claude_user_settings, claude_user_settings_has_sqz) {
         files_to_remove.push((
             format!("{} (sqz hook entries only)", path.display()),
             true,
@@ -2388,7 +2408,7 @@ fn cmd_uninstall(skip_confirm: bool) {
 
     // Surgically remove [mcp_servers.sqz] from ~/.codex/config.toml.
     // Other MCP servers and comments are preserved by toml_edit.
-    if codex_toml_exists {
+    if codex_toml_has_sqz {
         match sqz_engine::remove_codex_mcp_config() {
             Ok(Some((path, true))) => {
                 if path.exists() {
@@ -2491,7 +2511,7 @@ fn cmd_uninstall(skip_confirm: bool) {
     // entries from ~/.claude/settings.json. Keeps everything else the
     // user has configured (permissions, env, statusLine, unrelated
     // hooks). If the file ends up empty after stripping, it's removed.
-    if claude_user_settings_exists {
+    if claude_user_settings_has_sqz {
         match sqz_engine::remove_claude_global_hook() {
             Ok(Some((path, true))) => {
                 if path.exists() {
@@ -2561,7 +2581,7 @@ fn cmd_uninstall(skip_confirm: bool) {
     .into_iter()
     .filter(|p| p.exists())
     .chain(
-        [zed_settings, kiro_mcp, sqz_engine::kiro_integration::kiro_user_mcp_path()]
+        [zed_settings, kiro_mcp, kiro_user_mcp]
             .into_iter()
             .filter(|p| std::fs::read_to_string(p).is_ok_and(|s| s.trim() == "{}")),
     )

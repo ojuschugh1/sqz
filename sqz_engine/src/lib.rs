@@ -157,7 +157,7 @@ pub use tool_hooks::{
     gemini_settings_has_sqz, gemini_settings_needs_update, merge_sqz_gemini_hook,
     remove_sqz_from_gemini_settings, resolve_sqz_binary, claude_settings_have_sqz_hooks,
     claude_user_hooks_installed, remove_claude_project_hooks_only, sqz_hook_binaries,
-    legacy_sqz_hook_files, remove_legacy_sqz_hooks,
+    legacy_sqz_hook_files, remove_legacy_sqz_hooks, claude_settings_have_sqz,
 };
 pub use opencode_plugin::{
     generate_opencode_plugin, install_opencode_plugin, update_opencode_config,

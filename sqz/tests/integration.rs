@@ -1175,6 +1175,36 @@ fn test_doctor_and_uninstall_remove_hooks_an_older_sqz_wrote() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn test_uninstall_lists_only_files_that_hold_sqz_entries() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mine = [
+        (home.path().join(".claude").join("settings.json"), "{\n  \"theme\": \"dark\"\n}\n"),
+        (home.path().join(".codex").join("config.toml"), "model = \"o3\"\n"),
+        (project.path().join("opencode.json"), "{\n  \"theme\": \"x\"\n}\n"),
+        (project.path().join(".claude").join("settings.local.json"), "{\n  \"permissions\": {}\n}\n"),
+    ];
+    for (path, text) in &mine {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(stdout(&o).contains("nothing to uninstall"), "{}", stdout(&o));
+
+    let other = tempfile::tempdir().unwrap();
+    let o = run_sandboxed(home.path(), other.path(), &["init", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = run_sandboxed(home.path(), other.path(), &["uninstall", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = run_sandboxed(home.path(), other.path(), &["uninstall", "--yes"]);
+    assert!(stdout(&o).contains("nothing to uninstall"), "{}", stdout(&o));
+    for (path, text) in &mine {
+        assert_eq!(&std::fs::read_to_string(path).unwrap(), text, "{}", path.display());
+    }
+}
+
+#[test]
 #[cfg(unix)]
 fn test_init_and_uninstall_keep_json_newlines_and_modes() {
     use std::os::unix::fs::PermissionsExt;
