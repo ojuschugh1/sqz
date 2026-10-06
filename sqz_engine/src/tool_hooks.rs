@@ -1618,25 +1618,26 @@ fn sqz_hook_entries(sqz_path: &str) -> [(&'static str, serde_json::Value, &'stat
 /// their project settings kept the pre-PowerShell matcher forever.
 fn merge_sqz_hooks_into_settings(path: &Path, sqz_path: &str) -> Result<bool> {
     // Parse the existing file, or start from an empty object.
-    let content = if path.exists() {
-        std::fs::read_to_string(&path).map_err(|e| {
+    let mut content = String::new();
+    let mut root: serde_json::Value = if path.exists() {
+        content = std::fs::read_to_string(&path).map_err(|e| {
             crate::error::SqzError::Other(format!(
                 "read {}: {e}",
                 path.display()
             ))
-        })?
+        })?;
+        if content.trim().is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str(&content).map_err(|e| {
+                crate::error::SqzError::Other(format!(
+                    "parse {}: {e} — please fix or move the file before re-running sqz init",
+                    path.display()
+                ))
+            })?
+        }
     } else {
-        String::new()
-    };
-    let mut root: serde_json::Value = if content.trim().is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
-    } else {
-        serde_json::from_str(&content).map_err(|e| {
-            crate::error::SqzError::Other(format!(
-                "parse {}: {e} — please fix or move the file before re-running sqz init",
-                path.display()
-            ))
-        })?
     };
 
     // Ensure root is an object (users occasionally have arrays or
