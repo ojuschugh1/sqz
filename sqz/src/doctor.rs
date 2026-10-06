@@ -96,7 +96,7 @@ pub struct Activity {
 }
 
 /// State of the sqz-managed guidance and shell files doctor can repair.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Managed {
     pub kiro_global: SteeringState,
     pub kiro_project: SteeringState,
@@ -112,6 +112,8 @@ pub struct Managed {
     pub claude_stale: bool,
     /// sqz's Claude Code hooks are in both the user-level and the project settings.
     pub claude_duplicate: bool,
+    /// Hook and plugin files that run a sqz binary that does not exist, as `file (binary)`.
+    pub missing_binaries: Vec<String>,
 }
 
 impl Managed {
@@ -198,6 +200,15 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
         problems.push(Problem {
             message: "the Claude Code hook comes from an older sqz install: without the two allow rules for its pipe it leaves commands uncompressed, and the PostToolUse hook is missing".to_string(),
             fix: Some(format!("{FIX_CMD}   (adds Bash(set -o pipefail) and Bash(sqz compress --cmd *) to the allow list)")),
+        });
+    }
+    if !managed.missing_binaries.is_empty() {
+        problems.push(Problem {
+            message: format!(
+                "these sqz hook files run a sqz binary that does not exist, so the hook fails each time: {}",
+                managed.missing_binaries.join(", ")
+            ),
+            fix: Some(format!("{FIX_CMD}   (points them at this sqz binary)")),
         });
     }
     if managed.claude_duplicate {
@@ -650,16 +661,59 @@ fn apply_fixes(store: &sqz_engine::SessionStore, managed: &Managed, project_dir:
             Err(e) => println!("  ERR --fix: could not remove the project's sqz hooks: {e}"),
         }
     }
+    let missing = missing_hook_binaries(project_dir);
     for path in claude_settings_paths(project_dir) {
-        if !sqz_engine::claude_settings_stale(&path) {
+        let stale = sqz_engine::claude_settings_stale(&path);
+        if !stale && !missing.iter().any(|(p, _)| *p == path) {
             continue;
         }
         match sqz_engine::refresh_claude_settings(&path, &fallback) {
-            Ok(_) => println!("  ok  --fix: added the PostToolUse hook and pipe allow rules to {}", path.display()),
+            Ok(_) if stale => println!("  ok  --fix: added the PostToolUse hook and pipe allow rules to {}", path.display()),
+            Ok(_) => println!("  ok  --fix: repointed the sqz hooks in {}", path.display()),
+            Err(e) => println!("  ERR --fix: could not update {}: {e}", path.display()),
+        }
+    }
+    let gemini = project_dir.join(".gemini").join("settings.json");
+    for (path, _) in missing.iter().filter(|(p, _)| !claude_settings_paths(project_dir).contains(p)) {
+        if sqz_engine::resolve_sqz_binary(&fallback).is_none() {
+            println!("  ERR --fix: {fallback} does not exist, so {} was left as it is", path.display());
+            continue;
+        }
+        let result = if *path == gemini {
+            sqz_engine::merge_sqz_gemini_hook(path, &fallback)
+        } else if *path == sqz_engine::copilot_hooks_path() {
+            sqz_engine::install_copilot_hook(&fallback).map(|changed| changed.unwrap_or(false))
+        } else {
+            sqz_engine::install_opencode_plugin(&fallback)
+        };
+        match result {
+            Ok(_) => println!("  ok  --fix: pointed {} at {fallback}", path.display()),
             Err(e) => println!("  ERR --fix: could not update {}: {e}", path.display()),
         }
     }
     Ok(())
+}
+
+/// The hook and plugin files `sqz init` writes that run a sqz binary.
+fn hook_files(project_dir: &Path) -> Vec<PathBuf> {
+    let mut files = claude_settings_paths(project_dir);
+    files.push(project_dir.join(".gemini").join("settings.json"));
+    files.push(sqz_engine::copilot_hooks_path());
+    files.push(sqz_engine::opencode_plugin_path());
+    files
+}
+
+/// Each hook file whose sqz binary does not resolve, with that binary.
+fn missing_hook_binaries(project_dir: &Path) -> Vec<(PathBuf, String)> {
+    hook_files(project_dir)
+        .into_iter()
+        .filter_map(|path| {
+            let bin = sqz_engine::sqz_hook_binaries(&path)
+                .into_iter()
+                .find(|b| sqz_engine::resolve_sqz_binary(b).is_none())?;
+            Some((path, bin))
+        })
+        .collect()
 }
 
 /// The Claude Code settings files `sqz init` writes, user and project.
@@ -687,6 +741,10 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
             && sqz_engine::claude_settings_have_sqz_hooks(
                 &project_dir.join(".claude").join("settings.local.json"),
             ),
+        missing_binaries: missing_hook_binaries(project_dir)
+            .into_iter()
+            .map(|(path, bin)| format!("{} ({bin})", path.display()))
+            .collect(),
     }
 }
 
@@ -730,6 +788,15 @@ pub fn run(fix: bool) -> i32 {
         let managed = collect_managed(&project_dir, &hook);
         if apply_fixes(store, &managed, &project_dir).is_err() {
             return 2;
+        }
+    }
+    let this_sqz = std::env::current_exe().and_then(std::fs::canonicalize).ok();
+    for path in hook_files(&project_dir) {
+        for bin in sqz_engine::sqz_hook_binaries(&path) {
+            let Some(file) = sqz_engine::resolve_sqz_binary(&bin) else { continue };
+            if std::fs::canonicalize(&file).ok() != this_sqz {
+                println!("  --  {} runs {bin}, not this sqz binary", path.display());
+            }
         }
     }
     let managed = collect_managed(&project_dir, &hook);
@@ -867,6 +934,7 @@ mod tests {
             shell_block_stale: false,
             claude_stale: false,
             claude_duplicate: false,
+            missing_binaries: Vec::new(),
         }
     }
 
@@ -1032,6 +1100,16 @@ mod tests {
             ]
         );
         assert!(guidance_readers(&tools[2..], dir.path()).is_empty());
+    }
+
+    #[test]
+    fn hooks_running_a_missing_sqz_are_flagged() {
+        let tools = vec![tool("Copilot CLI", "copilot", Detection::Detected, ConfigScope::Global)];
+        let managed = Managed { missing_binaries: vec!["/h/.copilot/hooks/sqz.json (/usr/bin/sqz)".to_string()], ..clean() };
+        let problems = diagnose(&tools, &active(), &managed);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("sqz.json (/usr/bin/sqz)"), "{}", problems[0].message);
+        assert!(problems[0].fix.as_deref().unwrap().starts_with(FIX_CMD));
     }
 
     #[test]

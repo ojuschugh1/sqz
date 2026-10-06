@@ -1877,6 +1877,54 @@ pub fn resolve_sqz_binary(bin: &str) -> Option<PathBuf> {
     file.is_file().then_some(file)
 }
 
+/// Every command a sqz version has written into a hook file, after the binary.
+const SQZ_HOOK_ARGS: [&str; 9] = [
+    "hook claude",
+    "hook claude-post",
+    "hook precompact",
+    "resume",
+    "hook gemini",
+    "hook copilot",
+    "hook cursor",
+    "hook windsurf",
+    "hook cline",
+];
+
+/// The sqz binaries the hooks in a hook config or OpenCode plugin file run.
+pub fn sqz_hook_binaries(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let mut found = Vec::new();
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(root) => collect_sqz_hook_binaries(&root, &mut found),
+        Err(_) => found.extend(text.lines().find_map(|line| {
+            let literal = line.trim().strip_prefix("const SQZ_PATH = ")?.strip_suffix(';')?;
+            serde_json::from_str::<String>(literal).ok()
+        })),
+    }
+    found
+}
+
+fn collect_sqz_hook_binaries(value: &serde_json::Value, found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, v) in map {
+                let command = v.as_str().filter(|_| matches!(key.as_str(), "command" | "bash" | "powershell"));
+                match command.and_then(|c| SQZ_HOOK_ARGS.iter().find_map(|args| sqz_command_binary(c, args))) {
+                    Some(bin) if !found.iter().any(|b| b == bin) => found.push(bin.to_string()),
+                    Some(_) => {}
+                    None => collect_sqz_hook_binaries(v, found),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                collect_sqz_hook_binaries(v, found);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Whether a hook entry's commands include sqz's `args` command.
 fn hook_entry_runs_sqz(entry: &serde_json::Value, args: &str) -> bool {
     entry
@@ -2020,6 +2068,11 @@ pub fn refresh_claude_settings(path: &Path, fallback_sqz: &str) -> Result<bool> 
     let sqz_path = claude_settings_sqz_path(&root)
         .filter(|p| resolve_sqz_binary(p).is_some())
         .unwrap_or_else(|| fallback_sqz.to_string());
+    if resolve_sqz_binary(&sqz_path).is_none() {
+        return Err(crate::error::SqzError::Other(format!(
+            "{sqz_path} does not exist, so the hooks were left as they are"
+        )));
+    }
     merge_sqz_hooks_into_settings(path, &sqz_path)
 }
 
@@ -3902,6 +3955,34 @@ mod global_install_tests {
         ] {
             assert!(sqz_command_binary(command, args).is_none(), "{command}");
         }
+    }
+
+    #[test]
+    fn hook_binaries_are_read_from_every_hook_file_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(&settings, claude_settings_content("/opt/sqz")).unwrap();
+        assert_eq!(sqz_hook_binaries(&settings), vec!["/opt/sqz"]);
+        let copilot = dir.path().join("sqz.json");
+        std::fs::write(&copilot, copilot_hook_content("C:\\tools\\sqz.exe")).unwrap();
+        assert_eq!(sqz_hook_binaries(&copilot), vec!["C:\\tools\\sqz.exe"]);
+        let plugin = dir.path().join("sqz.ts");
+        std::fs::write(&plugin, crate::opencode_plugin::generate_opencode_plugin("/gone/sqz")).unwrap();
+        assert_eq!(sqz_hook_binaries(&plugin), vec!["/gone/sqz"]);
+        let user = dir.path().join("user.json");
+        std::fs::write(&user, r#"{"hooks":{"PreCompact":[{"hooks":[{"command":"~/bin/save-notes --hook precompact"}]}]}}"#)
+            .unwrap();
+        assert!(sqz_hook_binaries(&user).is_empty());
+    }
+
+    #[test]
+    fn refresh_never_points_a_hook_at_a_missing_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let old = r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/gone/sqz hook claude"}]}]}}"#;
+        std::fs::write(&path, old).unwrap();
+        assert!(refresh_claude_settings(&path, "/also-gone/sqz").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
     }
 
     #[test]

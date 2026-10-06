@@ -1103,6 +1103,43 @@ fn test_doctor_fix_removes_project_claude_hooks_the_user_level_ones_cover() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn test_doctor_fix_repoints_hooks_whose_sqz_binary_is_gone() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let copilot = home.path().join(".copilot").join("hooks").join("sqz.json");
+    std::fs::create_dir_all(copilot.parent().unwrap()).unwrap();
+    let hook = r#"{"version":1,"hooks":{"preToolUse":[{"type":"command","matcher":"bash|powershell","bash":"/gone/sqz hook copilot","powershell":"/gone/sqz hook copilot","timeoutSec":10}]}}"#;
+    std::fs::write(&copilot, hook).unwrap();
+    let plugin = home.path().join(".config").join("opencode").join("plugins").join("sqz.ts");
+    std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+    std::fs::write(&plugin, sqz_engine::generate_opencode_plugin("/gone/sqz")).unwrap();
+    let other = home.path().join("bin").join("sqz");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, "").unwrap();
+    let gemini = project.path().join(".gemini").join("settings.json");
+    std::fs::create_dir_all(gemini.parent().unwrap()).unwrap();
+    let gemini_text = format!(
+        r#"{{"hooks":{{"BeforeTool":[{{"matcher":"run_shell_command","hooks":[{{"type":"command","command":"{} hook gemini"}}]}}]}}}}"#,
+        other.display()
+    );
+    std::fs::write(&gemini, &gemini_text).unwrap();
+
+    let o = run_doctor(home.path(), project.path(), &[]);
+    let out = stdout(&o);
+    assert!(out.contains("run a sqz binary that does not exist"), "{out}");
+    assert!(out.contains("sqz.json (/gone/sqz)") && out.contains("sqz.ts (/gone/sqz)"), "{out}");
+    assert!(out.contains(&format!("runs {}, not this sqz binary", other.display())), "{out}");
+
+    let o = run_doctor(home.path(), project.path(), &["--fix"]);
+    assert!(!stdout(&o).contains("run a sqz binary that does not exist"), "{}", stdout(&o));
+    let bin = sqz_bin().to_string_lossy().replace('\\', "/");
+    assert!(std::fs::read_to_string(&copilot).unwrap().contains(&format!("\"{bin} hook copilot\"")));
+    assert!(std::fs::read_to_string(&plugin).unwrap().contains(&format!("const SQZ_PATH = \"{bin}\";")));
+    assert_eq!(std::fs::read_to_string(&gemini).unwrap(), gemini_text);
+}
+
+#[test]
 #[cfg(unix)]
 fn test_init_and_uninstall_keep_json_newlines_and_modes() {
     use std::os::unix::fs::PermissionsExt;
