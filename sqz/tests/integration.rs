@@ -854,6 +854,7 @@ fn run_doctor(home: &std::path::Path, project: &std::path::Path, args: &[&str]) 
         .expect("failed to run sqz doctor")
 }
 
+#[cfg(not(windows))]
 fn hook_commands(settings: &std::path::Path) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(settings).unwrap()).unwrap();
     let mut out = Vec::new();
@@ -868,6 +869,7 @@ fn hook_commands(settings: &std::path::Path) -> Vec<String> {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn test_user_hooks_that_mention_sqz_words_survive_init_and_uninstall() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -898,7 +900,11 @@ fn test_user_hooks_that_mention_sqz_words_survive_init_and_uninstall() {
     for c in mine {
         assert!(cmds.iter().any(|x| x == c), "{c} missing after init: {cmds:?}");
     }
-    assert!(cmds.iter().any(|x| x.ends_with("sqz hook claude")), "{cmds:?}");
+    let runs_sqz = |c: &String| {
+        c.strip_suffix(" hook claude")
+            .is_some_and(|bin| ["sqz", "sqz.exe"].contains(&bin.rsplit(['/', '\\']).next().unwrap_or(bin)))
+    };
+    assert!(cmds.iter().any(runs_sqz), "{cmds:?}");
 
     let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
     assert!(o.status.success(), "{}", stderr(&o));
@@ -907,6 +913,7 @@ fn test_user_hooks_that_mention_sqz_words_survive_init_and_uninstall() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn test_uninstall_keeps_gemini_settings_sqz_did_not_write() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -972,6 +979,7 @@ fn test_init_merges_the_gemini_hook_into_existing_settings() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn test_uninstall_removes_the_claude_md_block_and_mcp_entry() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -1002,6 +1010,7 @@ fn test_uninstall_removes_the_claude_md_block_and_mcp_entry() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn test_doctor_fix_and_init_refresh_an_old_claude_md_block() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
