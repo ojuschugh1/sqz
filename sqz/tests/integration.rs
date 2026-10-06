@@ -842,6 +842,18 @@ fn run_init_sandboxed(home: &std::path::Path, project: &std::path::Path) -> Outp
     run_sandboxed(home, project, &["init", "--yes"])
 }
 
+/// `sqz doctor` with PATH limited to `home`, so it neither finds nor starts
+/// any client or sqz-mcp the developer has installed.
+fn run_doctor(home: &std::path::Path, project: &std::path::Path, args: &[&str]) -> Output {
+    sandboxed(Command::new(sqz_bin()).arg("doctor").args(args), home)
+        .current_dir(project)
+        .env("SHELL", "/bin/zsh")
+        .env("PATH", home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to run sqz doctor")
+}
+
 fn hook_commands(settings: &std::path::Path) -> Vec<String> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(settings).unwrap()).unwrap();
     let mut out = Vec::new();
@@ -892,6 +904,71 @@ fn test_user_hooks_that_mention_sqz_words_survive_init_and_uninstall() {
     assert!(o.status.success(), "{}", stderr(&o));
     let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(after, user);
+}
+
+#[test]
+fn test_uninstall_keeps_gemini_settings_sqz_did_not_write() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let settings = project.path().join(".gemini").join("settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, "{\n  \"theme\": \"GitHub\"\n}\n").unwrap();
+
+    let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(!stdout(&o).contains(".gemini"), "{}", stdout(&o));
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{\n  \"theme\": \"GitHub\"\n}\n");
+
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "gemini"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(std::fs::read_to_string(&settings).unwrap().contains(" hook gemini"));
+    let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{\n  \"theme\": \"GitHub\"\n}\n");
+
+    std::fs::remove_file(&settings).unwrap();
+    run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "gemini"]);
+    assert!(settings.exists());
+    run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(!settings.exists(), "a settings file holding only sqz's hook goes");
+}
+
+#[test]
+fn test_init_merges_the_gemini_hook_into_existing_settings() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".gemini")).unwrap();
+    let settings = project.path().join(".gemini").join("settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let user = serde_json::json!({
+        "theme": "GitHub",
+        "mcpServers": {"x": {"command": "x-mcp"}},
+        "hooks": {"BeforeTool": [{"matcher": "write_file", "hooks": [{"type": "command", "command": "lint"}]}]}
+    });
+    std::fs::write(&settings, serde_json::to_string_pretty(&user).unwrap()).unwrap();
+
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "gemini"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(v["theme"], "GitHub");
+    assert_eq!(v["mcpServers"], user["mcpServers"]);
+    let before_tool = v["hooks"]["BeforeTool"].as_array().unwrap();
+    assert_eq!(before_tool.len(), 2, "{before_tool:?}");
+    assert_eq!(before_tool[0], user["hooks"]["BeforeTool"][0]);
+    assert_eq!(before_tool[1]["matcher"], "run_shell_command");
+    assert!(before_tool[1]["hooks"][0]["command"].as_str().unwrap().ends_with(" hook gemini"));
+
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "gemini"]);
+    assert!(stdout(&o).contains("Nothing to do"), "{}", stdout(&o));
+    let o = run_doctor(home.path(), project.path(), &[]);
+    assert!(!stdout(&o).contains("Gemini CLI detected, NOT configured"), "{}", stdout(&o));
+
+    let jsonc = "{\n  // my theme\n  \"theme\": \"GitHub\"\n}\n";
+    std::fs::write(&settings, jsonc).unwrap();
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "gemini"]);
+    assert!(stdout(&o).contains("not plain JSON"), "{}", stdout(&o));
+    assert!(stdout(&o).contains("hook gemini"), "{}", stdout(&o));
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), jsonc);
 }
 
 #[test]

@@ -1385,6 +1385,11 @@ fn install_tool_hooks_at(
                     installed.push("Claude Code".to_string());
                 }
             }
+            if config.tool_name == "Gemini CLI"
+                && merge_sqz_gemini_hook(&full_path, sqz_path).unwrap_or(false)
+            {
+                installed.push(config.tool_name.clone());
+            }
             continue;
         }
 
@@ -1997,6 +2002,149 @@ pub fn refresh_claude_settings(path: &Path, fallback_sqz: &str) -> Result<bool> 
         .filter(|p| Path::new(p).exists())
         .unwrap_or_else(|| fallback_sqz.to_string());
     merge_sqz_hooks_into_settings(path, &sqz_path)
+}
+
+// ── Gemini CLI project settings ───────────────────────────────────────────
+
+/// The BeforeTool entry sqz adds to `.gemini/settings.json`.
+fn gemini_hook_entry(sqz_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "matcher": "run_shell_command",
+        "hooks": [{ "type": "command", "command": format!("{sqz_path} hook gemini") }]
+    })
+}
+
+/// The file's text and its settings with sqz's hook merged in, or `None` when nothing changes.
+fn gemini_settings_merged(
+    path: &Path,
+    sqz_path: &str,
+) -> Result<Option<(String, serde_json::Value)>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| crate::error::SqzError::Other(format!("read {}: {e}", path.display())))?;
+    let mut root: serde_json::Value = if text.trim().is_empty() {
+        serde_json::Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(&text).map_err(|e| {
+            crate::error::SqzError::Other(format!("{} is not plain JSON: {e}", path.display()))
+        })?
+    };
+    let root_obj = root.as_object_mut().ok_or_else(|| {
+        crate::error::SqzError::Other(format!("{} is not a JSON object", path.display()))
+    })?;
+    let before = serde_json::to_string(&root_obj).unwrap_or_default();
+    let hooks = root_obj
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let hooks_obj = hooks.as_object_mut().ok_or_else(|| {
+        crate::error::SqzError::Other(format!("{}: `hooks` is not an object", path.display()))
+    })?;
+    upsert_sqz_hook_entry(hooks_obj, "BeforeTool", gemini_hook_entry(sqz_path), "hook gemini");
+    let after = serde_json::to_string(&root_obj).unwrap_or_default();
+    Ok((before != after).then_some((text, root)))
+}
+
+/// Whether `sqz init` would create or change the Gemini CLI settings at `path`.
+pub fn gemini_settings_needs_update(path: &Path, sqz_path: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(true);
+    }
+    Ok(gemini_settings_merged(path, sqz_path)?.is_some())
+}
+
+/// Merge sqz's hook into existing Gemini CLI settings, keeping everything else.
+pub fn merge_sqz_gemini_hook(path: &Path, sqz_path: &str) -> Result<bool> {
+    let Some((text, root)) = gemini_settings_merged(path, sqz_path)? else {
+        return Ok(false);
+    };
+    write_json_config(path, &root, &text)?;
+    Ok(true)
+}
+
+/// Whether the Gemini CLI settings at `path` hold sqz's hook (by its text when not plain JSON).
+pub fn gemini_settings_has_sqz(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(root) => root
+            .pointer("/hooks/BeforeTool")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| a.iter().any(|e| hook_entry_runs_sqz(e, "hook gemini"))),
+        Err(_) => text.contains(" hook gemini"),
+    }
+}
+
+/// Remove sqz's hook from the project's `.gemini/settings.json`, deleting the
+/// file only when nothing else is left in it. Same results as
+/// [`remove_claude_global_hook`].
+pub fn remove_sqz_from_gemini_settings(project_dir: &Path) -> Result<Option<(PathBuf, bool)>> {
+    let path = project_dir.join(".gemini").join("settings.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| crate::error::SqzError::Other(format!("read {}: {e}", path.display())))?;
+    if text.trim().is_empty() {
+        return Ok(Some((path, false)));
+    }
+    let mut root: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        crate::error::SqzError::Other(format!(
+            "{} is not plain JSON ({e}); remove the sqz hook by hand",
+            path.display()
+        ))
+    })?;
+    let Some(root_obj) = root.as_object_mut() else {
+        return Ok(Some((path, false)));
+    };
+    let Some(hooks) = root_obj.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return Ok(Some((path, false)));
+    };
+    let Some(arr) = hooks.get_mut("BeforeTool").and_then(|v| v.as_array_mut()) else {
+        return Ok(Some((path, false)));
+    };
+    if !remove_sqz_hook_commands(arr, "hook gemini") {
+        return Ok(Some((path, false)));
+    }
+    if arr.is_empty() {
+        hooks.remove("BeforeTool");
+        if hooks.is_empty() {
+            root_obj.remove("hooks");
+        }
+    }
+    if root_obj.is_empty() {
+        std::fs::remove_file(&path).map_err(|e| {
+            crate::error::SqzError::Other(format!("remove {}: {e}", path.display()))
+        })?;
+        return Ok(Some((path, true)));
+    }
+    write_json_config(&path, &root, &text)?;
+    Ok(Some((path, true)))
+}
+
+/// Rewrite a JSON config through a temp file, keeping its mode and its final newline.
+fn write_json_config(path: &Path, value: &serde_json::Value, original: &str) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        crate::error::SqzError::Other(format!("path {} has no parent directory", path.display()))
+    })?;
+    let tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
+        crate::error::SqzError::Other(format!("create temp file in {}: {e}", parent.display()))
+    })?;
+    let mut serialized = serde_json::to_string_pretty(value)
+        .map_err(|e| crate::error::SqzError::Other(format!("serialize {}: {e}", path.display())))?;
+    if original.ends_with('\n') {
+        serialized.push('\n');
+    }
+    std::fs::write(tmp.path(), serialized).map_err(|e| {
+        crate::error::SqzError::Other(format!("write to temp file {}: {e}", tmp.path().display()))
+    })?;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(tmp.path(), meta.permissions());
+    }
+    tmp.persist(path).map_err(|e| {
+        crate::error::SqzError::Other(format!(
+            "rename temp file into place at {}: {e}",
+            path.display()
+        ))
+    })?;
+    Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -4219,6 +4367,40 @@ mod ci_hook_tests {
             read_json(&path),
             serde_json::json!({"permissions": {"allow": ["Bash(npm test)"], "deny": ["Bash(rm *)"]}})
         );
+    }
+
+    #[test]
+    fn gemini_merge_and_removal_touch_only_sqz_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".gemini").join("settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mine = serde_json::json!({"matcher": "write_file", "hooks": [{"type": "command", "command": "lint"}]});
+        let settings = serde_json::json!({"theme": "x", "hooks": {"BeforeTool": [mine, gemini_hook_entry("/old/sqz")]}});
+        std::fs::write(&path, settings.to_string()).unwrap();
+
+        assert!(gemini_settings_has_sqz(&path));
+        assert!(gemini_settings_needs_update(&path, "/new/sqz").unwrap());
+        assert!(merge_sqz_gemini_hook(&path, "/new/sqz").unwrap());
+        assert!(!gemini_settings_needs_update(&path, "/new/sqz").unwrap());
+        assert!(!merge_sqz_gemini_hook(&path, "/new/sqz").unwrap());
+        assert_eq!(
+            read_json(&path)["hooks"]["BeforeTool"],
+            serde_json::json!([mine, gemini_hook_entry("/new/sqz")])
+        );
+
+        let (_, changed) = remove_sqz_from_gemini_settings(dir.path()).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(
+            read_json(&path),
+            serde_json::json!({"theme": "x", "hooks": {"BeforeTool": [mine]}})
+        );
+        assert!(!gemini_settings_has_sqz(&path));
+        assert_eq!(remove_sqz_from_gemini_settings(dir.path()).unwrap(), Some((path.clone(), false)));
+
+        std::fs::write(&path, "{\n  // comment\n  \"theme\": \"x\"\n}\n").unwrap();
+        assert!(gemini_settings_needs_update(&path, "/new/sqz").is_err());
+        assert!(!merge_sqz_gemini_hook(&path, "/new/sqz").unwrap_or(false));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\n  // comment\n  \"theme\": \"x\"\n}\n");
     }
 
     #[test]

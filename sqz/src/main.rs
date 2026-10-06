@@ -921,6 +921,31 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             continue;
         }
 
+        if config.tool_name == "Gemini CLI" {
+            let path = project_dir.join(&config.config_path);
+            match sqz_engine::gemini_settings_needs_update(&path, &sqz_path) {
+                Ok(true) => plan.push((
+                    path.display().to_string(),
+                    if path.exists() {
+                        "Gemini CLI hook config (merge sqz entries)".to_string()
+                    } else {
+                        "Gemini CLI hook config".to_string()
+                    },
+                    !path.exists(),
+                )),
+                Ok(false) => {}
+                Err(e) => {
+                    println!("[sqz] note: {e}, so sqz will not edit it.");
+                    println!("      To route Gemini CLI through sqz, add this under \"hooks\" yourself:");
+                    println!(
+                        "      \"BeforeTool\": [{{\"matcher\": \"run_shell_command\", \"hooks\": [{{\"type\": \"command\", \"command\": \"{} hook gemini\"}}]}}]",
+                        sqz_path
+                    );
+                }
+            }
+            continue;
+        }
+
         // Claude Code at global scope: we merge into ~/.claude/settings.json
         // instead of creating a project-level .claude/settings.local.json.
         // Show the real target in the plan so the user can see we're
@@ -1981,6 +2006,13 @@ fn cmd_uninstall(skip_confirm: bool) {
             }
             continue;
         }
+        if config.tool_name == "Gemini CLI" {
+            let path = project_dir.join(&config.config_path);
+            if sqz_engine::gemini_settings_has_sqz(&path) {
+                files_to_remove.push((format!("{} (sqz entries only)", path.display()), true));
+            }
+            continue;
+        }
         let full = project_dir.join(&config.config_path);
         if full.exists() {
             let shown = if config.tool_name == "Claude Code" {
@@ -2191,6 +2223,17 @@ fn cmd_uninstall(skip_confirm: bool) {
             let base = project_dir.join(".clinerules");
             let target = if base.is_dir() { base.join("sqz.md") } else { base };
             remove_rules_file(&target);
+            continue;
+        }
+        if config.tool_name == "Gemini CLI" {
+            match sqz_engine::remove_sqz_from_gemini_settings(&project_dir) {
+                Ok(Some((path, true))) if path.exists() => {
+                    println!("[sqz] ✓ removed sqz entries from {}", path.display())
+                }
+                Ok(Some((path, true))) => println!("[sqz] ✓ removed {}", path.display()),
+                Ok(_) => {}
+                Err(e) => eprintln!("[sqz] ✗ could not clean up Gemini CLI settings: {e}"),
+            }
             continue;
         }
         // Claude Code keeps the user's "don't ask again" permissions in
