@@ -301,7 +301,8 @@ pub fn install_hook_to_file(
 ///
 /// Strategy:
 /// 1. If the file has the end sentinel (new installs with paired markers),
-///    remove everything between start and end sentinels (inclusive).
+///    remove everything between start and end sentinels (inclusive), plus
+///    the blank line `install` added on each side. Every other byte stays.
 /// 2. If no end sentinel exists (old installs before paired markers),
 ///    fall back to removing from the start sentinel to the next blank line.
 ///    This matches the pre-M-2 behavior and won't eat unrelated content.
@@ -315,64 +316,48 @@ pub fn uninstall_hook_from_file(path: &Path, sentinel: &str) -> Result<bool, Hoo
         message: format!("read error: {e}"),
     })?;
 
-    if !content.contains(sentinel) {
+    let Some(marker) = content.find(sentinel) else {
         return Ok(false); // not installed
+    };
+    let mut start = content[..marker].rfind('\n').map_or(0, |i| i + 1);
+    let end_marker = content[start..].find(END_SENTINEL).map(|i| start + i);
+    let has_end_marker = end_marker.is_some();
+    let mut end = match end_marker {
+        Some(i) => content[i..].find('\n').map_or(content.len(), |j| i + j + 1),
+        None => {
+            let mut pos = start;
+            content[start..]
+                .split_inclusive('\n')
+                .find_map(|line| {
+                    pos += line.len();
+                    line.trim().is_empty().then_some(pos)
+                })
+                .unwrap_or(content.len())
+        }
+    };
+    let bytes = content.as_bytes();
+    if start > 0 && bytes[start - 1] == b'\n' && (start == 1 || bytes[start - 2] == b'\n') {
+        start -= 1;
+    }
+    if has_end_marker && bytes.get(end) == Some(&b'\n') {
+        end += 1;
     }
 
-    let end_sentinel = "# sqz — end of auto-installed block";
-    let has_end_marker = content.contains(end_sentinel);
-
-    let mut result = Vec::new();
-    let mut in_hook = false;
-    let mut removed = false;
-
-    for line in content.lines() {
-        if !in_hook && line.contains(sentinel) && !line.contains("end of") {
-            in_hook = true;
-            removed = true;
-            continue;
-        }
-        if in_hook {
-            if has_end_marker {
-                // New install: look for the end sentinel
-                if line.contains(end_sentinel) {
-                    in_hook = false;
-                    continue;
-                }
-            } else {
-                // Old install (no end marker): stop at blank line.
-                // This is the safe fallback — only removes up to the next
-                // blank line, preserving any user content below.
-                if line.trim().is_empty() {
-                    in_hook = false;
-                    continue;
-                }
-            }
-            continue; // skip hook body lines
-        }
-        result.push(line);
+    if !has_end_marker {
+        eprintln!(
+            "[sqz] note: old-format hook in {} (no end marker). \
+             Removed up to the next blank line. Run `sqz init` to \
+             install the new paired-marker format.",
+            path.display()
+        );
     }
+    let output = format!("{}{}", &content[..start], &content[end..]);
+    std::fs::write(path, output).map_err(|e| HookError {
+        path: path.to_owned(),
+        message: format!("write error: {e}"),
+    })?;
 
-    if removed {
-        if !has_end_marker {
-            eprintln!(
-                "[sqz] note: old-format hook in {} (no end marker). \
-                 Removed up to the next blank line. Run `sqz init` to \
-                 install the new paired-marker format.",
-                path.display()
-            );
-        }
-        let mut output = result.join("\n");
-        while output.contains("\n\n\n") {
-            output = output.replace("\n\n\n", "\n\n");
-        }
-        std::fs::write(path, output).map_err(|e| HookError {
-            path: path.to_owned(),
-            message: format!("write error: {e}"),
-        })?;
-    }
-
-    Ok(removed)
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -564,6 +549,38 @@ mod tests {
         // User content directly after end marker must be preserved
         assert!(after.contains("export PATH"), "content after end marker must survive: {after}");
         assert!(after.contains("export EDITOR"), "content before hook must survive: {after}");
+    }
+
+    #[test]
+    fn uninstall_gives_back_every_byte_install_did_not_add() {
+        let dir = TempDir::new().unwrap();
+        let rc = tmp_rc(&dir, ".zshrc");
+        let sentinel = ShellHook::Zsh.sentinel();
+        for (seed, after) in [
+            ("export A=1\n\n\nexport B=2\n", "export A=1\n\n\nexport B=2\n"),
+            ("# mine\n\n", "# mine\n\n"),
+            ("", ""),
+            ("export A=1", "export A=1\n"),
+        ] {
+            fs::write(&rc, seed).unwrap();
+            install_hook_to_file(&rc, ZSH_HOOK, sentinel).unwrap();
+            assert!(uninstall_hook_from_file(&rc, sentinel).unwrap());
+            assert_eq!(fs::read_to_string(&rc).unwrap(), after, "{seed:?}");
+        }
+
+        fs::write(&rc, "export A=1\n\n\nexport B=2\n").unwrap();
+        install_hook_to_file(&rc, ZSH_HOOK, sentinel).unwrap();
+        let mut content = fs::read_to_string(&rc).unwrap();
+        content.push_str("export AFTER=1\n");
+        fs::write(&rc, content).unwrap();
+        assert!(uninstall_hook_from_file(&rc, sentinel).unwrap());
+        assert_eq!(fs::read_to_string(&rc).unwrap(), "export A=1\n\n\nexport B=2\nexport AFTER=1\n");
+
+        let rc = tmp_rc(&dir, ".bashrc");
+        install_hook_to_file(&rc, BASH_HOOK, sentinel).unwrap();
+        assert!(uninstall_hook_from_file(&rc, sentinel).unwrap());
+        assert!(rc.exists(), "uninstall never deletes an rc file");
+        assert_eq!(fs::read_to_string(&rc).unwrap(), "");
     }
 
     #[test]

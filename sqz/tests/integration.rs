@@ -1031,6 +1031,25 @@ fn test_doctor_fix_and_init_refresh_an_old_claude_md_block() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn test_uninstall_keeps_the_rest_of_the_shell_rc_byte_for_byte() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let rc = home.path().join(".zshrc");
+    std::fs::write(&rc, "export A=1\n\n\nexport B=2\n").unwrap();
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "claude"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let mut content = std::fs::read_to_string(&rc).unwrap();
+    assert!(content.contains("sqz_run"));
+    content.push_str("export AFTER=1\n");
+    std::fs::write(&rc, content).unwrap();
+
+    let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(std::fs::read_to_string(&rc).unwrap(), "export A=1\n\n\nexport B=2\nexport AFTER=1\n");
+}
+
+#[test]
 fn test_init_exits_zero() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
