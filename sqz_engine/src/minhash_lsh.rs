@@ -158,20 +158,17 @@ impl MinHashLsh {
     // ── Internal helpers ──────────────────────────────────────────────────
 
     /// Generate character-level n-gram shingles from text.
-    fn shingle(text: &str) -> HashSet<String> {
-        let chars: Vec<char> = text.chars().collect();
-        if chars.len() < SHINGLE_SIZE {
-            let mut set = HashSet::new();
-            if !chars.is_empty() {
-                set.insert(chars.iter().collect());
-            }
-            return set;
+    fn shingle(text: &str) -> HashSet<&str> {
+        let starts = text.char_indices().map(|(i, _)| i);
+        let ends = text.char_indices().map(|(i, _)| i).chain([text.len()]).skip(SHINGLE_SIZE);
+        let mut set = HashSet::new();
+        for (start, end) in starts.zip(ends) {
+            set.insert(&text[start..end]);
         }
-
-        chars
-            .windows(SHINGLE_SIZE)
-            .map(|w| w.iter().collect::<String>())
-            .collect()
+        if set.is_empty() && !text.is_empty() {
+            set.insert(text);
+        }
+        set
     }
 
     /// Hash a shingle with a seed to produce one of the NUM_HASHES hash values.
@@ -298,6 +295,25 @@ mod tests {
         lsh.insert(42, "test document");
         assert!(lsh.get_signature(42).is_some());
         assert!(lsh.get_signature(99).is_none());
+    }
+
+    #[test]
+    fn test_shingles_hold_only_distinct_windows() {
+        let repeated = "ab".repeat(4096);
+        let shingles = MinHashLsh::shingle(&repeated);
+        assert_eq!(shingles.len(), 2);
+        assert!(shingles.capacity() < 64, "capacity {}", shingles.capacity());
+        for text in ["", "a", "日本", "abc", "héllo wörld", "日本語のテキスト、句読点"] {
+            let chars: Vec<char> = text.chars().collect();
+            let mut want: HashSet<String> =
+                chars.windows(SHINGLE_SIZE).map(|w| w.iter().collect()).collect();
+            if want.is_empty() && !text.is_empty() {
+                want.insert(text.to_owned());
+            }
+            let got: HashSet<String> =
+                MinHashLsh::shingle(text).iter().map(|s| s.to_string()).collect();
+            assert_eq!(got, want, "{text:?}");
+        }
     }
 
     // ── Property-based tests ──────────────────────────────────────────────
