@@ -13,7 +13,7 @@ These platforms support MCP natively. Just add the `sqz-mcp` server to their con
 | Continue | `~/.continue/config.json` |
 | Zed | `~/.config/zed/settings.json` |
 
-See [`level1/`](./level1/) for ready-to-paste config snippets.
+See [`level1/continue.json`](./level1/continue.json) and [`level1/zed.json`](./level1/zed.json) for ready-to-paste config snippets.
 
 ### Level 2: `sqz init` + MCP
 
@@ -32,7 +32,7 @@ Platforms: Claude Code, Cursor, Copilot, Windsurf, Gemini CLI, Codex, OpenCode, 
 
 `sqz doctor` shows what was configured for each client and its tier.
 
-See [`level2/`](./level2/) for platform-specific guides.
+See [Claude Code](./level2/claude-code.md), [Cursor](./level2/cursor.md), [Codex CLI](./level2/codex.md) and [all platforms](./level2/all-platforms.md) for platform-specific guides.
 
 ### Level 3 — Native / Deep Integration
 
@@ -46,7 +46,7 @@ Native extensions for VS Code, JetBrains, Chrome (5 web UIs), and API proxy mode
 | Firefox Add-ons | [`level3/firefox-addons.md`](./level3/firefox-addons.md) |
 | API proxy (OpenAI, Anthropic, Google AI) | [`level3/api-proxy.md`](./level3/api-proxy.md) |
 
-See [`level3/`](./level3/) for publishing guides and proxy configuration.
+The guides in the table cover publishing to each store; [`level3/api-proxy.md`](./level3/api-proxy.md) covers proxy configuration.
 
 ---
 

@@ -31,7 +31,7 @@ This distinction is architecturally significant. Pre-injection compression:
 ## 2. System Architecture
 
 <p align="center">
-  <img src="../assets/sqz-architecture.png" alt="sqz system architecture" width="700" />
+  <img src="arxiv/sqz-architecture.png" alt="sqz system architecture" width="700" />
   <br/>
   <em>Figure 1: sqz system architecture — integration surfaces, 8-stage compression pipeline, and supporting subsystems.</em>
 </p>

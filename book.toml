@@ -32,6 +32,5 @@ limit-results = 20
 "/sqz_engine/index.html" = "/sqz/api/sqz_engine/index.html"
 "/sqz_mcp/index.html" = "/sqz/api/sqz_mcp/index.html"
 "/sqz/index.html" = "/sqz/api/sqz/index.html"
-"/sqz_wasm/index.html" = "/sqz/api/sqz_wasm/index.html"
 "/README.html" = "/sqz/index.html"
 "/integrations/README.html" = "/sqz/integrations/index.html"

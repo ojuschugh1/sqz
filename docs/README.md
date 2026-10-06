@@ -44,5 +44,5 @@ What the data shows instead:
 ## Reference
 
 - [Source and issues](https://github.com/ojuschugh1/sqz) on GitHub. If sqz mangles a command you use daily, the best report is the command and its output; it becomes a fixture in the quality benchmark.
-- API docs: [sqz-engine](https://docs.rs/sqz-engine), [sqz-mcp](https://docs.rs/sqz-mcp) on docs.rs, or [this site's copy](api/sqz_engine/index.html).
+- API docs: [sqz-engine](https://docs.rs/sqz-engine), [sqz-mcp](https://docs.rs/sqz-mcp) on docs.rs, or [this site's copy](https://ojuschugh1.github.io/sqz/api/sqz_engine/index.html).
 - [Changelog](https://github.com/ojuschugh1/sqz/blob/main/CHANGELOG.md). Machine-readable index for AI tools: [llms.txt](https://github.com/ojuschugh1/sqz/blob/main/llms.txt).
