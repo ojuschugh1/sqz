@@ -1205,6 +1205,29 @@ fn test_uninstall_lists_only_files_that_hold_sqz_entries() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn test_doctor_fix_backs_up_the_database_the_engine_opened() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let db = home.path().join("db").join("sessions.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let store = sqz_engine::SessionStore::open_or_create(&db).unwrap();
+    store.log_compression(10, 50, &[], "sqz_read_file").unwrap();
+    drop(store);
+
+    let o = sandboxed(Command::new(sqz_bin()).args(["doctor", "--fix"]), home.path())
+        .env("SQZ_DB_PATH", format!("{} ", db.display()))
+        .env("SHELL", "/bin/zsh")
+        .env("PATH", home.path())
+        .current_dir(project.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(stdout(&o).contains(&format!("database backed up to {}.bak-", db.display())), "{}", stdout(&o));
+    assert!(stdout(&o).contains("corrected 1 log row(s)"), "{}", stdout(&o));
+}
+
+#[test]
 #[cfg(unix)]
 fn test_init_and_uninstall_keep_json_newlines_and_modes() {
     use std::os::unix::fs::PermissionsExt;

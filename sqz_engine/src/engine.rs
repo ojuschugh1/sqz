@@ -66,7 +66,7 @@ impl SqzEngine {
     /// prefer absolute paths when hooks may run from subdirectories.
     /// Otherwise `~/.sqz/sessions.db`, falling back to a temp-file path
     /// if the home dir is unavailable.
-    fn default_store_path() -> std::path::PathBuf {
+    pub fn default_store_path() -> std::path::PathBuf {
         if let Some(custom) = Self::store_path_from_env(std::env::var("SQZ_DB_PATH").ok()) {
             return custom;
         }

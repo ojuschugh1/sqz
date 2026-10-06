@@ -287,11 +287,7 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
 /// repair. Resolves the path the same way the engine does (SQZ_DB_PATH,
 /// else ~/.sqz/sessions.db). Returns `Ok(None)` when no file exists.
 fn backup_database(store: &sqz_engine::SessionStore) -> Result<Option<PathBuf>, String> {
-    let db = std::env::var_os("SQZ_DB_PATH")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| home_dir().map(|h| h.join(".sqz").join("sessions.db")));
-    let Some(db) = db else { return Ok(None) };
+    let db = sqz_engine::SqzEngine::default_store_path();
     if !db.exists() {
         return Ok(None);
     }
