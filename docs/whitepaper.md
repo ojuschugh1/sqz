@@ -153,7 +153,7 @@ The first four rows are repeats through the shell hook path (`sqz compress --cmd
 | Same JSON API response again | 165 | 42 | 75% |
 | Repeated log lines | 148 | 39 | 74% |
 | Large JSON array | 259 | 111 | 57% |
-| Git diff | 61 | 54 | 12% |
+| Git diff | 61 | 54 | 11% |
 | Stack trace (safe mode) | 82 | 82 | 0% |
 
 ### 4.3 Prompt Cache Impact

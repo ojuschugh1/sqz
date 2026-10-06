@@ -97,7 +97,7 @@ Single-command compression (measured via `cargo test -p sqz-engine benchmarks`):
 | Repeated log lines | 148 | 39 | **74%** |
 | Large JSON array | 259 | 111 | **57%** |
 | JSON API response | 64 | 53 | **17%** |
-| Git diff | 61 | 54 | **12%** |
+| Git diff | 61 | 54 | **11%** |
 | Prose/docs | 124 | 122 | **2%** |
 | Stack trace (safe mode) | 82 | 82 | **0%** |
 
