@@ -568,6 +568,31 @@ fn test_output_passes_through_when_compression_panics() {
     assert!(stdout(&o).contains("updatedToolOutput"), "{}", stdout(&o));
 }
 
+#[test]
+fn test_claude_post_never_answers_with_a_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    let log: String = (0..300)
+        .map(|i| format!("2026-10-06T12:{:02}:{:02}Z INFO request served path=/health status=200 latency_ms={}\n", i / 60, i % 60, i % 7))
+        .collect();
+    let payload = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "tail -300 server.log | grep INFO"},
+        "tool_response": {"stdout": log, "stderr": "", "interrupted": false, "isImage": false},
+    })
+    .to_string();
+    let first = stdout(&run_with_db(&db, &["hook", "claude-post"], Some(&payload)));
+    let reply: serde_json::Value = serde_json::from_str(&first).expect(&first);
+    let text = reply["hookSpecificOutput"]["updatedToolOutput"]["stdout"].as_str().unwrap();
+    assert!(text.len() < log.len() && !text.contains("§ref:"), "{text}");
+    let second = stdout(&run_with_db(&db, &["hook", "claude-post"], Some(&payload)));
+    assert_eq!(second, first, "the repeat must not be a ref the model never saw");
+    let (_, hint) = text.split_once("[full output: sqz expand ").expect(text);
+    let expanded = run_with_db(&db, &["expand", &hint[..16]], None);
+    assert_eq!(stdout(&expanded), log, "{}", stderr(&expanded));
+}
+
 fn rust_backtrace(indent: &str, thread: &str, frames: usize) -> String {
     let mut s = format!(
         "{indent}thread '{thread}' panicked at src/ledger.rs:41:9:\n{indent}assertion `left == right` failed\n{indent}stack backtrace:\n{indent}   0: rust_begin_unwind\n{indent}             at /rustc/eeb90cda/library/std/src/panicking.rs:665:5\n"

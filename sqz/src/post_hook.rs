@@ -10,7 +10,7 @@ const MIN_SAVING_TOKENS: usize = 16;
 pub fn claude_post_tool_use(input: &str) -> Option<String> {
     let target = sqz_engine::claude_post_tool_use_target(input)?;
     let proxy = CliProxy::new().ok()?;
-    let opts = InterceptOptions::from_env();
+    let opts = InterceptOptions { no_cache: true, ..InterceptOptions::from_env() };
     let mut response = target.response;
     let mut changed = false;
     for field in ["stdout", "stderr"] {
