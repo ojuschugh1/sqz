@@ -510,9 +510,6 @@ impl McpServer {
         use sqz_engine::CacheResult;
         #[cfg(test)]
         tests::maybe_panic();
-        if tokens <= REF_TOKENS {
-            return self.compress_fresh(text, lossless);
-        }
         // The file-read tools (sqz_read_file / sqz_grep / sqz_list_dir) read
         // faithfully (lossless); the general `compress` tool stays aggressive.
         let result = if lossless {
@@ -520,10 +517,11 @@ impl McpServer {
         } else {
             self.engine.compress_with_cache(text)?
         };
+        let tiny = tokens <= REF_TOKENS;
         Ok(match result {
-            CacheResult::Dedup { inline_ref, token_cost } => (inline_ref, token_cost),
-            CacheResult::Delta { delta_text, token_cost, .. } if allow_delta => (delta_text, token_cost),
-            CacheResult::Delta { .. } => return self.compress_fresh(text, lossless),
+            CacheResult::Dedup { inline_ref, token_cost } if !tiny => (inline_ref, token_cost),
+            CacheResult::Delta { delta_text, token_cost, .. } if allow_delta && !tiny => (delta_text, token_cost),
+            CacheResult::Dedup { .. } | CacheResult::Delta { .. } => return self.compress_fresh(text, lossless),
             CacheResult::Fresh { output } => {
                 let truncated = output.stages_applied.iter().any(|s| s == "entropy_truncate");
                 if truncated && !self.engine.never_store(text) {
@@ -3155,6 +3153,29 @@ complexity_threshold = 0.4
             assert!(ok.ends_with("]\nok\n"), "{run}: {ok}");
             let none = grep(&mut server, serde_json::json!({ "pattern": "no such text", "path": root.to_string_lossy() }));
             assert!(none.ends_with("matches=0]\n"), "{run}: {none}");
+        }
+    }
+
+    #[test]
+    fn test_content_smaller_than_a_ref_is_still_stored() {
+        let (mut server, dir) = make_server();
+        let root = project_dir(&dir);
+        std::fs::write(root.join("ok.txt"), "zebra build ok\n").unwrap();
+        let call = |server: &mut McpServer, tool: &str, input: serde_json::Value| {
+            server
+                .handle_tool_call(ToolCallRequest { tool_id: tool.to_string(), input, intent: None })
+                .unwrap()
+                .output
+        };
+
+        read(&mut server, serde_json::json!({ "path": root.join("ok.txt").to_string_lossy() }));
+        call(&mut server, "compress", serde_json::json!({ "text": "zebra crossing seven" }));
+        let recalled = call(&mut server, "sqz_recall", serde_json::json!({ "query": "zebra" }));
+        for text in ["zebra build ok\n", "zebra crossing seven"] {
+            let hash = sqz_engine::CacheManager::sha256_hex(text.as_bytes());
+            assert!(recalled.contains(&format!("ref={}", &hash[..16])), "{recalled}");
+            let expanded = call(&mut server, "expand", serde_json::json!({ "prefix": &hash[..16] }));
+            assert_eq!(expanded, format!("[sqz:expand hash={hash}]\n{text}"));
         }
     }
 
