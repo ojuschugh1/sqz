@@ -600,10 +600,13 @@ fn compute_opencode_change(
         };
 
         if apply && changed {
-            let updated = serde_json::to_string_pretty(&config).map_err(|e| {
+            let mut updated = serde_json::to_string_pretty(&config).map_err(|e| {
                 crate::error::SqzError::Other(format!("failed to serialize config: {e}"))
             })?;
-            std::fs::write(&existing_path, format!("{updated}\n")).map_err(|e| {
+            if content.ends_with('\n') {
+                updated.push('\n');
+            }
+            std::fs::write(&existing_path, updated).map_err(|e| {
                 crate::error::SqzError::Other(format!(
                     "failed to write {}: {e}",
                     existing_path.display()
@@ -731,10 +734,13 @@ pub fn remove_sqz_from_opencode_config(project_dir: &Path) -> Result<Option<(Pat
 
     // Otherwise write back the pruned config. This loses any comments
     // a `.jsonc` had; the caller should surface that fact to the user.
-    let updated = serde_json::to_string_pretty(&config).map_err(|e| {
+    let mut updated = serde_json::to_string_pretty(&config).map_err(|e| {
         crate::error::SqzError::Other(format!("failed to serialize config: {e}"))
     })?;
-    std::fs::write(&path, format!("{updated}\n")).map_err(|e| {
+    if raw.ends_with('\n') {
+        updated.push('\n');
+    }
+    std::fs::write(&path, updated).map_err(|e| {
         crate::error::SqzError::Other(format!(
             "failed to write {}: {e}",
             path.display()
@@ -1613,6 +1619,32 @@ mod tests {
         update_opencode_config(dir.path()).unwrap();
         assert!(dir.path().join("opencode.json").exists());
         assert!(!dir.path().join("opencode.jsonc").exists());
+    }
+
+    /// Rewrites keep the file's final newline, or the lack of one, and its mode.
+    #[test]
+    fn config_rewrites_keep_the_final_newline_and_mode() {
+        for ending in ["", "\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("opencode.json");
+            std::fs::write(&path, format!("{{\"plugin\":[\"other\"]}}{ending}")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+            }
+
+            assert!(update_opencode_config(dir.path()).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap().ends_with('\n'), !ending.is_empty());
+            assert!(remove_sqz_from_opencode_config(dir.path()).unwrap().unwrap().1);
+            assert_eq!(std::fs::read_to_string(&path).unwrap().ends_with('\n'), !ending.is_empty());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o640);
+            }
+        }
     }
 
     /// `find_opencode_config` prefers `.jsonc` when both exist.
