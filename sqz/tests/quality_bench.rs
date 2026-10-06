@@ -5,9 +5,10 @@
 //! the way the shell hook does (`sqz compress --cmd <cmd>` on stdin) and we
 //! measure, per fixture:
 //!
-//! - token reduction (chars/4, the same estimate sqz prints)
-//! - critical-fact recall: facts that survive verbatim in the output the
-//!   agent sees (stdout plus sqz's own stderr lines)
+//! - token reduction (bytes/4 of the input against stdout plus sqz's own
+//!   stderr lines; the `[sqz] N/M tokens` line itself counts cl100k)
+//! - critical-fact recall: facts that survive verbatim in the compressed
+//!   stdout
 //! - noise dropped: lines we expect compression to remove
 //! - verbatim preservation for content that must never be touched
 //! - byte-exact recovery: a second run yields a `§ref:HASH§` and
