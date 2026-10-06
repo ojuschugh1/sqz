@@ -901,15 +901,14 @@ pub fn process_opencode_hook(input: &str) -> Result<String> {
     // prefix. Ensures the rewrite works in PowerShell and cmd.exe on
     // Windows (OpenCode Desktop's default bash-tool shell when $SHELL
     // is unset or set to a Windows shell), not just POSIX shells.
-    let rewritten = format!(
-        "{} 2>&1 | sqz compress --cmd {}",
-        command, escaped_base,
-    );
+    let rewritten = if cfg!(windows) {
+        format!("{} 2>&1 | sqz compress --cmd {}", command, escaped_base)
+    } else {
+        crate::exit_marker::posix_rewrite(command, &escaped_base)
+    };
 
     // Output in the format OpenCode expects (same as Claude Code for CLI path)
     let output = serde_json::json!({
-        "decision": "approve",
-        "reason": "sqz: command output will be compressed for token savings",
         "updatedInput": {
             "command": rewritten
         },
@@ -1056,8 +1055,13 @@ mod tests {
         let input = r#"{"tool":"bash","args":{"command":"git status"}}"#;
         let result = process_opencode_hook(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["decision"].as_str().unwrap(), "approve");
+        // "approve" would skip the permission prompt for the command.
+        assert!(parsed.get("decision").is_none() && parsed.get("reason").is_none(), "{parsed}");
         let cmd = parsed["args"]["command"].as_str().unwrap();
+        assert_eq!(parsed["updatedInput"]["command"].as_str(), Some(cmd));
+        if cfg!(unix) {
+            assert_eq!(cmd, crate::exit_marker::posix_rewrite("git status", "git"));
+        }
         assert!(cmd.contains("sqz compress"), "should pipe through sqz: {cmd}");
         assert!(cmd.contains("git status"), "should preserve original: {cmd}");
         // Issue #10: label is passed via `--cmd NAME` (shell-neutral),
@@ -1908,12 +1912,14 @@ mod tests {
         // with a word that is NOT an env assignment must be what
         // PowerShell will execute. "dotnet build …" is valid in every
         // shell; "SQZ_CMD=… dotnet build …" is not.
-        let first_token = cmd.split_whitespace().next().unwrap_or("");
-        assert_eq!(
-            first_token, "dotnet",
-            "first token of the rewritten command must be the user's \
-             command itself, not an env-var assignment; got: {cmd}"
-        );
+        if cfg!(windows) {
+            let first_token = cmd.split_whitespace().next().unwrap_or("");
+            assert_eq!(
+                first_token, "dotnet",
+                "first token of the rewritten command must be the user's \
+                 command itself, not an env-var assignment; got: {cmd}"
+            );
+        }
     }
 
     /// The plugin's rewrite must carry the command's exit status, or a
