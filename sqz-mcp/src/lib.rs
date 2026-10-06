@@ -1089,6 +1089,8 @@ impl McpServer {
                 }))
             }
 
+            "ping" => JsonRpcResponse::ok(req.id, serde_json::json!({})),
+
             _ => JsonRpcResponse::err(req.id, -32601, format!("method not found: {}", req.method)),
         })
     }
@@ -2094,6 +2096,15 @@ complexity_threshold = 0.4
         assert!(resp.error.is_none(), "tools/call should not error: {:?}", resp.error);
         let result = resp.result.expect("tools/call should have result");
         assert!(result.get("content").is_some());
+    }
+
+    /// Test JSON-RPC ping returns an empty result.
+    #[test]
+    fn test_jsonrpc_ping() {
+        let (mut server, _dir) = make_server();
+        let resp = server.handle_jsonrpc_line_unwrap(r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#);
+        assert!(resp.error.is_none(), "ping should not error: {:?}", resp.error);
+        assert_eq!(resp.result, Some(serde_json::json!({})));
     }
 
     /// Test JSON-RPC unknown method returns -32601.
