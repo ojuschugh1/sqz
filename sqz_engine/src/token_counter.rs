@@ -48,15 +48,95 @@ impl TokenCounter {
     fn count_cl100k(&self, text: &str) -> u32 {
         let bpe = tiktoken_rs::cl100k_base_singleton();
         let lock = bpe.lock();
-        lock.encode_with_special_tokens(text).len() as u32
+        count_in_slices(text, |s| lock.encode_with_special_tokens(s).len())
     }
 
     /// Count tokens using the `o200k_base` encoding (GPT-4o / o1 / o3).
     fn count_o200k(&self, text: &str) -> u32 {
         let bpe = tiktoken_rs::o200k_base_singleton();
         let lock = bpe.lock();
-        lock.encode_with_special_tokens(text).len() as u32
+        count_in_slices(text, |s| lock.encode_with_special_tokens(s).len())
     }
+}
+
+/// Longest single-class run the tokenizer gets in one call: BPE is quadratic in a piece's length.
+const MAX_RUN_BYTES: usize = 2048;
+
+/// Sum of `encode` over slices with no run longer than [`MAX_RUN_BYTES`].
+fn count_in_slices(text: &str, encode: impl Fn(&str) -> usize) -> u32 {
+    let mut total = 0;
+    let mut start = 0;
+    let mut last = ("", 0);
+    for end in run_cuts(text).into_iter().chain([text.len()]) {
+        let slice = &text[start..end];
+        if slice != last.0 {
+            let n = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encode(slice)))
+                .unwrap_or_else(|_| TokenCounter::count_fast(slice) as usize);
+            last = (slice, n);
+        }
+        total += last.1;
+        start = end;
+    }
+    total as u32
+}
+
+/// Offsets that cut every letter, symbol, space and newline run to [`MAX_RUN_BYTES`].
+fn run_cuts(text: &str) -> Vec<usize> {
+    static RUNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
+    if text.len() <= MAX_RUN_BYTES || !may_hold_long_run(text) {
+        return Vec::new();
+    }
+    let runs = RUNS.get_or_init(|| {
+        [r"[\p{L}\p{M}]+", r"[^\s\p{L}\p{N}]+", r"\s+", r"[\r\n/]+"]
+            .iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .collect()
+    });
+    let mut long: Vec<(usize, usize)> = runs
+        .iter()
+        .flat_map(|re| re.find_iter(text))
+        .filter(|m| m.len() > MAX_RUN_BYTES)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+    long.sort_unstable();
+    let mut cuts = Vec::new();
+    let mut i = 0;
+    while i < long.len() {
+        let (mut at, mut end) = long[i];
+        while i + 1 < long.len() && long[i + 1].0 <= end {
+            i += 1;
+            end = end.max(long[i].1);
+        }
+        while end - at > MAX_RUN_BYTES {
+            at = crate::text_boundary::floor_char_boundary(text, at + MAX_RUN_BYTES);
+            cuts.push(at);
+        }
+        i += 1;
+    }
+    cuts
+}
+
+/// Byte scan for a run over [`MAX_RUN_BYTES`]; a non-ASCII byte counts as letter, symbol and space.
+fn may_hold_long_run(text: &str) -> bool {
+    let mut runs = [0usize; 4];
+    for &b in text.as_bytes() {
+        let space = b.is_ascii_whitespace() || b == 0x0b;
+        let letter = b.is_ascii_alphabetic();
+        let wide = !b.is_ascii();
+        let member = [
+            wide || letter,
+            wide || !(space || letter || b.is_ascii_digit()),
+            wide || space,
+            matches!(b, b'\r' | b'\n' | b'/'),
+        ];
+        for (run, member) in runs.iter_mut().zip(member) {
+            *run = if member { *run + 1 } else { 0 };
+            if *run > MAX_RUN_BYTES {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl Default for TokenCounter {
@@ -222,6 +302,70 @@ mod tests {
                 fast
             );
         }
+    }
+
+    fn tiktoken(text: &str) -> (u32, u32) {
+        let cl = tiktoken_rs::cl100k_base_singleton().lock().encode_with_special_tokens(text).len();
+        let o2 = tiktoken_rs::o200k_base_singleton().lock().encode_with_special_tokens(text).len();
+        (cl as u32, o2 as u32)
+    }
+
+    fn both(text: &str) -> (u32, u32) {
+        let tc = TokenCounter::new();
+        (tc.count(text, &ModelFamily::AnthropicClaude), tc.count(text, &ModelFamily::OpenAiGpt))
+    }
+
+    #[test]
+    fn count_is_exact_when_no_run_is_cut() {
+        let at_limit = |unit: &str| unit.repeat(MAX_RUN_BYTES / unit.len());
+        let texts = [
+            "fn main() { println!(\"hi\"); }\n".repeat(500),
+            format!("{}a{}", at_limit("="), at_limit(" ")),
+            format!("{}={}", at_limit("a"), at_limit("\n")),
+            format!("{}a{}", at_limit("─"), at_limit("/")),
+            "日本語のテキスト、句読点で区切る。".repeat(400),
+            "Привет мир строка номер 1\n".repeat(300),
+        ];
+        for text in &texts {
+            let head = crate::text_boundary::truncate_str(text, 40);
+            assert!(run_cuts(text).is_empty(), "{head:?}");
+            assert_eq!(both(text), tiktoken(text), "{head:?}");
+        }
+    }
+
+    #[test]
+    fn count_survives_a_run_of_a_million_characters() {
+        for unit in ["=", " ", "\n", "a", "日", "\u{301}", "=\u{301}", "\n/", "Aa"] {
+            let text = unit.repeat(1_100_000 / unit.chars().count());
+            let (cl, o2) = both(&text);
+            assert!(cl > 0 && o2 > 0 && cl as usize <= text.len() && o2 as usize <= text.len(), "{unit:?}");
+        }
+    }
+
+    #[test]
+    fn count_of_a_cut_run_stays_close() {
+        for unit in ["=", " ", "\n", "a", "ab", "─"] {
+            let text = format!("x {} y\n", unit.repeat(8192 / unit.len()));
+            let (want, got) = (tiktoken(&text), both(&text));
+            for (w, g) in [(want.0, got.0), (want.1, got.1)] {
+                assert!(w.abs_diff(g) <= w / 100 + 4, "{unit:?}: {g} vs {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn count_is_linear_on_long_runs() {
+        let run = |bytes: usize| "abcdefghijklmnopqrstuvwxyz".repeat(bytes / 26);
+        let (small, large) = (run(8 << 10), run(80 << 10));
+        let ratio = crate::text_search::time_ratio(
+            || {
+                std::hint::black_box(both(&small));
+            },
+            || {
+                std::hint::black_box(both(&large));
+            },
+        );
+        assert!(ratio < 25.0, "80 KB took {ratio:.1}x as long as 8 KB");
     }
 
     #[test]

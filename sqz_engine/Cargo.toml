@@ -31,6 +31,7 @@ tree-sitter-bash = "0.21"
 notify = "6"
 tempfile = "3"
 tiktoken-rs = "0.6"
+regex = "1.10"
 aho-corasick = "1.1"
 dirs-next = "2.0"
 
