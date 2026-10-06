@@ -1853,7 +1853,11 @@ fn sqz_command_binary<'a>(command: &'a str, args: &str) -> Option<&'a str> {
     if path.contains(['"', '\'', '$', '`', '\n'])
         || (path == bin
             && (bin.contains([';', '&', '|', '<', '>', '(', ')'])
-                || (bin.contains(char::is_whitespace) && !absolute)))
+                || (bin.contains(char::is_whitespace) && !absolute)
+                || bin
+                    .split_whitespace()
+                    .skip(1)
+                    .any(|w| w.starts_with(['/', '-', '~']) || w.contains('='))))
     {
         return None;
     }
@@ -4071,6 +4075,7 @@ mod global_install_tests {
             ("/usr/local/bin/sqz hook claude-post", "hook claude-post"),
             (r"C:\Users\me\.cargo\bin\sqz.exe hook precompact", "hook precompact"),
             ("C:/Users/Jane Doe/.cargo/bin/sqz.EXE resume", "resume"),
+            (r"C:\Users\Jane Doe\.cargo\bin\sqz.exe hook claude", "hook claude"),
             ("/Users/Jane Doe/bin/sqz resume", "resume"),
             ("~/.cargo/bin/sqz hook claude", "hook claude"),
             ("\"/opt/sqz\" hook claude", "hook claude"),
@@ -4084,6 +4089,10 @@ mod global_install_tests {
             ("~/bin/audit-hook claude", "hook claude"),
             ("echo hi && /usr/bin/sqz hook claude", "hook claude"),
             ("nice -n 5 sqz hook claude", "hook claude"),
+            ("/usr/bin/time /opt/sqz hook claude", "hook claude"),
+            ("/usr/bin/env SQZ_NO_DEDUP=1 /opt/sqz hook claude", "hook claude"),
+            ("/usr/bin/nice -n 5 /opt/sqz hook claude", "hook claude"),
+            ("/usr/bin/time ~/bin/sqz hook claude", "hook claude"),
             ("sqz hook claude --verbose", "hook claude"),
             ("notsqz hook claude", "hook claude"),
             ("sqz hook claude-post", "hook claude"),
@@ -4151,8 +4160,11 @@ mod global_install_tests {
         std::fs::write(&plugin, crate::opencode_plugin::generate_opencode_plugin("/gone/sqz")).unwrap();
         assert_eq!(sqz_hook_binaries(&plugin), vec!["/gone/sqz"]);
         let user = dir.path().join("user.json");
-        std::fs::write(&user, r#"{"hooks":{"PreCompact":[{"hooks":[{"command":"~/bin/save-notes --hook precompact"}]}]}}"#)
-            .unwrap();
+        std::fs::write(
+            &user,
+            r#"{"hooks":{"PreCompact":[{"hooks":[{"command":"~/bin/save-notes --hook precompact"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"command":"/usr/bin/time /opt/sqz hook claude"}]}]}}"#,
+        )
+        .unwrap();
         assert!(sqz_hook_binaries(&user).is_empty());
     }
 
@@ -4192,7 +4204,10 @@ mod global_install_tests {
                     {"matcher": "startup", "hooks": [cmd("echo user-startup")]}
                 ],
                 "PreCompact": [{"hooks": [cmd("~/bin/save-notes --hook precompact")]}],
-                "PreToolUse": [{"matcher": "Bash", "hooks": [cmd("~/bin/audit-hook claude")]}]
+                "PreToolUse": [{"matcher": "Bash", "hooks": [
+                    cmd("~/bin/audit-hook claude"),
+                    cmd("/usr/bin/env SQZ_NO_DEDUP=1 /opt/sqz hook claude")
+                ]}]
             }
         });
         let text = serde_json::to_string_pretty(&user).unwrap();
