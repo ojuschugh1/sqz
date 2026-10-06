@@ -195,7 +195,7 @@ fn already_through_sqz(command: &str) -> bool {
         || command
             .split_whitespace()
             .next()
-            .map_or(false, |first| first == "sqz" || first.ends_with("/sqz"))
+            .map_or(false, |first| sqz_engine::shell_scan::basename(first) == "sqz")
 }
 
 /// Which way sqz could have reached `output` on `client`.
@@ -1173,6 +1173,8 @@ mod tests {
         // Kiro has no rewrite hook at all.
         assert_eq!(classify(Client::KiroIde, &out("execute_bash", "git status")), Reach::Shell);
         assert_eq!(classify(Client::KiroIde, &out("execute_bash", "git diff 2>&1 | sqz compress")), Reach::AlreadySqz);
+        assert_eq!(classify(Client::KiroIde, &out("execute_bash", "C:\\tools\\sqz.EXE gain")), Reach::AlreadySqz);
+        assert_eq!(classify(Client::ClaudeCode, &out("Bash", "C:\\Users\\me\\sqz.exe stats")), Reach::AlreadySqz);
         assert_eq!(classify(Client::KiroIde, &out("readFile", "readFile")), Reach::FileRead);
         assert_eq!(classify(Client::KiroIde, &out("grep_search", "grep_search")), Reach::FileRead);
         assert_eq!(classify(Client::KiroIde, &out("mcp_sqz_sqz_read_file", "x")), Reach::AlreadySqz);

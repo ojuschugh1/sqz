@@ -207,18 +207,23 @@ fn watch_text(cmd: &str) -> bool {
         || cmd.contains("run serve")
 }
 
-fn basename(cmd: &str) -> &str {
-    cmd.rsplit('/').next().unwrap_or(cmd)
+/// A command's name with its directory and any `.exe` suffix removed.
+/// Either path separator counts, and the suffix in any case.
+pub fn basename(cmd: &str) -> &str {
+    let base = cmd.rsplit(['/', '\\']).next().unwrap_or(cmd);
+    match base.len().checked_sub(4) {
+        Some(at) if base.get(at..).is_some_and(|e| e.eq_ignore_ascii_case(".exe")) => &base[..at],
+        _ => base,
+    }
 }
 
 fn is_sqz(base: &str) -> bool {
-    matches!(base.strip_suffix(".exe").unwrap_or(base), "sqz" | "sqz-mcp")
+    matches!(base, "sqz" | "sqz-mcp")
 }
 
 /// Editors, pagers, REPLs, followers and servers: commands whose output has
 /// to reach the agent while they run, or that never end.
 fn long_running(base: &str, args: &[String]) -> bool {
-    let base = base.strip_suffix(".exe").unwrap_or(base);
     let has = |flag: &str| args.iter().any(|a| a == flag);
     let short = |c: char| {
         args.iter()
@@ -1033,9 +1038,22 @@ mod tests {
             "cargo test | /usr/local/bin/sqz compress --cmd cargo",
             "sqz stats",
             "cd x && sqz gain",
+            "\"C:\\Users\\me\\.cargo\\bin\\sqz.exe\" stats",
+            "git log | 'C:\\tools\\sqz.EXE' compress",
+            "/c/Users/me/.cargo/bin/sqz.Exe gain",
         ] {
             skipped(cmd, Skip::AlreadySqz);
         }
+    }
+
+    #[test]
+    fn basenames_on_either_separator() {
+        assert_eq!(basename("C:\\Users\\me\\sqz.exe"), "sqz");
+        assert_eq!(basename("/usr/bin/sqz"), "sqz");
+        assert_eq!(basename("tools\\Cargo.EXE"), "Cargo");
+        assert_eq!(basename("exe"), "exe");
+        assert_eq!(basename("naïve.exe"), "naïve");
+        assert_eq!(basename("éabc"), "éabc");
     }
 
     #[test]
