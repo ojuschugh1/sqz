@@ -291,8 +291,7 @@ fn format_git_log(output: &str) -> Option<String> {
     let mut commits: Vec<String> = Vec::new();
     for line in output.lines() {
         if let Some(hash) = line.strip_prefix("commit ") {
-            let hash = hash.trim();
-            commits.push(hash[..hash.len().min(7)].to_string());
+            commits.push(hash.trim().chars().take(7).collect());
         } else if line.starts_with("Author:") || line.starts_with("Date:") || line.starts_with("Merge:") {
             continue;
         } else if let Some(text) = line.strip_prefix("    ") {
@@ -380,7 +379,7 @@ fn format_git_show(output: &str) -> Option<String> {
         }
         let trimmed = line.trim();
         if let Some(hash) = line.strip_prefix("commit ") {
-            header_lines.push(hash.trim()[..hash.trim().len().min(14)].to_string());
+            header_lines.push(hash.trim().chars().take(14).collect());
         } else if !trimmed.is_empty()
             && !line.starts_with("Author:")
             && !line.starts_with("Date:")
@@ -692,6 +691,14 @@ nothing added to commit but untracked files present (use \"git add\" to track)\n
         assert!(result.contains("    BREAKING CHANGE: config moved"), "body kept: {result}");
         assert!(result.contains("def5678 fix: Bug fix"));
         assert!(!result.contains("Author:"));
+    }
+
+    #[test]
+    fn test_git_log_and_show_cut_hashes_on_characters() {
+        let log = "commit abcdef日本語\nAuthor: A <a@example.com>\nDate:   Mon Oct 5 2026\n\n    fix\n";
+        assert_eq!(format_git_log(log).as_deref(), Some("abcdef日 fix"));
+        let show = "commit 0123456789abc日本\nAuthor: A <a@example.com>\n\n    fix\n";
+        assert_eq!(format_git_show(show).as_deref(), Some("0123456789abc日\nfix"));
     }
 
     #[test]
