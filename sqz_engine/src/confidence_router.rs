@@ -52,6 +52,7 @@ impl ConfidenceRouter {
 
     /// Analyze content and return the recommended compression mode.
     pub fn route(&self, content: &str) -> CompressionMode {
+        let content = &*without_ansi(content);
         if content.len() < 100 {
             return CompressionMode::Default;
         }
@@ -82,6 +83,7 @@ impl ConfidenceRouter {
 
     /// Whether content must stay out of the persistent cache.
     pub fn never_store(&self, content: &str) -> bool {
+        let content = &*without_ansi(content);
         content.len() >= 100 && (self.mentions_high_risk(content) || self.is_high_risk(content))
     }
 
@@ -182,11 +184,12 @@ impl ConfidenceRouter {
 }
 
 pub(crate) fn protected_lines(content: &str) -> Vec<&str> {
-    if content.len() < 100 {
+    if without_ansi(content).len() < 100 {
         return Vec::new();
     }
     let raw: Vec<&str> = content.lines().collect();
-    let lines: Vec<&str> = raw.iter().map(|l| l.trim()).collect();
+    let plain: Vec<std::borrow::Cow<str>> = raw.iter().map(|l| without_ansi(l)).collect();
+    let lines: Vec<&str> = plain.iter().map(|l| l.trim()).collect();
     let mut protected = Vec::new();
     let mut start = 0;
     for end in 0..=lines.len() {
@@ -199,6 +202,14 @@ pub(crate) fn protected_lines(content: &str) -> Vec<&str> {
         start = end + 1;
     }
     protected
+}
+
+fn without_ansi(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains('\x1b') {
+        crate::ansi_strip::strip_ansi(text).into()
+    } else {
+        text.into()
+    }
 }
 
 fn is_risk_line(lines: &[&str], i: usize) -> bool {
@@ -522,6 +533,24 @@ mod tests {
         assert!(protected_lines(&clean).is_empty());
         assert_ne!(router.route(&clean), CompressionMode::Safe);
         assert!(protected_lines("password: hunter2\n").is_empty());
+    }
+
+    #[test]
+    fn colored_content_is_routed_like_plain_content() {
+        let router = ConfidenceRouter::new();
+        let color = |s: &str| s.lines().map(|l| format!("\x1b[31m{l}\x1b[0m\n")).collect::<String>();
+        for plain in [
+            "thread 'main' panicked at src/q.rs:217:31:\ncalled `Option::unwrap()` on a `None` value\nstack backtrace:\n   0: rust_begin_unwind\n   1: app::main\n             at ./src/main.rs:3:5\n",
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id INT);\nALTER TABLE users ADD COLUMN email VARCHAR(255) NOT NULL;\n",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0123456789abcdefghijklmnopqrstuvwxyz\n-----END RSA PRIVATE KEY-----\n",
+            "service: billing\nregion: us-east-1\nGITHUB_TOKEN=ghp_0123456789abcdef\nreplicas: 3\nlog_level: info\npool_size: 10\n",
+        ] {
+            let colored = color(plain);
+            assert_eq!(router.route(plain), CompressionMode::Safe, "{plain}");
+            assert_eq!(router.route(&colored), CompressionMode::Safe, "{plain}");
+            assert!(router.never_store(&colored), "{plain}");
+            assert_eq!(protected_lines(&colored), colored.lines().collect::<Vec<_>>(), "{plain}");
+        }
     }
 
     #[test]
