@@ -102,6 +102,7 @@ pub struct Managed {
     pub kiro_project: SteeringState,
     pub agents_md: SteeringState,
     pub zed_rules: SteeringState,
+    pub claude_md: SteeringState,
     pub cursor_rules: SteeringState,
     pub windsurf_rules: SteeringState,
     pub cline_rules: SteeringState,
@@ -157,7 +158,11 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
             fix: Some(format!("{FIX_CMD}   (removes the project copy; the user-level one covers every workspace)")),
         });
     }
-    for (file, state) in [("AGENTS.md", managed.agents_md), (".rules", managed.zed_rules)] {
+    for (file, state) in [
+        ("AGENTS.md", managed.agents_md),
+        (".rules", managed.zed_rules),
+        ("CLAUDE.md", managed.claude_md),
+    ] {
         if state == SteeringState::Stale {
             problems.push(Problem {
                 message: format!(
@@ -591,6 +596,12 @@ fn apply_fixes(store: &sqz_engine::SessionStore, managed: &Managed, project_dir:
             Err(e) => println!("  ERR --fix: could not refresh {file}: {e}"),
         }
     }
+    if managed.claude_md == SteeringState::Stale {
+        match sqz_engine::refresh_claude_md_guidance(project_dir, &fallback) {
+            Ok(_) => println!("  ok  --fix: replaced the sqz guidance in CLAUDE.md with one current block"),
+            Err(e) => println!("  ERR --fix: could not refresh CLAUDE.md: {e}"),
+        }
+    }
     for (tool, state) in [
         ("Cursor", managed.cursor_rules),
         ("Windsurf", managed.windsurf_rules),
@@ -642,6 +653,7 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
         kiro_project: sqz_engine::kiro_steering_state(&sqz_engine::kiro_steering_path(project_dir), false),
         agents_md: sqz_engine::agents_md_guidance_state(&sqz_engine::agents_md_path(project_dir)),
         zed_rules: sqz_engine::agents_md_guidance_state(&project_dir.join(".rules")),
+        claude_md: sqz_engine::claude_md_guidance_state(project_dir),
         cursor_rules: rules_state(project_dir, "Cursor"),
         windsurf_rules: rules_state(project_dir, "Windsurf"),
         cline_rules: rules_state(project_dir, "Cline"),
@@ -822,6 +834,7 @@ mod tests {
             kiro_project: SteeringState::Missing,
             agents_md: SteeringState::Missing,
             zed_rules: SteeringState::Missing,
+            claude_md: SteeringState::Missing,
             cursor_rules: SteeringState::Missing,
             windsurf_rules: SteeringState::Missing,
             cline_rules: SteeringState::Missing,

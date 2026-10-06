@@ -946,6 +946,17 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
             continue;
         }
 
+        if config.tool_name == "Claude Code"
+            && sqz_engine::claude_md_block_outdated(&project_dir, &sqz_path)
+        {
+            plan.push((
+                sqz_engine::claude_md_path(&project_dir).display().to_string(),
+                "Claude Code guidance (replace the sqz block in CLAUDE.md with the current one)"
+                    .to_string(),
+                false,
+            ));
+        }
+
         // Claude Code at global scope: we merge into ~/.claude/settings.json
         // instead of creating a project-level .claude/settings.local.json.
         // Show the real target in the plan so the user can see we're

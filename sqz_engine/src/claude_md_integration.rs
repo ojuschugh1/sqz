@@ -30,7 +30,8 @@
 //!   * If `CLAUDE.md` doesn't exist → create it with sqz's block.
 //!   * If it exists without the sqz block → append with a blank-line
 //!     separator.
-//!   * If it exists with the sqz block → no-op (idempotent).
+//!   * If it exists with an outdated sqz block → replace the block in
+//!     place; with the current one → no-op (idempotent).
 //!
 //! The block is wrapped in HTML comment sentinels so `uninstall` can
 //! excise it byte-exact.
@@ -38,6 +39,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, SqzError};
+use crate::kiro_integration::SteeringState;
 
 // ── Sentinels (must match `remove_claude_md_guidance` byte-exact) ────────
 
@@ -180,11 +182,84 @@ fn claude_md_has_sqz_block(content: &str) -> bool {
     content.contains(CLAUDE_MD_BEGIN)
 }
 
+/// Whether `sqz init` would replace the sqz block in `CLAUDE.md` for `sqz_path`.
+pub fn claude_md_block_outdated(project_dir: &Path, sqz_path: &str) -> bool {
+    std::fs::read_to_string(claude_md_path(project_dir)).is_ok_and(|content| {
+        claude_md_block_range(&content).is_some_and(|(start, end)| {
+            content[start..end] != *claude_md_guidance_block(sqz_path).trim_end_matches('\n')
+        })
+    })
+}
+
 /// Whether the project's `CLAUDE.md` holds a sqz block uninstall can remove.
 pub fn claude_md_has_guidance(project_dir: &Path) -> bool {
-    std::fs::read_to_string(claude_md_path(project_dir)).is_ok_and(|s| {
-        s.find(CLAUDE_MD_BEGIN).is_some_and(|i| s[i..].contains(CLAUDE_MD_END))
+    std::fs::read_to_string(claude_md_path(project_dir))
+        .is_ok_and(|s| claude_md_block_range(&s).is_some())
+}
+
+/// The byte range of the sqz block in `CLAUDE.md` content, END marker included.
+fn claude_md_block_range(content: &str) -> Option<(usize, usize)> {
+    let start = content.find(CLAUDE_MD_BEGIN)?;
+    let end = start + content[start..].find(CLAUDE_MD_END)? + CLAUDE_MD_END.len();
+    Some((start, end))
+}
+
+/// The sqz binary a block was written for, read back from its `expand` example.
+fn claude_md_block_sqz_path(block: &str) -> Option<&str> {
+    block.lines().find_map(|line| {
+        line.strip_prefix("- Shell: `")?
+            .split_once(" expand a1b2c3d4`")
+            .map(|(path, _)| path)
     })
+}
+
+/// Compare the `CLAUDE.md` block against what this version writes for the same binary.
+pub fn claude_md_guidance_state(project_dir: &Path) -> SteeringState {
+    let Ok(content) = std::fs::read_to_string(claude_md_path(project_dir)) else {
+        return SteeringState::Missing;
+    };
+    let Some((start, end)) = claude_md_block_range(&content) else {
+        return SteeringState::UserAuthored;
+    };
+    let block = &content[start..end];
+    match claude_md_block_sqz_path(block) {
+        Some(p) if block == claude_md_guidance_block(p).trim_end_matches('\n') => {
+            SteeringState::Current
+        }
+        _ => SteeringState::Stale,
+    }
+}
+
+/// Rewrite a stale `CLAUDE.md` block in place, keeping the binary it points
+/// at when that still exists (else `fallback_sqz_path`).
+pub fn refresh_claude_md_guidance(project_dir: &Path, fallback_sqz_path: &str) -> Result<bool> {
+    if claude_md_guidance_state(project_dir) != SteeringState::Stale {
+        return Ok(false);
+    }
+    let path = claude_md_path(project_dir);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| SqzError::Other(format!("failed to read {}: {e}", path.display())))?;
+    let sqz_path = claude_md_block_range(&content)
+        .and_then(|(start, end)| claude_md_block_sqz_path(&content[start..end]))
+        .filter(|p| Path::new(p).is_file())
+        .unwrap_or(fallback_sqz_path)
+        .to_string();
+    write_claude_md_block(&path, &content, &sqz_path)
+}
+
+/// Swap the sqz block in `content` for this version's; the text around it keeps its bytes.
+fn write_claude_md_block(path: &Path, content: &str, sqz_path: &str) -> Result<bool> {
+    let Some((start, end)) = claude_md_block_range(content) else {
+        return Ok(false);
+    };
+    let block = claude_md_guidance_block(sqz_path);
+    let updated = format!("{}{}{}", &content[..start], block.trim_end_matches('\n'), &content[end..]);
+    if updated == content {
+        return Ok(false);
+    }
+    std::fs::write(path, updated)
+        .map_err(|e| SqzError::Other(format!("failed to write {}: {e}", path.display())))?;
+    Ok(true)
 }
 
 /// Install sqz's guidance block into `CLAUDE.md` at `project_dir`.
@@ -192,12 +267,12 @@ pub fn claude_md_has_guidance(project_dir: &Path) -> bool {
 /// If `CLAUDE.md` doesn't exist yet, create it with a minimal preamble
 /// and sqz's block. If it exists, append sqz's block (separated by a
 /// blank line so it renders as a new markdown section). If the block
-/// is already present (detected by the BEGIN sentinel), return
-/// `Ok(false)` without touching the file — `sqz init` stays
-/// idempotent.
+/// is already present (detected by the BEGIN sentinel), it is replaced
+/// in place when it differs from this version's block for `sqz_path`,
+/// and the file is left alone otherwise, so `sqz init` stays idempotent.
 ///
 /// Returns `true` when the file was created or modified, `false` when
-/// sqz's block was already present.
+/// sqz's current block was already present.
 pub fn install_claude_md_guidance(project_dir: &Path, sqz_path: &str) -> Result<bool> {
     let path = claude_md_path(project_dir);
     let block = claude_md_guidance_block(sqz_path);
@@ -207,7 +282,7 @@ pub fn install_claude_md_guidance(project_dir: &Path, sqz_path: &str) -> Result<
             SqzError::Other(format!("failed to read {}: {e}", path.display()))
         })?;
         if claude_md_has_sqz_block(&existing) {
-            return Ok(false);
+            return write_claude_md_block(&path, &existing, sqz_path);
         }
         // Append with a guaranteed blank-line separator so sqz's
         // section doesn't accidentally fuse with a trailing user
@@ -633,6 +708,48 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         remove_claude_md_guidance(dir.path()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{mine}{after}"));
+    }
+
+    fn old_block(sqz: &str) -> String {
+        format!(
+            "{CLAUDE_MD_BEGIN}\n\n## sqz\n\n- Shell: `{sqz} expand a1b2c3d4` (or paste the whole token\n  `{sqz} expand §ref:a1b2c3d4§`).\n- To get uncompressed output for one command: prefix it with\n  `SQZ_NO_DEDUP=1` (e.g. `SQZ_NO_DEDUP=1 git log | sqz compress`).\n\n{CLAUDE_MD_END}"
+        )
+    }
+
+    #[test]
+    fn an_old_block_is_stale_and_refreshed_in_place() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let bin = dir.path().join("sqz");
+        std::fs::write(&bin, "").unwrap();
+        let bin = bin.to_string_lossy().to_string();
+        let (head, tail) = ("# Team\n\nPrefer small diffs.\n\n", "\n\n## After\n\nKeep me.\n");
+        std::fs::write(&path, format!("{head}{}{tail}", old_block(&bin))).unwrap();
+
+        assert_eq!(claude_md_guidance_state(dir.path()), SteeringState::Stale);
+        assert!(refresh_claude_md_guidance(dir.path(), "/fallback/sqz").unwrap());
+        let block = claude_md_guidance_block(&bin);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{head}{}{tail}", block.trim_end_matches('\n'))
+        );
+        assert_eq!(claude_md_guidance_state(dir.path()), SteeringState::Current);
+        assert!(!refresh_claude_md_guidance(dir.path(), "/fallback/sqz").unwrap());
+
+        std::fs::write(&path, format!("{head}{}{tail}", old_block("/gone/sqz"))).unwrap();
+        assert!(refresh_claude_md_guidance(dir.path(), "/fallback/sqz").unwrap());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("`/fallback/sqz expand a1b2c3d4`"));
+
+        assert!(claude_md_block_outdated(dir.path(), "/other/sqz"));
+        assert!(install_claude_md_guidance(dir.path(), "/other/sqz").unwrap());
+        assert!(!claude_md_block_outdated(dir.path(), "/other/sqz"));
+        assert!(!install_claude_md_guidance(dir.path(), "/other/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap().matches(CLAUDE_MD_BEGIN).count(), 1);
+
+        std::fs::write(&path, "# Only mine\n").unwrap();
+        assert_eq!(claude_md_guidance_state(dir.path()), SteeringState::UserAuthored);
+        assert!(!refresh_claude_md_guidance(dir.path(), "/fallback/sqz").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Only mine\n");
     }
 
     #[test]

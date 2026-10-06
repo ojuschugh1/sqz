@@ -1002,6 +1002,35 @@ fn test_uninstall_removes_the_claude_md_block_and_mcp_entry() {
 }
 
 #[test]
+fn test_doctor_fix_and_init_refresh_an_old_claude_md_block() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let claude_md = project.path().join("CLAUDE.md");
+    let old = "<!-- BEGIN sqz-claude-guidance (auto-installed by sqz init; remove this block to disable) -->\n\n## sqz\n\n- Shell: `/gone/sqz expand a1b2c3d4` (or paste the whole token\n- To get uncompressed output for one command: prefix it with\n  `SQZ_NO_DEDUP=1` (e.g. `SQZ_NO_DEDUP=1 git log | sqz compress`).\n\n<!-- END sqz-claude-guidance -->";
+    let (head, tail) = ("# Team\n\nPrefer small diffs.\n\n", "\n\n## After\n\nKeep me.\n");
+    std::fs::write(&claude_md, format!("{head}{old}{tail}")).unwrap();
+
+    let o = run_doctor(home.path(), project.path(), &[]);
+    assert!(stdout(&o).contains("the sqz guidance in CLAUDE.md was written by an older sqz"), "{}", stdout(&o));
+    let o = run_doctor(home.path(), project.path(), &["--fix"]);
+    assert!(stdout(&o).contains("replaced the sqz guidance in CLAUDE.md"), "{}", stdout(&o));
+    assert!(!stdout(&o).contains("CLAUDE.md was written by an older sqz"), "{}", stdout(&o));
+    let current = |content: &str| {
+        let bin = content.split("- Shell: `").nth(1).and_then(|s| s.split(" expand a1b2c3d4`").next()).unwrap();
+        let block = sqz_engine::claude_md_guidance_block(bin);
+        format!("{head}{}{tail}", block.trim_end_matches('\n'))
+    };
+    let fixed = std::fs::read_to_string(&claude_md).unwrap();
+    assert_eq!(fixed, current(&fixed));
+
+    std::fs::write(&claude_md, format!("{head}{old}{tail}")).unwrap();
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "claude"]);
+    assert!(stdout(&o).contains("replace the sqz block in CLAUDE.md"), "{}", stdout(&o));
+    let refreshed = std::fs::read_to_string(&claude_md).unwrap();
+    assert_eq!(refreshed, current(&refreshed));
+}
+
+#[test]
 fn test_init_exits_zero() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
