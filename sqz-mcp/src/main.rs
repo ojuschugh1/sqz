@@ -74,7 +74,11 @@ fn main() {
                 }
             }
             "--help" | "-h" => {
-                eprintln!("Usage: sqz-mcp [--transport stdio|sse] [--port PORT] [--preset-dir DIR]");
+                eprintln!("Usage: sqz-mcp [--transport stdio|sse] [--port PORT] [--preset-dir DIR] [--version]");
+                std::process::exit(0);
+            }
+            "--version" | "-V" => {
+                println!("sqz-mcp {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             _ => {}
