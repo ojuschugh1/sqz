@@ -528,11 +528,10 @@ impl McpServer {
     ///   * Relative paths resolve against CWD (the directory where
     ///     sqz-mcp was launched, which for MCP-over-stdio is typically
     ///     the user's project root).
-    ///   * Absolute paths work but are rejected if they escape the
-    ///     server's home directory OR the user's HOME via `..`.
-    ///     This is a deliberately narrow guard — path-traversal
-    ///     protection for MCP is the host's job, not ours, but a
-    ///     basic sanity check keeps accidents cheap.
+    ///   * Absolute paths and paths through `..` are read as given;
+    ///     there is no traversal guard. Path-traversal protection for
+    ///     MCP is the host's job (its approval of the tool call), not
+    ///     ours.
     ///   * Missing files return a clear error rather than an empty
     ///     string, so the agent can distinguish "file is empty" from
     ///     "file doesn't exist".
