@@ -89,8 +89,8 @@ pub fn plan(command: &str) -> Result<Plan<'_>, Skip> {
                     return Err(Skip::LongRunning);
                 }
             }
-            // A bare assignment sets a shell variable.
-            None if seg.assign && seg.kw == 0 && !seg.subshell => return Err(Skip::StateChange),
+            // A bare assignment sets a shell variable, in a loop or `if` body too.
+            None if seg.assign && !seg.subshell => return Err(Skip::StateChange),
             None => {}
         }
     }
@@ -1139,6 +1139,9 @@ mod tests {
             "ulimit -n 4096 && make",
             "for d in a b; do cd $d; done",
             "kill %1",
+            "for f in a b; do last=$f; done",
+            "if [ -f x ]; then found=1; fi",
+            "while read -r l; do n=$((n + 1)); done < list.txt",
         ] {
             skipped(cmd, Skip::StateChange);
         }

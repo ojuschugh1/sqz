@@ -2293,7 +2293,11 @@ mod tests {
     fn test_copilot_hook_skips_risky_shell_operators() {
         // Copilot keeps one shell per session, so state changes must not
         // move into a subshell.
-        for command in ["source .venv/bin/activate && pytest", "npm run build &"] {
+        for command in [
+            "source .venv/bin/activate && pytest",
+            "npm run build &",
+            "for f in a b; do last=$f; done",
+        ] {
             let input = serde_json::json!({"toolName": "bash", "toolArgs": {"command": command}}).to_string();
             assert_eq!(process_hook_copilot(&input).unwrap(), "{}", "{command}");
         }

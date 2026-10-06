@@ -247,7 +247,14 @@ fn claude_default_mode_needs_the_allow_rules() {
 #[test]
 fn state_changes_are_not_grouped() {
     let (fixture, _, _) = fixture();
-    for command in ["export X=1 && make", "make && cd build", "npm run build &", "tail -f log.txt", "set -e; make"] {
+    for command in [
+        "export X=1 && make",
+        "make && cd build",
+        "npm run build &",
+        "tail -f log.txt",
+        "set -e; make",
+        "for f in a b; do last=$f; done",
+    ] {
         assert_eq!(grouped(command, "zsh", fixture.path()), None, "{command:?}");
     }
 }
