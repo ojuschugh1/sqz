@@ -826,16 +826,72 @@ fn test_toon_output_keeps_text_and_escapes_controls() {
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
-/// Run `sqz init` with HOME, every client config root, the database and the
+/// Run sqz with HOME, every client config root, the database and the
 /// project directory pointed at throwaway dirs, so the test can't touch the
 /// developer's real shell rc, agent configs or this repo.
-fn run_init_sandboxed(home: &std::path::Path, project: &std::path::Path) -> Output {
-    sandboxed(Command::new(sqz_bin()).args(["init", "--yes"]), home)
+fn run_sandboxed(home: &std::path::Path, project: &std::path::Path, args: &[&str]) -> Output {
+    sandboxed(Command::new(sqz_bin()).args(args), home)
         .current_dir(project)
         .env("SHELL", "/bin/zsh")
         .stdin(std::process::Stdio::null())
         .output()
-        .expect("failed to run sqz init")
+        .expect("failed to run sqz")
+}
+
+fn run_init_sandboxed(home: &std::path::Path, project: &std::path::Path) -> Output {
+    run_sandboxed(home, project, &["init", "--yes"])
+}
+
+fn hook_commands(settings: &std::path::Path) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(settings).unwrap()).unwrap();
+    let mut out = Vec::new();
+    for entries in v["hooks"].as_object().into_iter().flat_map(|h| h.values()) {
+        for entry in entries.as_array().into_iter().flatten() {
+            for hook in entry["hooks"].as_array().into_iter().flatten() {
+                out.push(hook["command"].as_str().unwrap_or_default().to_string());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn test_user_hooks_that_mention_sqz_words_survive_init_and_uninstall() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let settings = home.path().join(".claude").join("settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let cmd = |c: &str| serde_json::json!({"type": "command", "command": c});
+    let user = serde_json::json!({
+        "hooks": {
+            "SessionStart": [
+                {"matcher": "resume", "hooks": [cmd("/usr/local/bin/on-resume.sh")]},
+                {"matcher": "startup", "hooks": [cmd("echo user-startup")]}
+            ],
+            "PreCompact": [{"hooks": [cmd("~/bin/save-notes --hook precompact")]}],
+            "PreToolUse": [{"matcher": "Edit", "hooks": [cmd("echo user-pre-edit")]}]
+        }
+    });
+    let text = format!("{}\n", serde_json::to_string_pretty(&user).unwrap());
+    std::fs::write(&settings, &text).unwrap();
+    let mine = ["/usr/local/bin/on-resume.sh", "echo user-startup", "~/bin/save-notes --hook precompact", "echo user-pre-edit"];
+
+    let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), text, "{}", stdout(&o));
+
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--global", "--only", "claude"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let cmds = hook_commands(&settings);
+    for c in mine {
+        assert!(cmds.iter().any(|x| x == c), "{c} missing after init: {cmds:?}");
+    }
+    assert!(cmds.iter().any(|x| x.ends_with("sqz hook claude")), "{cmds:?}");
+
+    let o = run_sandboxed(home.path(), project.path(), &["uninstall", "--yes"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(after, user);
 }
 
 #[test]

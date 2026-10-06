@@ -1755,33 +1755,7 @@ fn remove_sqz_from_claude_settings(path: PathBuf) -> Result<Option<(PathBuf, boo
         return Ok(Some((path, false)));
     };
 
-    let mut changed = remove_claude_allow_rules(root_obj);
-    if let Some(hooks) = root_obj.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-        for (event, _, sentinel) in &sqz_hook_entries("") {
-            if let Some(arr) = hooks.get_mut(*event).and_then(|v| v.as_array_mut()) {
-                let before = arr.len();
-                arr.retain(|entry| !hook_entry_command_contains(entry, sentinel));
-                if arr.len() != before {
-                    changed = true;
-                }
-            }
-        }
-
-        // Drop any now-empty hook event arrays so we don't leave
-        // `"PreToolUse": []` clutter in the user's settings.
-        hooks.retain(|_, v| match v {
-            serde_json::Value::Array(a) => !a.is_empty(),
-            _ => true,
-        });
-
-        // If the whole `hooks` object is now empty, drop it so sqz's
-        // uninstall leaves no trace.
-        let hooks_empty = hooks.is_empty();
-        if hooks_empty {
-            root_obj.remove("hooks");
-            changed = true;
-        }
-    }
+    let changed = strip_sqz_claude_entries(root_obj, true);
 
     if !changed {
         return Ok(Some((path, false)));
@@ -1833,10 +1807,89 @@ fn remove_sqz_from_claude_settings(path: PathBuf) -> Result<Option<(PathBuf, boo
     Ok(Some((path, true)))
 }
 
+/// Remove sqz's hooks, its allow rules with `rules`, and the keys that leaves empty.
+fn strip_sqz_claude_entries(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    rules: bool,
+) -> bool {
+    let mut changed = rules && remove_claude_allow_rules(root);
+    let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return changed;
+    };
+    let mut emptied = false;
+    for (event, _, sentinel) in &sqz_hook_entries("") {
+        let Some(arr) = hooks.get_mut(*event).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        if !remove_sqz_hook_commands(arr, sentinel) {
+            continue;
+        }
+        changed = true;
+        if arr.is_empty() {
+            hooks.remove(*event);
+            emptied = true;
+        }
+    }
+    if emptied && hooks.is_empty() {
+        root.remove("hooks");
+    }
+    changed
+}
+
+/// The sqz binary in `command` when it is `<sqz path> <args>`, as every sqz version wrote it.
+fn sqz_command_binary<'a>(command: &'a str, args: &str) -> Option<&'a str> {
+    let bin = command.strip_suffix(args)?.strip_suffix(' ')?;
+    let absolute = bin.starts_with(['/', '\\']) || bin.as_bytes().get(1) == Some(&b':');
+    if bin.contains(['"', '\'', ';', '&', '|', '<', '>', '$', '`', '(', ')', '\n'])
+        || (bin.contains(char::is_whitespace) && !absolute)
+    {
+        return None;
+    }
+    let name = bin.rsplit(['/', '\\']).next().unwrap_or(bin);
+    let stem = match name.len().checked_sub(4) {
+        Some(i) if name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => &name[..i],
+        _ => name,
+    };
+    (stem == "sqz").then_some(bin)
+}
+
+/// Whether a hook entry's commands include sqz's `args` command.
+fn hook_entry_runs_sqz(entry: &serde_json::Value, args: &str) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .is_some_and(|hooks| hooks.iter().any(|h| hook_runs_sqz(h, args)))
+}
+
+/// Whether one hook command is sqz's `args` command.
+fn hook_runs_sqz(hook: &serde_json::Value, args: &str) -> bool {
+    hook.get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| sqz_command_binary(c, args).is_some())
+}
+
+/// Drop sqz's `args` commands and the entries left without one; true when any went.
+fn remove_sqz_hook_commands(arr: &mut Vec<serde_json::Value>, args: &str) -> bool {
+    let mut removed = false;
+    arr.retain_mut(|entry| {
+        let Some(hooks) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            return true;
+        };
+        let before = hooks.len();
+        hooks.retain(|h| !hook_runs_sqz(h, args));
+        if hooks.len() == before {
+            return true;
+        }
+        removed = true;
+        !hooks.is_empty()
+    });
+    removed
+}
+
 /// Replace (or insert) sqz's hook entry in the array under
-/// `hooks[event_name]`. Entries are matched by the `command` substring
-/// `sentinel` — that way, an upgrade from `sqz hook claude` to a future
-/// renamed command won't accumulate stale entries.
+/// `hooks[event_name]`. Only commands that run sqz with exactly the
+/// arguments `sentinel` count as sqz's (see [`sqz_command_binary`]), so a
+/// user hook that merely mentions `resume` or `hook precompact` stays.
 ///
 /// Idempotent: calling this twice yields the same JSON.
 fn upsert_sqz_hook_entry(
@@ -1860,7 +1913,7 @@ fn upsert_sqz_hook_entry(
     };
 
     // Drop any existing entry whose command matches our sentinel.
-    arr.retain(|entry| !hook_entry_command_contains(entry, sentinel));
+    remove_sqz_hook_commands(arr, sentinel);
 
     arr.push(new_entry);
 }
@@ -1911,7 +1964,7 @@ fn claude_settings_sqz_path(root: &serde_json::Value) -> Option<String> {
     root.pointer("/hooks/PreToolUse")?.as_array()?.iter().find_map(|entry| {
         entry.get("hooks")?.as_array()?.iter().find_map(|h| {
             let command = h.get("command")?.as_str()?;
-            command.strip_suffix(" hook claude").map(str::to_string)
+            sqz_command_binary(command, "hook claude").map(str::to_string)
         })
     })
 }
@@ -1929,7 +1982,7 @@ pub fn claude_settings_stale(path: &Path) -> bool {
     let post_hook = root
         .pointer("/hooks/PostToolUse")
         .and_then(|v| v.as_array())
-        .is_some_and(|a| a.iter().any(|e| hook_entry_command_contains(e, "hook claude-post")));
+        .is_some_and(|a| a.iter().any(|e| hook_entry_runs_sqz(e, "hook claude-post")));
     !post_hook || !claude_rules_installed(&[path.to_path_buf()])
 }
 
@@ -1944,24 +1997,6 @@ pub fn refresh_claude_settings(path: &Path, fallback_sqz: &str) -> Result<bool> 
         .filter(|p| Path::new(p).exists())
         .unwrap_or_else(|| fallback_sqz.to_string());
     merge_sqz_hooks_into_settings(path, &sqz_path)
-}
-
-/// True if any command in a hook entry contains the given substring.
-/// Used to locate sqz's own entries without pinning to an exact command
-/// (so future format changes still upgrade cleanly).
-fn hook_entry_command_contains(entry: &serde_json::Value, needle: &str) -> bool {
-    entry
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .map(|hooks_arr| {
-            hooks_arr.iter().any(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .map(|c| c.contains(needle))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -3671,6 +3706,83 @@ mod global_install_tests {
         let result = remove_claude_global_hook_at(Some(tmp.path())).unwrap().unwrap();
         assert!(result.1);
         assert!(!path.exists(), "sqz-only settings.json should be removed on uninstall");
+    }
+
+    #[test]
+    fn only_commands_that_run_sqz_count_as_sqz_hooks() {
+        for (command, args) in [
+            ("sqz hook claude", "hook claude"),
+            ("/usr/local/bin/sqz hook claude-post", "hook claude-post"),
+            (r"C:\Users\me\.cargo\bin\sqz.exe hook precompact", "hook precompact"),
+            ("C:/Users/Jane Doe/.cargo/bin/sqz.EXE resume", "resume"),
+            ("/Users/Jane Doe/bin/sqz resume", "resume"),
+            ("~/.cargo/bin/sqz hook claude", "hook claude"),
+        ] {
+            assert!(sqz_command_binary(command, args).is_some(), "{command}");
+        }
+        for (command, args) in [
+            ("/usr/local/bin/on-resume.sh", "resume"),
+            ("~/bin/save-notes --hook precompact", "hook precompact"),
+            ("~/bin/audit-hook claude", "hook claude"),
+            ("echo hi && /usr/bin/sqz hook claude", "hook claude"),
+            ("nice -n 5 sqz hook claude", "hook claude"),
+            ("sqz hook claude --verbose", "hook claude"),
+            ("notsqz hook claude", "hook claude"),
+            ("sqz hook claude-post", "hook claude"),
+            ("\"/opt/sqz\" hook claude", "hook claude"),
+        ] {
+            assert!(sqz_command_binary(command, args).is_none(), "{command}");
+        }
+    }
+
+    #[test]
+    fn user_hooks_that_look_like_sqz_ones_are_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let cmd = |c: &str| serde_json::json!({"type": "command", "command": c});
+        let user = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {"matcher": "resume", "hooks": [cmd("/usr/local/bin/on-resume.sh")]},
+                    {"matcher": "startup", "hooks": [cmd("echo user-startup")]}
+                ],
+                "PreCompact": [{"hooks": [cmd("~/bin/save-notes --hook precompact")]}],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [cmd("~/bin/audit-hook claude")]}]
+            }
+        });
+        let text = serde_json::to_string_pretty(&user).unwrap();
+        std::fs::write(&settings, &text).unwrap();
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap()
+        };
+
+        assert_eq!(remove_claude_global_hook_at(Some(tmp.path())).unwrap(), Some((settings.clone(), false)));
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), text);
+
+        assert!(install_claude_global_at("/opt/sqz", Some(tmp.path())).unwrap());
+        assert!(!install_claude_global_at("/opt/sqz", Some(tmp.path())).unwrap());
+        let installed = read();
+        for (event, user_count) in [("SessionStart", 2), ("PreCompact", 1), ("PreToolUse", 1)] {
+            let arr = installed["hooks"][event].as_array().unwrap();
+            assert_eq!(arr.len(), user_count + 1, "{event}: {arr:?}");
+            assert_eq!(arr[..user_count], user["hooks"][event].as_array().unwrap()[..], "{event}");
+        }
+
+        // A user command added to sqz's own entry stays when sqz's goes.
+        let mut shared = installed.clone();
+        shared["hooks"]["PreToolUse"][1]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .push(cmd("echo also-mine"));
+        std::fs::write(&settings, serde_json::to_string_pretty(&shared).unwrap()).unwrap();
+        assert!(remove_claude_global_hook_at(Some(tmp.path())).unwrap().unwrap().1);
+        let mut expected = user.clone();
+        expected["hooks"]["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"matcher": "Bash|PowerShell", "hooks": [cmd("echo also-mine")]}));
+        assert_eq!(read(), expected);
     }
 
     #[test]
