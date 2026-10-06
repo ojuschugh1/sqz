@@ -144,11 +144,6 @@ const CASES: &[&str] = &[
     "sh -c 'exit 7'",
     "ls ${X:?not set}",
     "for f in *.nomatchxyz; do echo $f; done",
-    "ls ${X:?not set}; echo next",
-    "ls ${X:?not set} || echo next",
-    "ls $((1/0)); echo next",
-    "ls =nosuchcmdxyz; echo next",
-    "ls *.nomatchxyz; echo next",
 ];
 
 /// Lists only the ungrouped form takes: builtins that must keep running
@@ -162,6 +157,14 @@ const FLAT_CASES: &[&str] = &[
     "grep beta notes.txt 2>/dev/null; grep missing notes.txt",
     "ls sub > listing.txt && cat listing.txt",
     "sh -c 'echo to-stderr >&2' 2>/dev/null",
+];
+
+const STOP_CASES: &[&str] = &[
+    "ls ${X:?not set}; echo next",
+    "ls ${X:?not set} || echo next",
+    "ls $((1/0)); echo next",
+    "ls =nosuchcmdxyz; echo next",
+    "ls *.nomatchxyz; echo next",
 ];
 
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -205,7 +208,7 @@ fn assert_same(shell: &str, command: &str, rewritten: &str, dir: &Path, home: &P
 fn rewrites_behave_like_the_original() {
     let (fixture, dir, home) = fixture();
     for shell in shells() {
-        for command in CASES {
+        for command in CASES.iter().chain(STOP_CASES) {
             let rewritten = grouped(command, shell, fixture.path())
                 .unwrap_or_else(|| panic!("not rewritten: {command:?}"));
             assert_same(shell, command, &rewritten, &dir, &home);
@@ -221,6 +224,11 @@ fn claude_rewrites_behave_like_the_original() {
             let rewritten = claude(command, "bypassPermissions", shell, fixture.path())
                 .unwrap_or_else(|| panic!("not rewritten: {command:?}"));
             assert_same(shell, command, &rewritten, &dir, &home);
+        }
+        for command in STOP_CASES.iter().chain(&["ls $((1/0))\necho next"]) {
+            if let Some(rewritten) = claude(command, "bypassPermissions", shell, fixture.path()) {
+                assert_same(shell, command, &rewritten, &dir, &home);
+            }
         }
     }
 }

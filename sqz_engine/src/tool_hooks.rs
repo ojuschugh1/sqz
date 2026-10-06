@@ -2035,7 +2035,8 @@ fn claude_rewrite(
         }
         return Some(crate::exit_marker::powershell_rewrite(command, &shell_escape(command)));
     }
-    if let Some(cmds) = crate::shell_scan::flat_for(command, shell) {
+    if crate::shell_scan::flat(command).is_some() {
+        let cmds = crate::shell_scan::flat_for(command, shell)?;
         return (bypass || claude_rules_installed(settings))
             .then(|| crate::exit_marker::posix_flat_rewrite(command, &cmds));
     }
@@ -2413,11 +2414,12 @@ mod tests {
         }
         assert_eq!(claude_default_in("ls *.rs; echo next", &rules, Shell::Zsh), None);
         assert!(claude_default_in("ls *.rs; echo next", &rules, Shell::Bash).is_some());
-        // Bypass mode falls back to the grouped form, which stops with the shell.
         let parsed = serde_json::json!({"permission_mode": "bypassPermissions"});
-        let command = "ls ${X:?unset}; echo next";
-        let cmd = claude_rewrite(&parsed, command, false, &[], Shell::Bash).unwrap();
-        assert!(cmd.starts_with("{ ( ls ${X:?unset}; echo next\n); printf"), "{cmd}");
+        for shell in [Shell::Bash, Shell::Zsh] {
+            for command in ["ls ${X:?unset}; echo next", "ls $((1/0))\necho next"] {
+                assert_eq!(claude_rewrite(&parsed, command, false, &[], shell), None, "{command:?}");
+            }
+        }
     }
 
     #[test]
