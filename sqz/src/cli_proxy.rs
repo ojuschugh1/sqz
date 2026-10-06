@@ -327,12 +327,13 @@ impl CliProxy {
                     }
                 }
                 self.l1_cache.borrow_mut().insert(fast_hash);
-                self.log_compression(cmd, tokens_original, tokens_compressed);
                 let annotated = self.apply_context_refs(&formatted);
                 let safe = annotated != formatted
                     && never_store
                     && self.engine.route_compression_mode(output) == sqz_engine::CompressionMode::Safe;
-                return if safe { formatted } else { annotated };
+                let shown = if safe { formatted } else { annotated };
+                self.log_compression(cmd, tokens_original, self.engine.count_tokens(&shown));
+                return shown;
             }
         }
 
@@ -340,7 +341,6 @@ impl CliProxy {
         match self.compress_output(cmd, output) {
             Ok(compressed) => {
                 let tokens_original = compressed.tokens_original;
-                let tokens_compressed = compressed.tokens_compressed;
                 let truncated = compressed
                     .stages_applied
                     .iter()
@@ -421,8 +421,9 @@ impl CliProxy {
                     return if safe { output.to_owned() } else { self.apply_context_refs(output) };
                 }
 
-                self.log_compression(cmd, tokens_original, tokens_final.min(tokens_compressed));
-                if safe { abbreviated } else { self.apply_context_refs(&abbreviated) }
+                let shown = if safe { abbreviated } else { self.apply_context_refs(&abbreviated) };
+                self.log_compression(cmd, tokens_original, self.engine.count_tokens(&shown));
+                shown
             }
             Err(e) => {
                 eprintln!("[sqz] fallback: compression error for command '{cmd}': {e}");
@@ -872,6 +873,20 @@ mod tests {
         assert!(stats.avg_rerun_gap_secs < 120.0);
         let top = store.regret_by_command(5).unwrap();
         assert_eq!(top[0].0, "git log");
+    }
+
+    #[test]
+    fn stats_count_the_tokens_that_were_printed() {
+        let (proxy, _dir) = isolated_proxy();
+        let log: String = (0..300)
+            .map(|i| format!("2026-10-06T12:{:02}:{:02}Z INFO request served path=/health status=200 latency_ms={}\n", i / 60, i % 60, i % 7))
+            .collect();
+        let opts = InterceptOptions { no_cache: false, abbreviate: false };
+        let result = proxy.intercept_output_with_options("tail -300 server.log", &log, opts);
+        assert!(result.contains("[full output: sqz expand "), "{result}");
+        let stats = proxy.engine.session_store().compression_stats().unwrap();
+        assert_eq!(stats.total_compressions, 1);
+        assert_eq!(stats.total_tokens_out, u64::from(proxy.engine.count_tokens(&result)));
     }
 
     #[test]
