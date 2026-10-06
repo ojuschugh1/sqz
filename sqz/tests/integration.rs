@@ -1228,6 +1228,38 @@ fn test_doctor_fix_backs_up_the_database_the_engine_opened() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn test_uninstall_and_reset_need_an_answer_when_stdin_is_not_a_terminal() {
+    use std::io::Write;
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "claude"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let rc = home.path().join(".zshrc");
+    let installed = std::fs::read_to_string(&rc).unwrap();
+
+    for cmd in ["uninstall", "reset"] {
+        let o = run_sandboxed(home.path(), project.path(), &[cmd]);
+        assert!(!o.status.success(), "{cmd}: {}", stdout(&o));
+        assert!(stderr(&o).contains("--yes"), "{cmd}: {}", stderr(&o));
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), installed, "{cmd}");
+    }
+
+    let mut child = sandboxed(Command::new(sqz_bin()).arg("uninstall"), home.path())
+        .current_dir(project.path())
+        .env("SHELL", "/bin/zsh")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"y\n").unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(!std::fs::read_to_string(&rc).unwrap().contains("sqz_run"));
+}
+
+#[test]
 #[cfg(unix)]
 fn test_init_and_uninstall_keep_json_newlines_and_modes() {
     use std::os::unix::fs::PermissionsExt;

@@ -1954,7 +1954,7 @@ fn cmd_proxy(port: u16) {
 
 /// `sqz uninstall` — remove sqz shell hooks and AI tool configs.
 fn cmd_uninstall(skip_confirm: bool) {
-    use std::io::Write;
+    use std::io::{IsTerminal, Write};
 
     let hook = ShellHook::detect();
     println!("[sqz] detected shell: {:?}", hook);
@@ -2227,6 +2227,10 @@ fn cmd_uninstall(skip_confirm: bool) {
             std::process::exit(1);
         }
         let answer = answer.trim().to_lowercase();
+        if answer.is_empty() && !std::io::stdin().is_terminal() {
+            eprintln!("\n[sqz] no answer and stdin is not a terminal, so nothing was removed. Pass --yes to uninstall without asking.");
+            std::process::exit(1);
+        }
         if !answer.is_empty() && answer != "y" && answer != "yes" {
             println!("[sqz] aborted.");
             return;
@@ -3421,7 +3425,7 @@ fn cmd_compact() {
 /// start fresh — switching models, wiping a project, or debugging
 /// stale `§ref:HASH§` tokens that confuse the agent.
 fn cmd_reset(cache_only: bool, stats_only: bool, project: Option<String>, skip_confirm: bool) {
-    use std::io::Write;
+    use std::io::{IsTerminal, Write};
 
     let engine = require_engine();
     let store = engine.session_store();
@@ -3465,6 +3469,10 @@ fn cmd_reset(cache_only: bool, stats_only: bool, project: Option<String>, skip_c
             std::process::exit(1);
         }
         let answer = answer.trim().to_lowercase();
+        if answer.is_empty() && !std::io::stdin().is_terminal() {
+            eprintln!("\n[sqz] no answer and stdin is not a terminal, so nothing was cleared. Pass --yes to reset without asking.");
+            std::process::exit(1);
+        }
         if !answer.is_empty() && answer != "y" && answer != "yes" {
             println!("[sqz] aborted.");
             return;
