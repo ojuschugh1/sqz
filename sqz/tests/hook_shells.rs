@@ -10,10 +10,9 @@ fn sqz() -> &'static str {
     env!("CARGO_BIN_EXE_sqz")
 }
 
-/// Run `sqz hook <tool>` on `payload` for a user whose shell is `shell`,
-/// with Claude Code's settings pointed at `config` (or an empty
-/// directory), returning the rewritten command.
-fn hook(tool: &str, payload: serde_json::Value, shell: &str, config: &Path) -> Option<String> {
+/// Run `sqz hook <tool>` on `input` for a user whose shell is `shell`, with
+/// Claude Code's settings pointed at `config` (or an empty directory).
+fn run_hook(tool: &str, input: &str, shell: &str, config: &Path) -> std::process::Output {
     let mut child = Command::new(sqz())
         .args(["hook", tool])
         .env("SHELL", shell)
@@ -21,10 +20,16 @@ fn hook(tool: &str, payload: serde_json::Value, shell: &str, config: &Path) -> O
         .env("CLAUDE_PROJECT_DIR", config)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
-    let out = child.wait_with_output().unwrap();
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// [`run_hook`] on `payload`, returning the rewritten command.
+fn hook(tool: &str, payload: serde_json::Value, shell: &str, config: &Path) -> Option<String> {
+    let out = run_hook(tool, &payload.to_string(), shell, config);
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     parsed
         .pointer("/hookSpecificOutput/updatedInput/command")
@@ -256,5 +261,23 @@ fn state_changes_are_not_grouped() {
         "for f in a b; do last=$f; done",
     ] {
         assert_eq!(grouped(command, "zsh", fixture.path()), None, "{command:?}");
+    }
+}
+
+/// Cursor reads any answer as a permission decision, so the hook fails
+/// quietly and the call goes through Cursor's own approval.
+#[test]
+fn cursor_hook_leaves_the_call_to_cursor() {
+    let (fixture, _, _) = fixture();
+    for input in [
+        r#"{"hook_event_name":"beforeShellExecution","command":"git status","cwd":"/p"}"#,
+        r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"git status"}}"#,
+        r#"{"tool_name":"Read","tool_input":{"file_path":"a.txt"}}"#,
+        "not json",
+    ] {
+        let out = run_hook("cursor", input, "zsh", fixture.path());
+        assert_eq!(out.status.code(), Some(1), "{input}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{input}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr).lines().count(), 1, "{input}");
     }
 }

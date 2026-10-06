@@ -3574,6 +3574,9 @@ fn cmd_hook(tool: &str) {
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
         eprintln!("[sqz] hook: stdin read error: {e}");
+        if tool == "cursor" {
+            std::process::exit(1);
+        }
         // On error, output empty JSON to let the tool proceed unmodified
         println!("{{}}");
         return;
@@ -3625,6 +3628,11 @@ fn cmd_hook(tool: &str) {
 
     match result {
         Ok(output) => print!("{output}"),
+        // Cursor takes any output as a decision; failing leaves its own approval.
+        Err(e) if tool == "cursor" => {
+            eprintln!("[sqz] hook cursor: {e}");
+            std::process::exit(1);
+        }
         Err(e) => {
             eprintln!("[sqz] hook: processing error: {e}");
             // On error, pass through the original input unchanged

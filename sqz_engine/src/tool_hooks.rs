@@ -17,13 +17,11 @@
 /// - Codex: only supports deny in PreToolUse; updatedInput is parsed but ignored
 /// - Windsurf: no documented hook API; uses .windsurfrules prompt-level guidance
 /// - Cline: PreToolUse cannot rewrite commands; uses .clinerules prompt-level guidance
-/// - Cursor: beforeShellExecution hook can allow/deny/ask only; the response
-///   has no documented field for rewriting the command. Uses .cursor/rules/sqz.mdc
-///   prompt-level guidance instead. The `sqz hook cursor` subcommand remains
-///   available and well-formed for users who configure hooks manually, but
-///   Cursor's documented hook schema (per GitButler deep-dive and Cupcake
-///   reference docs) confirms the response is `{permission, continue,
-///   userMessage, agentMessage}` only — no `updated_input`.
+/// - Cursor: beforeShellExecution can't replace the command, and preToolUse
+///   can only together with a permission decision, where "allow" would skip
+///   Cursor's own approval. Uses .cursor/rules/sqz.mdc prompt-level guidance
+///   instead; `sqz hook cursor` prints nothing and exits 1, which Cursor
+///   treats as a failed hook, so its normal approval applies.
 
 use std::path::{Path, PathBuf};
 
@@ -56,8 +54,6 @@ pub enum HookScope {
 pub enum HookPlatform {
     /// Claude Code: hookSpecificOutput with updatedInput (camelCase)
     ClaudeCode,
-    /// Cursor: flat { permission, updated_input } (snake_case)
-    Cursor,
     /// Gemini CLI: decision + hookSpecificOutput.tool_input
     GeminiCli,
     /// Windsurf: exit-code based (no JSON rewriting support confirmed)
@@ -91,12 +87,17 @@ pub fn process_hook(input: &str) -> Result<String> {
     process_hook_for_platform(input, HookPlatform::ClaudeCode)
 }
 
-/// Process a hook invocation for Cursor (different output format).
+/// Process a hook invocation for Cursor: always an error.
 ///
-/// Cursor uses flat JSON: `{ "permission": "allow", "updated_input": { "command": "..." } }`
-/// Returns `{}` when no rewrite (Cursor requires JSON on all code paths).
-pub fn process_hook_cursor(input: &str) -> Result<String> {
-    process_hook_for_platform(input, HookPlatform::Cursor)
+/// A Cursor permission hook that answers decides. It can pass a new
+/// command only together with "allow", which skips Cursor's own approval,
+/// and an answer Cursor doesn't accept blocks the action. A hook that
+/// fails leaves the action to Cursor's normal approval, so
+/// `sqz hook cursor` reports this error on stderr and exits 1.
+pub fn process_hook_cursor(_input: &str) -> Result<String> {
+    Err(crate::error::SqzError::Other(
+        "can't rewrite without approving the command; Cursor's own approval applies".into(),
+    ))
 }
 
 /// Process a hook invocation for Gemini CLI.
@@ -174,11 +175,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
 
     if !is_shell {
         // Pass through non-bash tools unchanged.
-        // Cursor requires valid JSON on all code paths (empty object = passthrough).
-        return Ok(match platform {
-            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
-            _ => input.to_string(),
-        });
+        return Ok(passthrough(platform, input));
     }
 
     // Claude Code puts command in tool_input.command (official docs).
@@ -212,10 +209,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         .unwrap_or("");
 
     if command.is_empty() {
-        return Ok(match platform {
-            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
-            _ => input.to_string(),
-        });
+        return Ok(passthrough(platform, input));
     }
 
     // Don't intercept commands that are already piped through sqz.
@@ -235,10 +229,7 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
         || command.contains("sqz compress --cmd ")
         || command.contains("sqz.exe compress --cmd ")
     {
-        return Ok(match platform {
-            HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
-            _ => input.to_string(),
-        });
+        return Ok(passthrough(platform, input));
     }
 
     // A background call streams its output to the agent while it runs;
@@ -306,11 +297,6 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
     //   hookSpecificOutput.hookEventName = "PreToolUse"
     //   hookSpecificOutput.updatedInput = { ... }  (replaces the entire input)
     //
-    // Cursor (confirmed against working hook configs in the wild):
-    //   permission = "allow"
-    //   updated_input = { "command": "..." }  (snake_case, flat — NOT nested in hookSpecificOutput)
-    //   Returns {} when no rewrite (Cursor requires JSON on all paths)
-    //
     // Gemini CLI (geminicli.com/docs/hooks/reference):
     //   hookSpecificOutput.tool_input = { ... }. The scheduler replaces the
     //   call's arguments with it rather than merging, so it carries every
@@ -325,12 +311,6 @@ fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<Stri
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "updatedInput": updated_input
-            }
-        }),
-        HookPlatform::Cursor => serde_json::json!({
-            "permission": "allow",
-            "updated_input": {
-                "command": rewritten
             }
         }),
         HookPlatform::GeminiCli => serde_json::json!({
@@ -1997,11 +1977,11 @@ fn shell_escape(s: &str) -> String {
     }
 }
 
-/// What a hook returns when it leaves the tool call alone. Cursor and
-/// Copilot need a JSON object on every path.
+/// What a hook returns when it leaves the tool call alone. Copilot needs a
+/// JSON object on every path.
 fn passthrough(platform: HookPlatform, input: &str) -> String {
     match platform {
-        HookPlatform::Cursor | HookPlatform::Copilot => "{}".to_string(),
+        HookPlatform::Copilot => "{}".to_string(),
         _ => input.to_string(),
     }
 }
@@ -2723,34 +2703,17 @@ mod tests {
 
     #[test]
     fn test_process_hook_cursor_format() {
-        // Cursor uses tool_name "Shell" + tool_input.command (same as Claude Code input)
-        let input = r#"{"tool_name":"Shell","tool_input":{"command":"git status"},"conversation_id":"abc"}"#;
-        let result = process_hook_cursor(input).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        // Cursor expects flat permission + updated_input (snake_case)
-        assert_eq!(parsed["permission"].as_str().unwrap(), "allow");
-        let cmd = parsed["updated_input"]["command"].as_str().unwrap();
-        assert!(cmd.contains("sqz compress"), "cursor format should work: {cmd}");
-        assert!(cmd.contains("git status"));
-        // Should NOT have Claude Code hookSpecificOutput
-        assert!(parsed.get("hookSpecificOutput").is_none(),
-            "Cursor format should not have hookSpecificOutput");
-    }
-
-    #[test]
-    fn test_process_hook_cursor_passthrough_returns_empty_json() {
-        // Cursor requires {} on all code paths, even when no rewrite happens
-        let input = r#"{"tool_name":"Read","tool_input":{"file_path":"file.txt"}}"#;
-        let result = process_hook_cursor(input).unwrap();
-        assert_eq!(result, "{}", "Cursor passthrough must return empty JSON object");
-    }
-
-    #[test]
-    fn test_process_hook_cursor_no_rewrite_returns_empty_json() {
-        // sqz commands should not be double-wrapped; Cursor still needs {}
-        let input = r#"{"tool_name":"Shell","tool_input":{"command":"sqz stats"}}"#;
-        let result = process_hook_cursor(input).unwrap();
-        assert_eq!(result, "{}", "Cursor no-rewrite must return empty JSON object");
+        // Any answer to a Cursor permission hook is a decision, so there is none.
+        for input in [
+            r#"{"tool_name":"Shell","tool_input":{"command":"git status"},"conversation_id":"abc"}"#,
+            r#"{"hook_event_name":"beforeShellExecution","command":"git status","cwd":"/p"}"#,
+            r#"{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"git status"}}"#,
+            r#"{"tool_name":"Read","tool_input":{"file_path":"file.txt"}}"#,
+            r#"{"tool_name":"Shell","tool_input":{"command":"sqz stats"}}"#,
+            "not json",
+        ] {
+            assert!(process_hook_cursor(input).is_err(), "{input}");
+        }
     }
 
     #[test]
