@@ -842,8 +842,7 @@ fn run_init_sandboxed(home: &std::path::Path, project: &std::path::Path) -> Outp
     run_sandboxed(home, project, &["init", "--yes"])
 }
 
-/// `sqz doctor` with PATH limited to `home`, so it neither finds nor starts
-/// any client or sqz-mcp the developer has installed.
+/// `sqz doctor` with PATH set to `home`, so no installed client or sqz-mcp is found.
 fn run_doctor(home: &std::path::Path, project: &std::path::Path, args: &[&str]) -> Output {
     sandboxed(Command::new(sqz_bin()).arg("doctor").args(args), home)
         .current_dir(project)

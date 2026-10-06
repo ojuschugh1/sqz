@@ -1144,8 +1144,7 @@ pub fn install_tool_hooks_scoped_filtered(
     install_tool_hooks_at(project_dir, sqz_path, scope, filter, None)
 }
 
-/// Internal: home-dir-injectable counterpart used by tests. See
-/// `install_claude_global_at` for rationale.
+/// [`install_tool_hooks_scoped_filtered`] with every user-level root under `home_override`.
 fn install_tool_hooks_at(
     project_dir: &Path,
     sqz_path: &str,
@@ -2072,9 +2071,7 @@ pub fn gemini_settings_has_sqz(path: &Path) -> bool {
     }
 }
 
-/// Remove sqz's hook from the project's `.gemini/settings.json`, deleting the
-/// file only when nothing else is left in it. Same results as
-/// [`remove_claude_global_hook`].
+/// Remove sqz's hook from `.gemini/settings.json`, as [`remove_claude_global_hook`] does.
 pub fn remove_sqz_from_gemini_settings(project_dir: &Path) -> Result<Option<(PathBuf, bool)>> {
     let path = project_dir.join(".gemini").join("settings.json");
     if !path.exists() {
@@ -3917,7 +3914,6 @@ mod global_install_tests {
             assert_eq!(arr[..user_count], user["hooks"][event].as_array().unwrap()[..], "{event}");
         }
 
-        // A user command added to sqz's own entry stays when sqz's goes.
         let mut shared = installed.clone();
         shared["hooks"]["PreToolUse"][1]["hooks"]
             .as_array_mut()
