@@ -76,6 +76,56 @@ fn version_and_help_print_and_exit() {
     assert!(err.starts_with("Usage: sqz-mcp ") && err.contains("--version"), "{err}");
 }
 
+const PASSTHROUGH_LATIN1: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"passthrough\",\"arguments\":{\"text\":\"caf\xe9\"}}}\n";
+
+#[test]
+fn a_line_that_is_not_utf8_gets_a_parse_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = spawn(dir.path(), &[]);
+    let mut stdin = child.stdin.take().unwrap();
+    let rx = lines(child.stdout.take().unwrap());
+    stdin.write_all(PASSTHROUGH_LATIN1).unwrap();
+    let first = reply(&rx);
+    assert_eq!(first["error"]["code"], -32700, "{first}");
+    assert!(first["id"].is_null(), "{first}");
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#).unwrap();
+    assert!(reply(&rx)["result"]["tools"].is_array());
+    drop(stdin);
+    assert!(wait_for(&mut child, 10).is_some_and(|s| s.success()));
+}
+
+#[test]
+fn proxy_passes_on_a_client_line_that_is_not_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = spawn(dir.path(), &["proxy", "--", sqz_mcp()]);
+    let mut stdin = child.stdin.take().unwrap();
+    let rx = lines(child.stdout.take().unwrap());
+    stdin.write_all(PASSTHROUGH_LATIN1).unwrap();
+    let first = reply(&rx);
+    assert_eq!(first["result"]["content"][0]["text"], "caf\u{fffd}", "{first}");
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#).unwrap();
+    assert_eq!(reply(&rx)["id"], 2);
+    drop(stdin);
+    assert!(wait_for(&mut child, 10).is_some_and(|s| s.success()));
+}
+
+#[cfg(unix)]
+#[test]
+fn proxy_passes_on_an_upstream_line_that_is_not_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = r#"read -r line; printf '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"caf\351"}]}}\n'; read -r line; printf '{"jsonrpc":"2.0","id":2,"result":{}}\n'"#;
+    let mut child = spawn(dir.path(), &["proxy", "--", "sh", "-c", upstream]);
+    let mut stdin = child.stdin.take().unwrap();
+    let rx = lines(child.stdout.take().unwrap());
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"t","arguments":{{}}}}}}"#).unwrap();
+    let first = reply(&rx);
+    assert_eq!(first["result"]["content"][0]["text"], "caf\u{fffd}", "{first}");
+    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list"}}"#).unwrap();
+    assert_eq!(reply(&rx)["id"], 2);
+    drop(stdin);
+    assert!(wait_for(&mut child, 10).is_some_and(|s| s.success()));
+}
+
 #[test]
 fn unknown_flags_still_start_the_server() {
     let dir = tempfile::tempdir().unwrap();

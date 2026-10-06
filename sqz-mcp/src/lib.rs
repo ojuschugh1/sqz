@@ -907,15 +907,20 @@ impl McpServer {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
+        let mut input = stdin.lock();
+        let mut buf = Vec::new();
 
-        for line in stdin.lock().lines() {
-            let line = line.map_err(|e| SqzError::Other(format!("stdin read error: {e}")))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            // Notifications (no id) return None and must produce no output.
-            let Some(response) = self.handle_jsonrpc_line(&line) else {
-                continue;
+        while read_line_bytes(&mut input, &mut buf)
+            .map_err(|e| SqzError::Other(format!("stdin read error: {e}")))?
+        {
+            let response = match std::str::from_utf8(&buf) {
+                Ok(line) if line.trim().is_empty() => continue,
+                // Notifications (no id) return None and must produce no output.
+                Ok(line) => match self.handle_jsonrpc_line(line) {
+                    Some(response) => response,
+                    None => continue,
+                },
+                Err(e) => JsonRpcResponse::err(None, -32700, format!("parse error: {e}")),
             };
             let serialized = serde_json::to_string(&response)
                 .unwrap_or_else(|_| r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"serialize error"}}"#.to_string());
@@ -1094,6 +1099,23 @@ impl McpServer {
             _ => JsonRpcResponse::err(req.id, -32601, format!("method not found: {}", req.method)),
         })
     }
+}
+
+/// Read one line into `buf` without its `\n` or `\r\n`, as `BufRead::lines`
+/// does, but as bytes: a line that is not UTF-8 is left to the caller
+/// instead of ending the stream. `false` at end of input.
+fn read_line_bytes(reader: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<bool> {
+    buf.clear();
+    if reader.read_until(b'\n', buf)? == 0 {
+        return Ok(false);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+    }
+    Ok(true)
 }
 
 // ── Default tool definitions ──────────────────────────────────────────────────
@@ -2115,6 +2137,27 @@ complexity_threshold = 0.4
         let resp = server.handle_jsonrpc_line_unwrap(line);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32601);
+    }
+
+    /// Test stdin lines split the way BufRead::lines splits them, as bytes.
+    #[test]
+    fn test_read_line_bytes_splits_like_lines() {
+        let text = "a\nb\r\nc\r\r\n\r\n\n\rd\ne";
+        let mut reader = text.as_bytes();
+        let mut buf = Vec::new();
+        let mut got = Vec::new();
+        while read_line_bytes(&mut reader, &mut buf).unwrap() {
+            got.push(String::from_utf8(buf.clone()).unwrap());
+        }
+        let want: Vec<String> = text.as_bytes().lines().map(|l| l.unwrap()).collect();
+        assert_eq!(got, want);
+
+        let mut reader: &[u8] = b"{\"text\":\"caf\xe9\"}\nnext\n";
+        assert!(read_line_bytes(&mut reader, &mut buf).unwrap());
+        assert_eq!(buf, b"{\"text\":\"caf\xe9\"}");
+        assert!(read_line_bytes(&mut reader, &mut buf).unwrap());
+        assert_eq!(buf, b"next");
+        assert!(!read_line_bytes(&mut reader, &mut buf).unwrap());
     }
 
     /// Test JSON-RPC parse error returns -32700.

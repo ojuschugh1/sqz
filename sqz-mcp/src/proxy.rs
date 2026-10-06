@@ -22,7 +22,7 @@
 //! message (except `sqz_expand` calls) pass through verbatim.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -355,10 +355,11 @@ pub fn run_proxy(
     // Upstream → client (this thread's counterpart runs below on main).
     let state_up = Arc::clone(&state);
     let upstream_thread = std::thread::spawn(move || {
-        let reader = BufReader::new(child_stdout);
+        let mut reader = BufReader::new(child_stdout);
         let stdout = std::io::stdout();
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
+        let mut buf = Vec::new();
+        while let Ok(true) = crate::read_line_bytes(&mut reader, &mut buf) {
+            let line = String::from_utf8_lossy(&buf);
             if line.trim().is_empty() {
                 continue;
             }
@@ -371,9 +372,10 @@ pub fn run_proxy(
     });
 
     // Client → upstream (main thread).
-    let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    let mut stdin = std::io::stdin().lock();
+    let mut buf = Vec::new();
+    while let Ok(true) = crate::read_line_bytes(&mut stdin, &mut buf) {
+        let line = String::from_utf8_lossy(&buf);
         if line.trim().is_empty() {
             continue;
         }
