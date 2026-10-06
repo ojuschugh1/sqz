@@ -1926,7 +1926,7 @@ mod tests {
         assert!(content.contains("process.platform !== \"win32\""));
         assert!(content.contains("output.args.command = wrap(cmd, shellEscapeLabel(base));"));
 
-        let Some(node) = which_node() else { return };
+        let Some(node) = which_node().filter(|_| cfg!(unix)) else { return };
         let start = content.find("  const POSIX").unwrap();
         let end = content[start..].find("\n  }\n").unwrap() + start + 4;
         // Strip the TypeScript annotations so plain node can run it.
