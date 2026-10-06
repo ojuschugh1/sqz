@@ -87,13 +87,8 @@ pub fn process_hook(input: &str) -> Result<String> {
     process_hook_for_platform(input, HookPlatform::ClaudeCode)
 }
 
-/// Process a hook invocation for Cursor: always an error.
-///
-/// A Cursor permission hook that answers decides. It can pass a new
-/// command only together with "allow", which skips Cursor's own approval,
-/// and an answer Cursor doesn't accept blocks the action. A hook that
-/// fails leaves the action to Cursor's normal approval, so
-/// `sqz hook cursor` reports this error on stderr and exits 1.
+/// Process a hook invocation for Cursor: always an error, so Cursor's own
+/// approval applies.
 pub fn process_hook_cursor(_input: &str) -> Result<String> {
     Err(crate::error::SqzError::Other(
         "can't rewrite without approving the command; Cursor's own approval applies".into(),

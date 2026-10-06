@@ -3628,7 +3628,6 @@ fn cmd_hook(tool: &str) {
 
     match result {
         Ok(output) => print!("{output}"),
-        // Cursor takes any output as a decision; failing leaves its own approval.
         Err(e) if tool == "cursor" => {
             eprintln!("[sqz] hook cursor: {e}");
             std::process::exit(1);

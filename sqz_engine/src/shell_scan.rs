@@ -140,8 +140,7 @@ pub fn flat(command: &str) -> Option<Vec<FlatCmd>> {
     flat_segments(command).map(|(_, cmds)| cmds)
 }
 
-/// The shell a command runs in, for the expansions only zsh stops on: a
-/// glob that matches nothing, and a failed `=cmd` or `~user` lookup.
+/// The user's shell, for the expansions only zsh stops on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
     Bash,
@@ -149,8 +148,7 @@ pub enum Shell {
 }
 
 impl Shell {
-    /// The user's shell, from `$SHELL`. Anything but bash counts as zsh,
-    /// which stops on more.
+    /// From `$SHELL`: anything but bash counts as zsh.
     pub fn from_env() -> Shell {
         let shell = std::env::var("SHELL").unwrap_or_default();
         if basename(&shell) == "bash" {
@@ -161,11 +159,7 @@ impl Shell {
     }
 }
 
-/// [`flat`], unless piping its commands could run one the original never
-/// runs in `shell`. An expansion error such as `${X:?}` or `$((1/0))` stops
-/// the shell, but in a pipe it stops only that command, so a `;`, newline
-/// or `||` anywhere after it would carry on. `&&` alone stops there too,
-/// since the pipe fails.
+/// [`flat`], unless piping its commands could run one the original never runs in `shell`.
 pub fn flat_for(command: &str, shell: Shell) -> Option<Vec<FlatCmd>> {
     let (segs, cmds) = flat_segments(command)?;
     let stops = |fatal| fatal == Fatal::Any || (fatal == Fatal::Zsh && shell == Shell::Zsh);
@@ -251,7 +245,6 @@ fn watch_text(cmd: &str) -> bool {
 }
 
 /// A command's name with its directory and any `.exe` suffix removed.
-/// Either path separator counts, and the suffix in any case.
 pub fn basename(cmd: &str) -> &str {
     let base = cmd.rsplit(['/', '\\']).next().unwrap_or(cmd);
     match base.len().checked_sub(4) {
@@ -373,16 +366,11 @@ enum Sep {
     Newline,
 }
 
-/// Whether an expansion error in a word stops the shell. Inside `$( )` or
-/// `( )` it stops only that subshell, so those don't count.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Fatal {
     #[default]
     No,
-    /// zsh stops: an unquoted glob that matches nothing, `=cmd` or `~user`.
     Zsh,
-    /// Every shell stops, or drops the rest of the line: `${X:?}`, an
-    /// arithmetic error, a bad substitution.
     Any,
 }
 
@@ -396,8 +384,6 @@ enum Tok {
     Subshell,
 }
 
-/// Nesting of lists and expansions past which a command is left alone, so
-/// the recursive scan stays well inside the stack.
 const MAX_NESTING: usize = 64;
 
 struct Scanner<'a> {
@@ -412,7 +398,6 @@ struct Scanner<'a> {
     heredoc: bool,
     nesting: usize,
     subshells: usize,
-    /// The worst expansion error in the top-level word being scanned.
     fatal: Fatal,
 }
 
@@ -996,9 +981,6 @@ fn is_assignment(raw: &str) -> bool {
     }
 }
 
-/// A `${ }` that expands without an error whatever the variable holds: a
-/// name alone or with a default, alternate, trim or replace operator.
-/// `text` starts just after the `${`.
 fn plain_param(text: &[u8]) -> bool {
     let name = match text.first() {
         Some(c) if c.is_ascii_alphabetic() || *c == b'_' => {
@@ -1014,8 +996,6 @@ fn plain_param(text: &[u8]) -> bool {
     }
 }
 
-/// A word zsh expands by a lookup it stops on when the lookup fails:
-/// `=cmd`, and `~user` or `~1` on its own or as an assignment's value.
 fn zsh_lookup(raw: &str) -> bool {
     let tilde = |word: &str| {
         word.strip_prefix('~')

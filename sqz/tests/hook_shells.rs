@@ -61,8 +61,7 @@ struct Run {
 }
 
 /// Run `command` the way an agent's shell tool does, stderr merged, and
-/// record the working directory it leaves behind: `None` when the shell
-/// stops first, as it does on a fatal expansion error.
+/// record the working directory it leaves behind.
 fn run(shell: &str, command: &str, dir: &Path, home: &Path) -> Run {
     let script = format!("exec 2>&1\n{command}\nst=$?\nprintf '\\n[cwd=%s]' \"$PWD\"\nexit $st");
     let bin_dir = Path::new(sqz()).parent().unwrap();
@@ -177,10 +176,6 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     (fixture, dir, home)
 }
 
-/// The rewrite prints the same bytes, exits with the same status and leaves
-/// the same directory. A shell that stops picks its own status and leaves
-/// the agent where it was, so then the rewrite only has to fail too, in the
-/// directory it started in.
 fn assert_same(shell: &str, command: &str, rewritten: &str, dir: &Path, home: &Path) {
     assert!(rewritten.contains("sqz compress"), "{rewritten}");
     let _ = std::fs::remove_file(dir.join("listing.txt"));
@@ -272,8 +267,6 @@ fn state_changes_are_not_grouped() {
     }
 }
 
-/// Cursor reads any answer as a permission decision, so the hook fails
-/// quietly and the call goes through Cursor's own approval.
 #[test]
 fn cursor_hook_leaves_the_call_to_cursor() {
     let (fixture, _, _) = fixture();
