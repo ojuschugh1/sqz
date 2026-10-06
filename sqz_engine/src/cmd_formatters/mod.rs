@@ -89,7 +89,7 @@ fn is_failure_summary(line: &str) -> bool {
 
 /// Narrower than a substring match on "error", so `Compiling thiserror`
 /// and `7 passed; 0 failed` don't count.
-fn is_error_line(line: &str) -> bool {
+pub(crate) fn is_error_line(line: &str) -> bool {
     let t = line.trim_start();
     const STARTS: &[&str] = &[
         "error", "Error", "ERROR", "fatal", "Fatal", "FATAL", "FAILURE", "FAILED", "panic",

@@ -167,65 +167,64 @@ impl TokenPruner {
     ///
     /// Returns the pruned text and the number of tokens removed.
     pub fn prune(&self, text: &str) -> Result<PruneResult> {
-        let lines: Vec<&str> = text.lines().collect();
-        let mut output_lines = Vec::with_capacity(lines.len());
+        let mut output = String::with_capacity(text.len());
         let mut total_removed = 0u32;
         let mut total_original = 0u32;
 
-        for line in &lines {
+        for line in text.split_inclusive('\n') {
+            let body = line.strip_suffix('\n').map_or(line, |l| l.strip_suffix('\r').unwrap_or(l));
             // Skip code-like lines if preserve_code_tokens is enabled
-            if self.config.preserve_code_tokens && is_code_line(line) {
-                output_lines.push(line.to_string());
-                total_original += count_words(line) as u32;
+            if self.config.preserve_code_tokens && is_code_line(body) {
+                output.push_str(line);
+                total_original += count_words(body) as u32;
                 continue;
             }
 
-            let words: Vec<&str> = line.split_whitespace().collect();
+            let words: Vec<&str> = body.split_whitespace().collect();
             total_original += words.len() as u32;
 
-            if words.len() < 3 {
-                output_lines.push(line.to_string());
+            if words.len() < 3
+                || body.starts_with(|c: char| c.is_whitespace() || c == '+' || c == '-')
+                || crate::cmd_formatters::is_error_line(body)
+            {
+                output.push_str(line);
                 continue;
             }
 
-            let mut kept: Vec<&str> = Vec::with_capacity(words.len());
             // Always keep first two words (context)
-            kept.push(words[0]);
-            kept.push(words[1]);
-
-            for i in 2..words.len() {
-                let w1 = words[i - 2].to_lowercase();
-                let w2 = words[i - 1].to_lowercase();
-                let w3_clean = words[i]
+            let mut kept = String::with_capacity(line.len());
+            let mut rest = body;
+            let mut removed = 0u32;
+            for (i, word) in words.iter().enumerate() {
+                let after = rest.trim_start();
+                let space = &rest[..rest.len() - after.len()];
+                rest = &after[word.len()..];
+                let w3_clean = word
                     .trim_matches(|c: char| !c.is_alphanumeric())
                     .to_lowercase();
-
-                if w3_clean.len() < self.config.min_token_length {
-                    kept.push(words[i]);
-                    continue;
-                }
-
-                let p = self.predictability(&w1, &w2, &w3_clean);
-                if p > self.config.predictability_threshold {
-                    total_removed += 1;
+                if i >= 2
+                    && w3_clean.len() >= self.config.min_token_length
+                    && self.predictability(words[i - 2], words[i - 1], &w3_clean)
+                        > self.config.predictability_threshold
+                {
+                    removed += 1;
                 } else {
-                    kept.push(words[i]);
+                    kept.push_str(space);
+                    kept.push_str(word);
                 }
             }
 
-            output_lines.push(kept.join(" "));
+            if removed == 0 {
+                output.push_str(line);
+                continue;
+            }
+            total_removed += removed;
+            output.push_str(&kept);
+            output.push_str(&line[body.len() - rest.len()..]);
         }
 
-        let pruned_text = output_lines.join("\n");
-        // Preserve trailing newline
-        let result = if text.ends_with('\n') && !pruned_text.ends_with('\n') {
-            format!("{pruned_text}\n")
-        } else {
-            pruned_text
-        };
-
         Ok(PruneResult {
-            text: result,
+            text: output,
             tokens_removed: total_removed,
             tokens_original: total_original,
         })
@@ -475,6 +474,20 @@ mod tests {
             let result = pruner.prune(phrase).unwrap();
             assert_eq!(result.text, phrase, "pruning changed: {phrase}");
         }
+    }
+
+    #[test]
+    fn test_prune_rewrites_only_lines_that_lose_a_word() {
+        let pruner = TokenPruner::new();
+        let text = "We cache   the token in order to skip a round trip.\r\n\
+                    Two  spaces   stay  here  untouched today\r\n\
+                    +        keep the previous value in order to retry\n\
+                    -        drop the old value in order to retry\n\
+                    \x20   indented in order to stay as written\n\
+                    Error in the payment gateway: failed due to the timeout\n";
+        let result = pruner.prune(text).unwrap();
+        assert_eq!(result.text, text.replacen(" to skip", " skip", 1));
+        assert_eq!(result.tokens_removed, 1);
     }
 
     #[test]
