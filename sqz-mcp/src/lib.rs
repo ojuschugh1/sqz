@@ -3003,7 +3003,8 @@ complexity_threshold = 0.4
 
         let two = list(&mut server, serde_json::json!({ "path": path, "max_depth": 2 }));
         assert!(two.contains("entries=4]"), "{two}");
-        assert!(two.contains("lib.rs") && two.contains("d src/nested"), "{two}");
+        let nested = format!("d {}", Path::new("src").join("nested").display());
+        assert!(two.contains("lib.rs") && two.contains(&nested), "{two}");
         assert!(!two.contains("deep.rs"), "{two}");
 
         let zero = list(&mut server, serde_json::json!({ "path": path, "max_depth": 0 }));
