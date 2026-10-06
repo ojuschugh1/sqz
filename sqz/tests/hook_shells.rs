@@ -50,11 +50,12 @@ fn claude(command: &str, mode: &str, config: &Path) -> Option<String> {
 struct Run {
     out: Vec<u8>,
     status: i32,
-    cwd: String,
+    cwd: Option<String>,
 }
 
 /// Run `command` the way an agent's shell tool does, stderr merged, and
-/// record the working directory it leaves behind.
+/// record the working directory it leaves behind: `None` when the shell
+/// stops first, as it does on a fatal expansion error.
 fn run(shell: &str, command: &str, dir: &Path, home: &Path) -> Run {
     let script = format!("exec 2>&1\n{command}\nst=$?\nprintf '\\n[cwd=%s]' \"$PWD\"\nexit $st");
     let bin_dir = Path::new(sqz()).parent().unwrap();
@@ -68,18 +69,19 @@ fn run(shell: &str, command: &str, dir: &Path, home: &Path) -> Run {
         .env("SQZ_DB_PATH", home.join("sessions.db"))
         .env("SQZ_QUIET", "1")
         .env("SQZ_NO_DEDUP", "1")
+        .env_remove("X")
         .stdin(Stdio::null())
         .output()
         .unwrap();
     let mut text = out.stdout;
+    let status = out.status.code().unwrap_or(-1);
     let trailer = b"\n[cwd=";
-    let at = text
-        .windows(trailer.len())
-        .rposition(|w| w == trailer)
-        .unwrap_or_else(|| panic!("{shell}: no cwd trailer for {command:?}: {}", String::from_utf8_lossy(&text)));
+    let Some(at) = text.windows(trailer.len()).rposition(|w| w == trailer) else {
+        return Run { out: text, status, cwd: None };
+    };
     let cwd = String::from_utf8_lossy(&text[at + trailer.len()..text.len() - 1]).to_string();
     text.truncate(at);
-    Run { out: text, status: out.status.code().unwrap_or(-1), cwd }
+    Run { out: text, status, cwd: Some(cwd) }
 }
 
 fn installed(name: &str) -> bool {
@@ -133,6 +135,8 @@ const CASES: &[&str] = &[
     "nonexistent-command-xyz",
     "sh -c 'exit 7' | cat",
     "sh -c 'exit 7'",
+    "ls ${X:?not set}",
+    "for f in *.nomatchxyz; do echo $f; done",
 ];
 
 /// Lists only the ungrouped form takes: builtins that must keep running
@@ -158,12 +162,24 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     (fixture, dir, home)
 }
 
+/// The rewrite prints the same bytes, exits with the same status and leaves
+/// the same directory. A shell that stops picks its own status and leaves
+/// the agent where it was, so then the rewrite only has to fail too, in the
+/// directory it started in.
 fn assert_same(shell: &str, command: &str, rewritten: &str, dir: &Path, home: &Path) {
     assert!(rewritten.contains("sqz compress"), "{rewritten}");
     let _ = std::fs::remove_file(dir.join("listing.txt"));
     let original = run(shell, command, dir, home);
     let _ = std::fs::remove_file(dir.join("listing.txt"));
-    let piped = run(shell, rewritten, dir, home);
+    let mut piped = run(shell, rewritten, dir, home);
+    if original.cwd.is_none()
+        && original.status != 0
+        && piped.status != 0
+        && piped.cwd == run(shell, "true", dir, home).cwd
+    {
+        piped.status = original.status;
+        piped.cwd = None;
+    }
     assert_eq!(
         piped,
         original,

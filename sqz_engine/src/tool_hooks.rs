@@ -2449,11 +2449,11 @@ mod tests {
         let cmd = rewritten(&bash("cargo test 2>&1 | tail -30")).unwrap();
         assert_eq!(
             cmd,
-            "{ cargo test 2>&1 | tail -30\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: cargo test 2>&1 | tail -30'"
+            "{ ( cargo test 2>&1 | tail -30\n); printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: cargo test 2>&1 | tail -30'"
         );
         // A trailing comment no longer swallows the closing brace.
         let cmd = rewritten(&bash("ls | head # list")).unwrap();
-        assert!(cmd.starts_with("{ ls | head # list\nprintf"), "{cmd}");
+        assert!(cmd.starts_with("{ ( ls | head # list\n); printf"), "{cmd}");
         // Without a pipe nothing needs grouping, and the comment stays last.
         let cmd = rewritten(&bash("ls # list")).unwrap();
         assert_eq!(cmd, "set -o pipefail; ls 2>&1 | sqz compress --cmd ls # list");
@@ -2464,7 +2464,7 @@ mod tests {
         let cmd = rewritten(&bash("cd sqz_engine && cargo test 2>&1 | tail -5")).unwrap();
         assert_eq!(
             cmd,
-            "cd sqz_engine && {  cargo test 2>&1 | tail -5\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: cargo test 2>&1 | tail -5'"
+            "cd sqz_engine && { (  cargo test 2>&1 | tail -5\n); printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: cargo test 2>&1 | tail -5'"
         );
         let cmd = rewritten(&bash("cd sqz_engine && cargo test 2>&1")).unwrap();
         assert_eq!(
@@ -2574,7 +2574,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             cmd,
-            "{ cargo test; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'cargo test'",
+            "{ ( cargo test\n); printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'cargo test'",
             "POSIX rewrite must send the command's exit status through the pipe"
         );
         // Claude Code gets the ungrouped form, where pipefail carries it.

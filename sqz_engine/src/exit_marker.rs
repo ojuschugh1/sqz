@@ -7,7 +7,8 @@
 //! that sqz strips and exits with:
 //!
 //! ```sh
-//! { cmd; printf '\n__SQZ_EXIT_%d__\n' "$?"; } 2>&1 | sqz compress --cmd cmd
+//! { ( cmd
+//! ); printf '\n__SQZ_EXIT_%d__\n' "$?"; } 2>&1 | sqz compress --cmd cmd
 //! ```
 //!
 //! Plain POSIX, so it works in bash/zsh/dash/ash/ksh where `pipefail`
@@ -18,21 +19,21 @@
 
 /// Build the POSIX form of a rewritten command that carries its exit
 /// status to sqz. `escaped_label` must already be shell-escaped. The
-/// `2>&1` sits on the group, so a redirect of the command's own, such as
-/// `2>/dev/null` or `2> err.log`, still wins.
+/// command runs in a subshell of its own, so an expansion error that
+/// stops the shell, such as `${X:?}`, stops only that subshell and the
+/// trailer still reports it. The newline before `)` ends a trailing
+/// comment or heredoc. The `2>&1` sits on the group, so a redirect of the
+/// command's own, such as `2>/dev/null` or `2> err.log`, still wins.
 pub fn posix_rewrite(command: &str, escaped_label: &str) -> String {
     format!(
-        "{{ {command}; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; }} 2>&1 | sqz compress --cmd {escaped_label}"
+        "{{ ( {command}\n); printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; }} 2>&1 | sqz compress --cmd {escaped_label}"
     )
 }
 
-/// The form for a list or pipeline. The newline before `printf` ends a
-/// trailing comment or heredoc, and the group's `2>&1` covers every
+/// The same form for a list or pipeline. The group's `2>&1` covers every
 /// command in it.
 pub fn posix_rewrite_list(body: &str, escaped_label: &str) -> String {
-    format!(
-        "{{ {body}\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; }} 2>&1 | sqz compress --cmd {escaped_label}"
-    )
+    posix_rewrite(body, escaped_label)
 }
 
 /// The ungrouped form for bash and zsh: each marked command gets its own
@@ -226,7 +227,7 @@ mod tests {
         let r = posix_rewrite("git status", "'git status'");
         assert_eq!(
             r,
-            "{ git status; printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'git status'"
+            "{ ( git status\n); printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'git status'"
         );
     }
 
@@ -242,7 +243,7 @@ mod tests {
     fn list_rewrite_shape() {
         assert_eq!(
             posix_rewrite_list("ls # all", "'sh: ls # all'"),
-            "{ ls # all\nprintf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: ls # all'"
+            "{ ( ls # all\n); printf '\\n__SQZ_EXIT_%d__\\n' \"$?\"; } 2>&1 | sqz compress --cmd 'sh: ls # all'"
         );
     }
 
