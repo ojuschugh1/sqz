@@ -1,9 +1,10 @@
 //! Entropy Analyzer — classifies logical blocks by Shannon entropy.
 //!
-//! Builds on top of [`file_reader::compute_entropy`] and
-//! [`file_reader::analyze_block_entropies`] to provide higher-level
-//! classification (HighInfo / MediumInfo / LowInfo) with configurable
-//! percentile thresholds.
+//! Builds on top of
+//! [`file_reader::compute_entropy`](crate::file_reader::compute_entropy) and
+//! [`file_reader::analyze_block_entropies`](crate::file_reader::analyze_block_entropies)
+//! to provide higher-level classification (HighInfo / MediumInfo / LowInfo)
+//! with configurable percentile thresholds.
 
 use std::ops::Range;
 

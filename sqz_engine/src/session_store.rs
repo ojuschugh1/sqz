@@ -468,11 +468,11 @@ impl SessionStore {
     /// Stores both the compressed JSON (`data`) used for dedup-hit
     /// responses AND the raw uncompressed bytes (`original`) so that
     /// `sqz expand <prefix>` can serve truly uncompressed content. See
-    /// [`save_cache_entry_with_original`] for the original-aware version;
-    /// this convenience wrapper exists for callers that do not (yet)
-    /// have the pre-compression bytes handy. Rows written through this
-    /// path leave `original` as `NULL`, and `expand` will degrade to
-    /// returning the compressed blob with a note.
+    /// [`save_cache_entry_with_original`](Self::save_cache_entry_with_original)
+    /// for the original-aware version; this convenience wrapper exists for
+    /// callers that do not (yet) have the pre-compression bytes handy. Rows
+    /// written through this path leave `original` as `NULL`, and `expand`
+    /// will degrade to returning the compressed blob with a note.
     pub fn save_cache_entry(&self, hash: &str, compressed: &CompressedContent) -> Result<()> {
         self.save_cache_entry_with_original(hash, compressed, None)
     }
@@ -1089,9 +1089,10 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Correct the rows [`inflated_rows`] reports, in place: raise the
-    /// input count to the output count. The call keeps its real volume and
-    /// is recorded as saving nothing, which is what a verbatim read saves.
+    /// Correct the rows [`inflated_rows`](Self::inflated_rows) reports, in
+    /// place: raise the input count to the output count. The call keeps its
+    /// real volume and is recorded as saving nothing, which is what a
+    /// verbatim read saves.
     /// Returns the number of rows changed.
     pub fn clamp_inflated_rows(&self) -> Result<usize> {
         let sql = format!(

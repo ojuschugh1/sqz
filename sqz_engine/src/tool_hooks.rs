@@ -1692,7 +1692,7 @@ fn merge_sqz_hooks_into_settings(path: &Path, sqz_path: &str) -> Result<bool> {
 }
 
 /// Remove sqz's hook entries from `~/.claude/settings.json` without
-/// touching any other keys. Symmetric with [`install_claude_global_at`].
+/// touching any other keys. Symmetric with `install_claude_global_at`.
 ///
 /// Returns:
 /// * `Ok(Some((path, true)))` — file existed, sqz entries found and

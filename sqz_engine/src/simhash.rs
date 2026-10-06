@@ -41,7 +41,7 @@ impl SimHashFingerprint {
 /// 1. Tokenize the text into shingles (n-grams of words).
 /// 2. Hash each shingle to a 64-bit value.
 /// 3. For each bit position, sum +1 if the bit is 1, -1 if 0.
-/// 4. The final fingerprint has bit i = 1 if sum[i] > 0, else 0.
+/// 4. The final fingerprint has bit i = 1 if `sum[i] > 0`, else 0.
 pub fn simhash(text: &str) -> SimHashFingerprint {
     let tokens = tokenize_shingles(text, 3);
     if tokens.is_empty() {

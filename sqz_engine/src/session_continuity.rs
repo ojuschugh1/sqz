@@ -284,7 +284,7 @@ impl<'a> SessionContinuityManager<'a> {
     /// and wraps the result in a `<session_knowledge>` XML directive suitable
     /// for injection into a new context window after compaction.
     ///
-    /// The output is capped at [`MAX_GUIDE_CHARS`] characters (~500 tokens)
+    /// The output is capped at `MAX_GUIDE_CHARS` characters (~500 tokens)
     /// and is generated in a single pass with no allocations beyond the
     /// output string, targeting <50 ms generation time.
     pub fn generate_guide(&self, snapshot: &Snapshot) -> SessionGuide {

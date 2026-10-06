@@ -245,7 +245,7 @@ impl SqzEngine {
 
     /// Compress with dedup cache lookup.
     ///
-    /// Unlike [`compress`], this method consults the persistent cache
+    /// Unlike [`compress`](Self::compress), this method consults the persistent cache
     /// (`~/.sqz/sessions.db`). On a hit with a fresh ref, it returns a
     /// 13-token `§ref:HASH§` token instead of re-compressing. On a
     /// near-duplicate, it returns a compact delta. On a cache miss, it
@@ -276,11 +276,13 @@ impl SqzEngine {
         )
     }
 
-    /// Lossless variant of [`compress_with_cache`] for the file-read MCP tools
+    /// Lossless variant of [`compress_with_cache`](Self::compress_with_cache)
+    /// for the file-read MCP tools
     /// (`sqz_read_file` / `sqz_grep` / `sqz_list_dir`): on a cache miss the
     /// content is returned faithfully — no entropy truncation, pruning, or
     /// re-encoding. The general `compress` tool keeps using
-    /// [`compress_with_cache`] for aggressive compression. See issue #32.
+    /// [`compress_with_cache`](Self::compress_with_cache) for aggressive
+    /// compression. See issue #32.
     pub fn compress_with_cache_lossless(&self, input: &str) -> Result<crate::cache_manager::CacheResult> {
         let pipeline = self.pipeline.lock()
             .map_err(|_| SqzError::Other("pipeline lock poisoned".into()))?;

@@ -301,7 +301,7 @@ impl SandboxExecutor {
     /// BM25-matched sections plus a vocabulary of searchable terms.
     ///
     /// When the output is small or no intent is given, behaves identically
-    /// to [`execute`] (returns full stdout, `filtered` is `None`).
+    /// to [`execute`](Self::execute) (returns full stdout, `filtered` is `None`).
     pub fn execute_with_intent(
         &self,
         code: &str,

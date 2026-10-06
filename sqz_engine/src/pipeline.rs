@@ -116,7 +116,7 @@ impl CompressionPipeline {
     /// which would shift bytes or line numbers. No line, field, or segment is
     /// ever dropped or moved. Token savings on this path come from the dedup
     /// `§ref` cache on repeat reads, not from re-encoding.
-    /// See https://github.com/ojuschugh1/sqz/issues/32
+    /// See <https://github.com/ojuschugh1/sqz/issues/32>
     pub fn compress_lossless(
         &self,
         input: &str,

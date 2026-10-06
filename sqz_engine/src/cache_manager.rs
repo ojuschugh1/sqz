@@ -135,7 +135,8 @@ struct RefEntry {
 /// disabled the dedup feature in production. Issue found April 18 2026.
 ///
 /// Default TTL: 30 minutes. Empirically matches a typical active coding
-/// session before a context compaction. Use [`with_ref_age`] to tune.
+/// session before a context compaction. Use
+/// [`with_ref_age`](CacheManager::with_ref_age) to tune.
 pub struct CacheManager {
     store: SessionStore,
     max_size_bytes: u64,
@@ -169,7 +170,8 @@ impl CacheManager {
     ///
     /// `max_size_bytes` controls when LRU eviction kicks in. A good default
     /// is 512 MB (`512 * 1024 * 1024`). Dedup refs go stale after 30 minutes
-    /// of wall-clock time by default — use [`with_ref_age`] to tune.
+    /// of wall-clock time by default; use [`with_ref_age`](Self::with_ref_age)
+    /// to tune.
     pub fn new(store: SessionStore, max_size_bytes: u64) -> Self {
         Self::with_ref_age_duration(store, max_size_bytes, Duration::from_secs(30 * 60))
     }
@@ -359,7 +361,8 @@ impl CacheManager {
     /// `sqz_grep` / `sqz_list_dir`): on a cache miss the content is returned
     /// faithfully via [`CompressionPipeline::compress_lossless`] (no entropy
     /// truncation / pruning / re-encoding). The general `compress` tool keeps
-    /// using [`get_or_compress`] for aggressive compression. See issue #32.
+    /// using [`get_or_compress`](Self::get_or_compress) for aggressive
+    /// compression. See issue #32.
     pub fn get_or_compress_lossless(
         &self,
         path: &Path,
@@ -522,17 +525,17 @@ impl CacheManager {
     /// Returns `Some(inline_ref)` if cached AND the ref is still fresh,
     /// `None` if the content is not cached or the ref is stale.
     ///
-    /// Unlike [`get_or_compress`], this method does not touch `accessed_at`
-    /// until after the freshness check — otherwise every read would make
-    /// itself "fresh."
+    /// Unlike [`get_or_compress`](Self::get_or_compress), this method does
+    /// not touch `accessed_at` until after the freshness check; otherwise
+    /// every read would make itself "fresh."
     pub fn check_dedup(&self, content: &[u8]) -> Result<Option<String>> {
         Ok(self.check_dedup_with_meta(content)?.map(|hit| hit.inline_ref))
     }
 
-    /// [`check_dedup`] plus the metadata callers need for regret tracking:
-    /// the full content hash and the entry's `accessed_at` from *before*
-    /// this lookup bumped it. A hit whose previous access was seconds ago
-    /// means the agent re-produced content it already had.
+    /// [`check_dedup`](Self::check_dedup) plus the metadata callers need for
+    /// regret tracking: the full content hash and the entry's `accessed_at`
+    /// from *before* this lookup bumped it. A hit whose previous access was
+    /// seconds ago means the agent re-produced content it already had.
     pub fn check_dedup_with_meta(&self, content: &[u8]) -> Result<Option<DedupHit>> {
         let hash = Self::sha256_hex(content);
         // Read the pre-hit timestamp before the freshness probe's

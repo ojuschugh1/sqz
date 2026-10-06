@@ -237,8 +237,8 @@ impl CliProxy {
         self.intercept_output_with_options(cmd, output, InterceptOptions::default())
     }
 
-    /// Variant of [`intercept_output`] that lets the caller disable the
-    /// dedup cache on a per-call basis.
+    /// Variant of [`intercept_output`](Self::intercept_output) that lets the
+    /// caller disable the dedup cache on a per-call basis.
     ///
     /// Added after SquireNed reported on the Synthetic discord that
     /// GLM 5.1 hits a thrash loop when served a `§ref:…§` token it
