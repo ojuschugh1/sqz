@@ -94,11 +94,22 @@ impl ProxyState {
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_string();
-                    if name == EXPAND_TOOL_NAME {
-                        return Ok(Some(self.answer_expand(&id, &msg)));
-                    }
-                    if name == HELP_TOOL_NAME {
-                        return Ok(Some(self.answer_tool_help(&id, &msg)));
+                    if name == EXPAND_TOOL_NAME || name == HELP_TOOL_NAME {
+                        let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if name == EXPAND_TOOL_NAME {
+                                self.answer_expand(&id, &msg)
+                            } else {
+                                self.answer_tool_help(&id, &msg)
+                            }
+                        }));
+                        return Ok(Some(answer.unwrap_or_else(|_| {
+                            self.engine.clear_poison();
+                            serde_json::json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "error": { "code": -32603, "message": format!("internal error: {method} panicked") }
+                            })
+                            .to_string()
+                        })));
                     }
                     Pending::ToolCall { name }
                 }
@@ -288,6 +299,8 @@ impl ProxyState {
     }
 
     fn answer_expand(&self, id: &serde_json::Value, msg: &serde_json::Value) -> String {
+        #[cfg(test)]
+        crate::tests::maybe_panic();
         let raw = msg
             .pointer("/params/arguments/ref")
             .and_then(|r| r.as_str())
@@ -674,12 +687,30 @@ mod tests {
             "result": { "content": [{ "type": "text", "text": big }], "isError": false }
         })
         .to_string();
-        crate::tests::panic_next_compression();
+        crate::tests::panic_next_engine_call();
         assert_eq!(state.on_upstream_message(&resp), resp);
 
         let next = call_and_respond(&mut state, 2, "jira_search", &big);
         let text = next.pointer("/result/content/0/text").unwrap().as_str().unwrap();
         assert!(text.len() < big.len(), "compression works again: {text}");
+    }
+
+    #[test]
+    fn panicking_expand_answers_with_an_error() {
+        let (mut state, _dir) = test_state();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": { "name": "sqz_expand", "arguments": { "ref": "deadbeefdeadbeef" } }
+        })
+        .to_string();
+        crate::tests::panic_next_engine_call();
+        let resp = state.on_client_message(&req).unwrap().expect("sqz_expand must be answered locally");
+        let parsed: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(parsed["id"], 5);
+        assert_eq!(parsed.pointer("/error/code"), Some(&serde_json::json!(-32603)));
+
+        let resp = state.on_client_message(&req).unwrap().expect("sqz_expand must be answered locally");
+        assert!(resp.contains("no cached content found for prefix 'deadbeefdeadbeef'"), "{resp}");
     }
 
     #[test]

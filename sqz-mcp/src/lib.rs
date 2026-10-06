@@ -1843,18 +1843,17 @@ mod tests {
     }
 
     thread_local! {
-        static PANIC_NEXT_COMPRESSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static PANIC_NEXT_ENGINE_CALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
-    /// Make the next compression on this thread panic, standing in for a
-    /// bug anywhere in the engine.
-    pub(crate) fn panic_next_compression() {
-        PANIC_NEXT_COMPRESSION.with(|p| p.set(true));
+    /// Make the next engine call on this thread panic, standing in for an engine bug.
+    pub(crate) fn panic_next_engine_call() {
+        PANIC_NEXT_ENGINE_CALL.with(|p| p.set(true));
     }
 
     pub(crate) fn maybe_panic() {
-        if PANIC_NEXT_COMPRESSION.with(|p| p.replace(false)) {
-            panic!("injected compression panic");
+        if PANIC_NEXT_ENGINE_CALL.with(|p| p.replace(false)) {
+            panic!("injected engine panic");
         }
     }
 
@@ -2226,7 +2225,7 @@ complexity_threshold = 0.4
             "params": { "name": "compress", "arguments": { "text": text } }
         })
         .to_string();
-        panic_next_compression();
+        panic_next_engine_call();
         let resp = server.handle_jsonrpc_line_unwrap(&call);
         assert!(resp.error.is_none(), "{:?}", resp.error);
         assert_eq!(resp.result.unwrap()["content"][0]["text"], text.as_str());
@@ -2247,7 +2246,7 @@ complexity_threshold = 0.4
             "params": { "name": "sqz_read_file", "arguments": { "path": file.to_string_lossy() } }
         })
         .to_string();
-        panic_next_compression();
+        panic_next_engine_call();
         let resp = server.handle_jsonrpc_line_unwrap(&call);
         assert_eq!(resp.id, Some(serde_json::json!(2)));
         assert_eq!(resp.error.expect("an error").code, -32603);
