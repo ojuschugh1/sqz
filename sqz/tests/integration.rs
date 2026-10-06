@@ -514,6 +514,60 @@ fn test_high_risk_output_passes_through_every_path() {
     }
 }
 
+#[test]
+fn test_output_passes_through_when_compression_panics() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    let panicking = |args: &[&str], stdin: &str| {
+        use std::io::Write;
+        let mut child = Command::new(sqz_bin())
+            .args(args)
+            .env("SQZ_DB_PATH", &db)
+            .env("SQZ_TEST_PANIC", "1")
+            .current_dir(workspace_root())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn sqz");
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let body: String = (0..60)
+        .map(|i| format!("2026-10-06T12:00:{i:02}Z INFO request served path=/health status=200 latency_ms={i}\n"))
+        .collect();
+    let input = format!("{body}\n__SQZ_EXIT_3__\n");
+    for args in [
+        vec!["compress"],
+        vec!["compress", "--cmd", "tail -60 app.log"],
+        vec!["compress", "--mode", "safe"],
+        vec!["compress", "--mode", "default"],
+        vec!["compress", "--mode", "aggressive"],
+    ] {
+        let o = panicking(&args, &input);
+        assert_eq!(o.status.code(), Some(3), "{args:?}: {}", stderr(&o));
+        assert_eq!(stdout(&o), body, "{args:?}");
+        assert_eq!(stderr(&o).lines().count(), 1, "{args:?}: {}", stderr(&o));
+    }
+    let o = panicking(&["compress", &body], "");
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), body);
+    let payload = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "tail -60 app.log"},
+        "tool_response": {"stdout": body, "stderr": "", "interrupted": false, "isImage": false},
+    });
+    let o = panicking(&["hook", "claude-post"], &payload.to_string());
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "", "no replacement");
+    let o = run_with_db(&db, &["hook", "claude-post"], Some(&payload.to_string()));
+    assert!(stdout(&o).contains("updatedToolOutput"), "{}", stdout(&o));
+}
+
 fn rust_backtrace(indent: &str, thread: &str, frames: usize) -> String {
     let mut s = format!(
         "{indent}thread '{thread}' panicked at src/ledger.rs:41:9:\n{indent}assertion `left == right` failed\n{indent}stack backtrace:\n{indent}   0: rust_begin_unwind\n{indent}             at /rustc/eeb90cda/library/std/src/panicking.rs:665:5\n"

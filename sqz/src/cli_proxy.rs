@@ -150,6 +150,21 @@ fn quiet() -> bool {
     sqz_engine::SqzEngine::quiet_stderr()
 }
 
+/// Run `f`, or return `None` if it panics, without printing the panic message.
+pub fn catch_panic<T>(f: impl FnOnce() -> T) -> Option<T> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("SQZ_TEST_PANIC").is_some() {
+            panic!("SQZ_TEST_PANIC");
+        }
+        f()
+    }));
+    std::panic::set_hook(hook);
+    result.ok()
+}
+
 const NET_WIN_MIN_TOKENS: u32 = 16;
 
 /// `formatted` is `output` up to trailing whitespace, so it saves under [`NET_WIN_MIN_TOKENS`].

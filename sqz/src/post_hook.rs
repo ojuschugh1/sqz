@@ -1,7 +1,7 @@
 //! Claude Code PostToolUse: shrink a successful Bash result that the
 //! PreToolUse rewrite left alone.
 
-use crate::cli_proxy::{CliProxy, InterceptOptions};
+use crate::cli_proxy::{catch_panic, CliProxy, InterceptOptions};
 
 /// Below this many tokens saved, the original result is kept.
 const MIN_SAVING_TOKENS: usize = 16;
@@ -18,7 +18,8 @@ pub fn claude_post_tool_use(input: &str) -> Option<String> {
         if text.is_empty() {
             continue;
         }
-        let compressed = proxy.intercept_output_with_options(&target.label, text, opts);
+        let compressed =
+            catch_panic(|| proxy.intercept_output_with_options(&target.label, text, opts))?;
         if text.len().saturating_sub(compressed.len()) / 4 >= MIN_SAVING_TOKENS {
             response.insert(field.to_string(), serde_json::Value::String(compressed));
             changed = true;

@@ -1208,6 +1208,11 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
             std::process::exit(c);
         }
     };
+    let pass_through = || {
+        eprintln!("[sqz] fallback: compression panicked, output passed through unchanged");
+        print!("{input}");
+        finish(marker_exit);
+    };
 
     // Merge CLI flags with env vars — for each switch, either source turns
     // it on. This lets shell-hook callers set SQZ_NO_DEDUP=1 / SQZ_NO_ABBREV=1
@@ -1241,7 +1246,12 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
                 return;
             }
         };
-        let compressed = proxy.intercept_output_with_options(&label, &input, opts);
+        let Some(compressed) =
+            cli_proxy::catch_panic(|| proxy.intercept_output_with_options(&label, &input, opts))
+        else {
+            pass_through();
+            return;
+        };
         print!("{}", compressed);
         if input.ends_with('\n') && !compressed.ends_with('\n') {
             println!();
@@ -1254,7 +1264,7 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
     let engine = require_engine();
 
     // Apply mode override if specified
-    let result = match mode {
+    let Some(result) = cli_proxy::catch_panic(|| match mode {
         "safe" => {
             if engine.route_compression_mode(&input) == sqz_engine::CompressionMode::Safe {
                 eprintln!("[sqz] mode: safe (preserving all content)");
@@ -1271,6 +1281,9 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
             engine.compress_with_mode(&input, sqz_engine::CompressionMode::Default)
         }
         _ => engine.compress(&input), // auto: confidence router decides
+    }) else {
+        pass_through();
+        return;
     };    match result {
         Ok(c) => {
             print!("{}", c.data);
