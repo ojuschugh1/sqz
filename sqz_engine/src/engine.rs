@@ -296,6 +296,14 @@ impl SqzEngine {
         )
     }
 
+    /// What [`Self::compress_with_cache_lossless`] returns on a miss, without the cache.
+    pub fn compress_lossless(&self, input: &str) -> Result<CompressedContent> {
+        let pipeline = self.pipeline.lock()
+            .map_err(|_| SqzError::Other("pipeline lock poisoned".into()))?;
+        let ctx = crate::pipeline::SessionContext { session_id: "cache".to_string() };
+        pipeline.compress_lossless(input, &ctx, &Preset::default())
+    }
+
     /// What `sqz-mcp proxy` does to one text result from an upstream MCP
     /// server. `None` keeps the original: too small to pay for the
     /// markers, high-risk content (credentials, stack traces,

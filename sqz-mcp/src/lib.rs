@@ -316,7 +316,7 @@ impl McpServer {
 
         let compressed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let tokens_original = self.engine.count_tokens(&raw_input);
-            self.compress_cached(&raw_input, false)
+            self.compress_cached(&raw_input, tokens_original, false, true)
                 .map(|(output, tokens_compressed)| (output, tokens_original, tokens_compressed))
         }));
         let (output, tokens_original, tokens_compressed) = match compressed {
@@ -497,8 +497,10 @@ impl McpServer {
     ///     path the README advertises.
     ///   * `Delta` → emit a compact diff against a near-duplicate. Not
     ///     as compact as a full ref but still well below fresh
-    ///     compression for iterated edits.
+    ///     compression for iterated edits. Only with `allow_delta`.
     ///   * `Fresh` → cache miss; emit the full compressed output.
+    ///
+    /// `text` of at most `REF_TOKENS` tokens skips the cache.
     ///
     /// Added in response to issue #12 follow-up: `handle_sqz_read_file`
     /// (and the grep / list_dir siblings) were calling
@@ -506,10 +508,13 @@ impl McpServer {
     /// Repeat reads got pipeline compression (~30%), not dedup refs
     /// (~92%). Routing through `engine.compress_with_cache()` restores
     /// the advertised behaviour.
-    fn compress_cached(&self, text: &str, lossless: bool) -> Result<(String, u32)> {
+    fn compress_cached(&self, text: &str, tokens: u32, lossless: bool, allow_delta: bool) -> Result<(String, u32)> {
         use sqz_engine::CacheResult;
         #[cfg(test)]
         tests::maybe_panic();
+        if tokens <= REF_TOKENS {
+            return self.compress_fresh(text, lossless);
+        }
         // The file-read tools (sqz_read_file / sqz_grep / sqz_list_dir) read
         // faithfully (lossless); the general `compress` tool stays aggressive.
         let result = if lossless {
@@ -519,9 +524,20 @@ impl McpServer {
         };
         Ok(match result {
             CacheResult::Dedup { inline_ref, token_cost } => (inline_ref, token_cost),
-            CacheResult::Delta { delta_text, token_cost, .. } => (delta_text, token_cost),
+            CacheResult::Delta { delta_text, token_cost, .. } if allow_delta => (delta_text, token_cost),
+            CacheResult::Delta { .. } => return self.compress_fresh(text, lossless),
             CacheResult::Fresh { output } => (output.data, output.tokens_compressed),
         })
+    }
+
+    /// What `compress_cached` returns on a cache miss, without the cache.
+    fn compress_fresh(&self, text: &str, lossless: bool) -> Result<(String, u32)> {
+        let output = if lossless {
+            self.engine.compress_lossless(text)?
+        } else {
+            self.engine.compress(text)?
+        };
+        Ok((output.data, output.tokens_compressed))
     }
 
     /// Read a file from disk and return the content compressed.
@@ -638,7 +654,8 @@ impl McpServer {
         };
 
         let tokens_original = self.engine.count_tokens(&raw_text);
-        let (compressed_data, tokens_compressed) = self.compress_cached(&raw_text, true)?;
+        let (compressed_data, tokens_compressed) =
+            self.compress_cached(&raw_text, tokens_original, true, range.is_none())?;
 
         // Attach a small header so the agent knows where the content
         // came from and whether it was truncated. The header lives
@@ -707,7 +724,7 @@ impl McpServer {
 
         let raw = listing.lines.join("\n");
         let tokens_original = self.engine.count_tokens(&raw);
-        let (compressed_data, tokens_compressed) = self.compress_cached(&raw, true)?;
+        let (compressed_data, tokens_compressed) = self.compress_cached(&raw, tokens_original, true, true)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
         let mut header = format!(
@@ -800,7 +817,7 @@ impl McpServer {
 
         let raw = found.lines.join("\n");
         let tokens_original = self.engine.count_tokens(&raw);
-        let (compressed_data, tokens_compressed) = self.compress_cached(&raw, true)?;
+        let (compressed_data, tokens_compressed) = self.compress_cached(&raw, tokens_original, true, true)?;
         self.log_compression(&request.tool_id, tokens_original, tokens_compressed);
 
         let mut header = format!(
@@ -1448,6 +1465,8 @@ const GREP_DEFAULT_MAX_BYTES: usize = 100_000;
 const GREP_DEFAULT_MAX_LINE_CHARS: usize = 400;
 /// Default cap on `sqz_list_dir` entries.
 const LIST_DEFAULT_MAX_ENTRIES: usize = 1000;
+/// Token cost of a `§ref:HASH§`.
+const REF_TOKENS: u32 = 13;
 
 /// An optional size cap from the tool input: `default` when absent, no
 /// cap when 0.
@@ -3036,6 +3055,69 @@ complexity_threshold = 0.4
             .unwrap();
         assert!(!tiny.output.contains("§ref:"), "{}", tiny.output);
         assert!(tiny.output.contains("def handler_001"));
+    }
+
+    #[test]
+    fn test_sqz_read_file_delta_after_an_edit_numbers_lines_from_one() {
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("rows.txt");
+        let rows: Vec<String> = (1..=60).map(|i| format!("row {i:02}\n")).collect();
+        std::fs::write(&file_path, rows.concat()).unwrap();
+        let path = file_path.to_string_lossy().to_string();
+        read(&mut server, serde_json::json!({ "path": path }));
+        let hash = sqz_engine::CacheManager::sha256_hex(rows.concat().as_bytes());
+
+        std::fs::write(&file_path, [&rows[..2], &rows[3..]].concat().concat()).unwrap();
+        let out = read(&mut server, serde_json::json!({ "path": path }));
+        let expected = format!(
+            "§delta:{}§\n @@ skip 1 unchanged lines @@\n row 02\n-[1 lines removed at L3]\n row 04\n @@ skip 56 unchanged lines @@",
+            &hash[..16]
+        );
+        assert!(out.ends_with(&expected), "{out}");
+    }
+
+    #[test]
+    fn test_sqz_read_file_ranged_reread_is_never_a_delta() {
+        let (mut server, dir) = make_server();
+        let file_path = dir.path().join("lines.txt");
+        let content: String = (1..=500)
+            .map(|i| format!("line {i:04} the quick brown fox needle={}\n", i % 7 == 0))
+            .collect();
+        std::fs::write(&file_path, &content).unwrap();
+        let path = file_path.to_string_lossy().to_string();
+        read(&mut server, serde_json::json!({ "path": path, "offset": 1, "limit": 50 }));
+
+        let next = read(&mut server, serde_json::json!({ "path": path, "offset": 11, "limit": 50 }));
+        let (header, body) = next.split_once('\n').unwrap();
+        assert!(header.ends_with(" lines=11-60 of 500]"), "{header}");
+        assert_eq!(body, line_range(&content, 11, 60));
+    }
+
+    #[test]
+    fn test_content_smaller_than_a_ref_is_never_a_ref_or_delta() {
+        let (mut server, dir) = make_server();
+        let root = project_dir(&dir);
+        std::fs::write(root.join("empty.txt"), "").unwrap();
+        std::fs::write(root.join("ok.txt"), "\x1b[32mok\x1b[0m\n").unwrap();
+        let compress = |server: &mut McpServer, text: &str| {
+            server
+                .handle_tool_call(ToolCallRequest {
+                    tool_id: "compress".to_string(),
+                    input: serde_json::json!({ "text": text }),
+                    intent: None,
+                })
+                .unwrap()
+                .output
+        };
+        for run in ["first", "second"] {
+            assert_eq!(compress(&mut server, ""), "", "{run}");
+            let empty = read(&mut server, serde_json::json!({ "path": root.join("empty.txt").to_string_lossy() }));
+            assert!(empty.ends_with("size=0]\n"), "{run}: {empty}");
+            let ok = read(&mut server, serde_json::json!({ "path": root.join("ok.txt").to_string_lossy() }));
+            assert!(ok.ends_with("]\nok\n"), "{run}: {ok}");
+            let none = grep(&mut server, serde_json::json!({ "pattern": "no such text", "path": root.to_string_lossy() }));
+            assert!(none.ends_with("matches=0]\n"), "{run}: {none}");
+        }
     }
 
     #[test]
