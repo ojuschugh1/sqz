@@ -564,13 +564,13 @@ impl<'a> Scanner<'a> {
 
     fn word(&mut self, nested: bool) -> Res<()> {
         let (start, plain) = self.word_text()?;
-        let fatal = std::mem::take(&mut self.fatal);
         if nested {
             // `case` patterns end in an unbalanced `)`.
             if plain == "case" {
                 return Err(Skip::Unparsed);
             }
         } else {
+            let fatal = std::mem::take(&mut self.fatal);
             self.toks.push(Tok::Word { start, end: self.i, plain, fatal });
         }
         Ok(())
@@ -807,7 +807,6 @@ impl<'a> Scanner<'a> {
             return Err(Skip::Unparsed);
         }
         let (_, target) = self.word_text()?;
-        let fatal = std::mem::take(&mut self.fatal);
         if let Some(strip_tabs) = heredoc {
             self.heredoc = true;
             self.pending.push((target.clone(), strip_tabs));
@@ -825,6 +824,7 @@ impl<'a> Scanner<'a> {
             _ => (false, false),
         };
         if !nested {
+            let fatal = std::mem::take(&mut self.fatal);
             self.toks.push(Tok::Redirect { start, end: self.i, out, err, fatal });
         }
         Ok(())
@@ -1299,6 +1299,12 @@ mod tests {
             "ls ${A:-${B:?unset}}; echo next",
             "X=${Y:?unset} make; echo next",
             "make 2> ${LOG:?unset}; echo next",
+            "ls ${X:?unset}$(echo hi); echo next",
+            "ls \"${X:?unset}/$(echo hi)\"; echo next",
+            "ls ${X:?$(echo unset)}; echo next",
+            "ls $(( $(echo 1) / 0 )); echo next",
+            "ls ${X:?unset}<(echo hi); echo next",
+            "ls ${X:?unset}$(</dev/null); echo next",
         ] {
             assert!(flat(cmd).is_some(), "{cmd:?}");
             assert!(!piped(cmd, Shell::Bash) && !piped(cmd, Shell::Zsh), "{cmd:?}");
