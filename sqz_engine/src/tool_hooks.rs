@@ -142,8 +142,17 @@ pub fn process_hook_copilot(input: &str) -> Result<String> {
 /// input format, rewrites it, and returns the response in the correct format
 /// for the target platform.
 fn process_hook_for_platform(input: &str, platform: HookPlatform) -> Result<String> {
-    let parsed: serde_json::Value = serde_json::from_str(input)
+    let mut parsed: serde_json::Value = serde_json::from_str(input)
         .map_err(|e| crate::error::SqzError::Other(format!("hook: invalid JSON input: {e}")))?;
+    // Copilot CLI documents `toolArgs` as a JSON string.
+    if let Some(args) = parsed
+        .get("toolArgs")
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .filter(serde_json::Value::is_object)
+    {
+        parsed["toolArgs"] = args;
+    }
 
     // Claude Code uses "tool_name" + "tool_input" (official docs).
     // Cursor uses "hook_event_name": "beforeShellExecution" with "command" at top level.
@@ -2260,6 +2269,26 @@ mod tests {
         let args = &parsed["modifiedArgs"];
         assert!(args["command"].as_str().unwrap().contains("sqz compress"));
         assert_eq!(args["timeoutSec"], 30, "sibling toolArgs fields carried over");
+    }
+
+    #[test]
+    fn test_copilot_hook_reads_tool_args_given_as_a_string() {
+        let input = serde_json::json!({
+            "toolName": "bash",
+            "toolArgs": r#"{"command":"git log -20","timeoutSec":30}"#,
+        })
+        .to_string();
+        let out = process_hook_copilot(&input).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let args = &parsed["modifiedArgs"];
+        assert!(args["command"].as_str().unwrap().contains("sqz compress"), "{parsed}");
+        assert_eq!(args["timeoutSec"], 30, "{parsed}");
+        let background = serde_json::json!({
+            "toolName": "bash",
+            "toolArgs": r#"{"command":"cargo build","mode":"async"}"#,
+        })
+        .to_string();
+        assert_eq!(process_hook_copilot(&background).unwrap(), "{}");
     }
 
     #[test]
