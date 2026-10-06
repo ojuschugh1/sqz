@@ -340,6 +340,10 @@ enum Tok {
     Subshell,
 }
 
+/// Nesting of lists and expansions past which a command is left alone, so
+/// the recursive scan stays well inside the stack.
+const MAX_NESTING: usize = 64;
+
 struct Scanner<'a> {
     s: &'a str,
     b: &'a [u8],
@@ -350,6 +354,7 @@ struct Scanner<'a> {
     pending: Vec<(String, bool)>,
     comment: bool,
     heredoc: bool,
+    nesting: usize,
 }
 
 impl<'a> Scanner<'a> {
@@ -362,7 +367,16 @@ impl<'a> Scanner<'a> {
             pending: Vec::new(),
             comment: false,
             heredoc: false,
+            nesting: 0,
         }
+    }
+
+    fn nest(&mut self) -> Res<()> {
+        self.nesting += 1;
+        if self.nesting > MAX_NESTING {
+            return Err(Skip::Unparsed);
+        }
+        Ok(())
     }
 
     fn peek(&self, k: usize) -> Option<u8> {
@@ -399,6 +413,9 @@ impl<'a> Scanner<'a> {
     /// (`( )`, `$( )`, `<( )`) ends at its `)` and only gets the syntax and
     /// background checks.
     fn list(&mut self, nested: bool) -> Res<()> {
+        if nested {
+            self.nest()?;
+        }
         loop {
             self.blanks();
             let Some(c) = self.peek(0) else {
@@ -453,6 +470,7 @@ impl<'a> Scanner<'a> {
                 b')' => {
                     if nested {
                         self.i += 1;
+                        self.nesting -= 1;
                         return Ok(());
                     }
                     return Err(Skip::Unparsed);
@@ -606,6 +624,7 @@ impl<'a> Scanner<'a> {
     /// Skip to the `close` that balances `depth` opens already consumed, for
     /// `$(( ))` and `${ }`.
     fn closing(&mut self, open: u8, close: u8, mut depth: usize) -> Res<()> {
+        self.nest()?;
         let mut scratch = String::new();
         loop {
             match self.peek(0) {
@@ -635,6 +654,7 @@ impl<'a> Scanner<'a> {
                     depth -= 1;
                     self.i += 1;
                     if depth == 0 {
+                        self.nesting -= 1;
                         return Ok(());
                     }
                 }
@@ -1081,6 +1101,20 @@ mod tests {
         ] {
             skipped(cmd, Skip::Unparsed);
         }
+    }
+
+    #[test]
+    fn deep_nesting_is_left_alone() {
+        let nest = |open: &str, close: &str, n: usize| {
+            format!("echo {}x{}", open.repeat(n), close.repeat(n))
+        };
+        for (open, close) in [("$(", ")"), ("$(echo ", ")"), ("\"${a:-", "}\""), ("( ", " )")] {
+            let deep = nest(open, close, 100_000);
+            assert_eq!(plan(&deep), Err(Skip::Unparsed), "{open}");
+            assert_eq!(flat(&deep), None, "{open}");
+        }
+        simple(&nest("$(echo ", ")", 3));
+        simple(&nest("\"${a:-", "}\"", 3));
     }
 
     #[test]
