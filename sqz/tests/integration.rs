@@ -129,7 +129,7 @@ fn test_help_exits_zero() {
     let o = run(&["--help"]);
     assert!(o.status.success(), "sqz --help should exit 0");
     assert!(stdout(&o).contains("compress"), "help should mention compress");
-    assert!(stdout(&o).contains("API proxy that compresses full request payloads"), "help should describe proxy");
+    assert!(stdout(&o).contains("request body and sends it back; it does not forward requests"), "help should describe proxy");
 }
 
 #[test]

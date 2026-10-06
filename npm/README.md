@@ -303,7 +303,7 @@ sqz hook claude               # Process a PreToolUse hook (Claude Code)
 sqz hook claude-post          # Process a PostToolUse hook (Claude Code)
 sqz hook kiro                 # Legacy; Kiro now uses steering + MCP (sqz init)
 sqz print-opencode-plugin     # Print OpenCode plugin TS for manual install
-sqz proxy --port 8080         # API proxy (compresses full request payloads)
+sqz proxy --port 8080         # Local endpoint: compresses an API request body and sends it back, no forwarding
 ```
 
 ### Dedup Escape Hatch

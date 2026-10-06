@@ -252,7 +252,7 @@ enum Command {
         port: u16,
     },
 
-    /// API proxy that compresses full request payloads (OpenAI, Anthropic, Google AI).
+    /// Local HTTP endpoint that compresses an OpenAI, Anthropic or Google AI request body and sends it back; it does not forward requests.
     Proxy {
         /// Port to listen on.
         #[arg(long, default_value_t = 8080)]
