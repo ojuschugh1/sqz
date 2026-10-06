@@ -252,8 +252,7 @@ enum Command {
         port: u16,
     },
 
-    /// [Coming soon] Transparent HTTP proxy that compresses requests to OpenAI/Anthropic/Google AI.
-    /// Sits between your app and the API — no code changes required.
+    /// API proxy that compresses full request payloads (OpenAI, Anthropic, Google AI).
     Proxy {
         /// Port to listen on.
         #[arg(long, default_value_t = 8080)]
