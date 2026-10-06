@@ -1843,18 +1843,29 @@ fn strip_sqz_claude_entries(
 /// The sqz binary in `command` when it is `<sqz path> <args>`, as every sqz version wrote it.
 fn sqz_command_binary<'a>(command: &'a str, args: &str) -> Option<&'a str> {
     let bin = command.strip_suffix(args)?.strip_suffix(' ')?;
-    let absolute = bin.starts_with(['/', '\\']) || bin.as_bytes().get(1) == Some(&b':');
-    if bin.contains(['"', '\'', ';', '&', '|', '<', '>', '$', '`', '(', ')', '\n'])
-        || (bin.contains(char::is_whitespace) && !absolute)
+    let path = unquoted(bin);
+    let absolute = path.starts_with(['/', '\\']) || path.as_bytes().get(1) == Some(&b':');
+    if path.contains(['"', '\'', '$', '`', '\n'])
+        || (path == bin
+            && (bin.contains([';', '&', '|', '<', '>', '(', ')'])
+                || (bin.contains(char::is_whitespace) && !absolute)))
     {
         return None;
     }
-    let name = bin.rsplit(['/', '\\']).next().unwrap_or(bin);
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let stem = match name.len().checked_sub(4) {
         Some(i) if name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".exe") => &name[..i],
         _ => name,
     };
     (stem == "sqz").then_some(bin)
+}
+
+/// `bin` without one pair of surrounding double or single quotes.
+fn unquoted(bin: &str) -> &str {
+    ['"', '\'']
+        .into_iter()
+        .find_map(|q| bin.strip_prefix(q)?.strip_suffix(q))
+        .unwrap_or(bin)
 }
 
 /// Whether a hook entry's commands include sqz's `args` command.
@@ -3862,6 +3873,8 @@ mod global_install_tests {
             ("C:/Users/Jane Doe/.cargo/bin/sqz.EXE resume", "resume"),
             ("/Users/Jane Doe/bin/sqz resume", "resume"),
             ("~/.cargo/bin/sqz hook claude", "hook claude"),
+            ("\"/opt/sqz\" hook claude", "hook claude"),
+            ("'/opt/my tools (x86)/sqz' hook claude-post", "hook claude-post"),
         ] {
             assert!(sqz_command_binary(command, args).is_some(), "{command}");
         }
@@ -3874,7 +3887,9 @@ mod global_install_tests {
             ("sqz hook claude --verbose", "hook claude"),
             ("notsqz hook claude", "hook claude"),
             ("sqz hook claude-post", "hook claude"),
-            ("\"/opt/sqz\" hook claude", "hook claude"),
+            ("\"/opt/sqz hook claude", "hook claude"),
+            ("\"$HOME/bin/sqz\" hook claude", "hook claude"),
+            ("\"/opt/notsqz\" hook claude", "hook claude"),
         ] {
             assert!(sqz_command_binary(command, args).is_none(), "{command}");
         }
