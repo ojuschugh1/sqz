@@ -225,6 +225,15 @@ fn test_compress_stdin_tiny_input_passes_through() {
 }
 
 #[test]
+fn test_compress_takes_a_label_that_starts_with_a_dash() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    let o = run_with_db(&db, &["compress", "--cmd", "-j", "--no-cache"], Some("one line of output\n"));
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "one line of output\n");
+}
+
+#[test]
 fn test_compress_empty_input() {
     let o = run(&["compress", ""]);
     assert!(o.status.success(), "empty input should not crash");

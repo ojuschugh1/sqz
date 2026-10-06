@@ -154,7 +154,7 @@ enum Command {
         /// #10. The `SQZ_CMD` env var is still honoured for backward
         /// compatibility with the POSIX shell hook scripts; `--cmd`
         /// wins if both are present.
-        #[arg(long, value_name = "NAME")]
+        #[arg(long, value_name = "NAME", allow_hyphen_values = true)]
         cmd: Option<String>,
         /// Disable n-gram phrase abbreviation (the `«A1»` legend rewrite).
         ///
