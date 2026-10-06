@@ -13,9 +13,11 @@ The sqz Firefox extension compresses context in ChatGPT, Claude.ai, Gemini, Grok
 
 ### 1. Compile the WASM module
 
+From the repository root, the same way as for [Chrome](chrome-web-store.md):
+
 ```sh
-cd sqz-wasm
-wasm-pack build --target web --out-dir ../extension/pkg
+wasm-pack build sqz-wasm --release --target no-modules --out-dir ../extension/wasm-pkg
+cp extension/wasm-pkg/sqz_wasm.js extension/wasm-pkg/sqz_wasm_bg.wasm extension/
 ```
 
 ### 2. Build the Firefox extension
@@ -24,7 +26,7 @@ wasm-pack build --target web --out-dir ../extension/pkg
 sh extension-firefox/build.sh
 ```
 
-This copies shared content scripts and popup from the Chrome extension into `extension-firefox/`.
+This copies the shared content scripts, the popup HTML and the two WASM files from `extension/` into `extension-firefox/`, and writes `extension-firefox/manifest.json` from the Chrome manifest with the gecko settings added and the background as `"scripts": ["sqz_wasm.js", "background.js"]`, so the `no-modules` glue defines `wasm_bindgen` before `background.js` runs.
 
 ### 3. Test locally
 
@@ -39,24 +41,24 @@ Or load manually: `about:debugging` > This Firefox > Load Temporary Add-on > sel
 
 | | Chrome | Firefox |
 |---|---|---|
-| Manifest | `"service_worker": "background.js"` | `"scripts": ["background.js"]` |
+| Manifest | `"service_worker": "background.js"` | `"scripts": ["sqz_wasm.js", "background.js"]` |
 | API namespace | `chrome.*` | `browser.*` (promise-based) |
-| Extension ID | Auto-assigned | Set in `browser_specific_settings.gecko.id` |
-| Min version | N/A | `strict_min_version: "109.0"` (MV3 support) |
+| Extension ID | Auto-assigned | Set in `browser_specific_settings.gecko.id` (`sqz@sqz-dev`) |
+| Min version | N/A | `strict_min_version: "140.0"` |
 
 ## Package for submission
 
 ```sh
 cd extension-firefox
 web-ext build
-# produces web-ext-artifacts/sqz_context_compression-0.1.0.zip
+# writes the package zip to web-ext-artifacts/
 ```
 
-Or manually:
+Or manually, leaving out the old package zip kept in that directory:
 
 ```sh
 cd extension-firefox
-zip -r ../sqz-firefox.xpi . -x "*.DS_Store" -x "build.sh"
+zip -r ../sqz-firefox.xpi . -x "*.DS_Store" -x "build.sh" -x "*.zip"
 ```
 
 ## Publish

@@ -6,30 +6,24 @@ The sqz Chrome extension compresses context in ChatGPT, Claude.ai, Gemini, Grok,
 
 - Rust toolchain with `wasm32-unknown-unknown` target
 - `wasm-pack`
-- Node.js + webpack (for bundling content scripts)
 - A Chrome Web Store developer account ($5 one-time fee)
 
 ## Build the extension
 
 ### 1. Compile the WASM module
 
-```sh
-cd sqz-wasm
-wasm-pack build --target web --out-dir ../extension/pkg
-```
-
-This produces `sqz_wasm.js` and `sqz_wasm_bg.wasm` in `extension/pkg/`.
-
-### 2. Bundle content scripts
+From the repository root:
 
 ```sh
-cd extension
-npm install
-npm run build
-# produces dist/ with bundled JS and the WASM file
+wasm-pack build sqz-wasm --release --target no-modules --out-dir ../extension/wasm-pkg
+cp extension/wasm-pkg/sqz_wasm.js extension/wasm-pkg/sqz_wasm_bg.wasm extension/
 ```
 
-The webpack config should copy `pkg/sqz_wasm_bg.wasm` into the output directory so it is accessible as a `web_accessible_resource`.
+`extension/background.js` loads `sqz_wasm.js` from the extension root with `importScripts` and calls the global `wasm_bindgen` it defines, which only the `no-modules` glue does, then fetches `sqz_wasm_bg.wasm` from the same place. wasm-pack writes a `.gitignore` into its output directory, so build into `extension/wasm-pkg/` and copy the two files rather than pointing `--out-dir` at `extension/` itself.
+
+### 2. Load it unpacked
+
+There is no bundling step: `extension/` is the extension as it ships. To test it, open `chrome://extensions`, turn on Developer mode, click **Load unpacked** and select `extension/`.
 
 ## Required `manifest.json` fields
 
@@ -37,7 +31,7 @@ The webpack config should copy `pkg/sqz_wasm_bg.wasm` into the output directory 
 {
   "manifest_version": 3,
   "name": "sqz — Context Compression",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "description": "Compresses LLM context in ChatGPT, Claude.ai, Gemini, Grok, and Perplexity.",
   "permissions": ["storage"],
   "host_permissions": [
@@ -51,11 +45,20 @@ The webpack config should copy `pkg/sqz_wasm_bg.wasm` into the output directory 
   "background": { "service_worker": "background.js" },
   "action": { "default_popup": "popup/popup.html" },
   "web_accessible_resources": [{
-    "resources": ["pkg/sqz_wasm_bg.wasm", "pkg/sqz_wasm.js"],
-    "matches": ["<all_urls>"]
+    "resources": ["sqz_wasm_bg.wasm", "sqz_wasm.js"],
+    "matches": [
+      "https://chatgpt.com/*",
+      "https://chat.openai.com/*",
+      "https://claude.ai/*",
+      "https://gemini.google.com/*",
+      "https://grok.com/*",
+      "https://www.perplexity.ai/*"
+    ]
   }]
 }
 ```
+
+The full manifest, with the content scripts for each site, is `extension/manifest.json`.
 
 Key rules:
 - `manifest_version` must be `3` (MV2 is deprecated)
@@ -65,11 +68,11 @@ Key rules:
 
 ## Package for submission
 
-Zip the built extension directory (not the source):
+Zip the contents of `extension/`, leaving out the tests and the wasm-pack output directory:
 
 ```sh
-cd extension/dist
-zip -r ../sqz-extension-0.1.0.zip .
+cd extension
+zip -r ../sqz-extension-0.5.0.zip . -x "tests/*" -x "wasm-pkg/*" -x "*.DS_Store"
 ```
 
 ## Publish
