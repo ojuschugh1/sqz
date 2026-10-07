@@ -564,11 +564,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude Code hooks by substring (`resume`, `hook precompact`,
   `hook claude`), so `sqz init`, `sqz doctor --fix` and `sqz uninstall`
   deleted user hooks such as `/usr/local/bin/on-resume.sh` or
-  `~/bin/save-notes --hook precompact`, and replaced ones that wrap
-  sqz, such as `/usr/bin/time /opt/sqz hook claude`. An entry is now
-  sqz's only when it runs a `sqz` or `sqz.exe` binary directly, quoted
-  or not, with exactly the arguments sqz writes. 1.9.0 and earlier
-  deleted and replaced them.
+  `~/bin/save-notes --hook precompact`, and replaced ones that wrap sqz,
+  such as `/usr/bin/time /opt/sqz hook claude`. An entry is now sqz's
+  only when its command is `sqz` or `sqz.exe`, bare or as a path, quoted
+  or not, followed by exactly the arguments sqz writes. Since an
+  unquoted path may contain spaces, a wrapper that runs sqz by a
+  relative path, such as `/usr/bin/time ./sqz hook claude`, still counts
+  as sqz's. 1.9.0 and earlier deleted and replaced them.
 - **`sqz uninstall` removes the `CLAUDE.md` guidance block and the
   `mcpServers.sqz` entry in `~/.claude.json`.** 1.9.0 and earlier left
   both.
