@@ -14,7 +14,7 @@ sqz init --global   # every project: ~/.claude/settings.json
 The settings file gets these hooks:
 
 - PreToolUse (Bash and PowerShell): `sqz hook claude` rewrites the command so its output is piped through `sqz compress`.
-- PostToolUse (Bash): `sqz hook claude-post` compresses the stdout and stderr of a successful command the PreToolUse hook left alone, through `updatedToolOutput`. Output Claude Code already cut to a preview (`BASH_MAX_OUTPUT_LENGTH`), images and interrupted commands are left as they are.
+- PostToolUse (Bash): `sqz hook claude-post` compresses the stdout and stderr of a successful command the PreToolUse hook left alone, through `updatedToolOutput`. Output Claude Code already cut to a preview (`BASH_MAX_OUTPUT_LENGTH`), images and interrupted commands are left as they are. It always answers with the compressed text, never a `§ref`: with the hook installed twice, a reference from the second run pointed at output the model never saw. The original is still stored, so an `sqz expand` hint in the output works.
 - PreCompact: `sqz hook precompact` marks cached references stale when Claude Code compacts.
 - SessionStart (after compaction): `sqz resume` re-injects the session context.
 

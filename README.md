@@ -512,7 +512,9 @@ sides instead of hand-waving:
   estimate: without caching the same savings would bill at full input price
   on every turn.
 - `sqz stats` reports regret signals: quick re-runs (the agent re-produced
-  byte-identical output within 2 minutes — the repeat bought nothing) and
+  byte-identical output within 2 minutes — the repeat bought nothing; the
+  Claude Code PostToolUse hook never answers with a reference, so its
+  repeats count as ordinary compressions) and
   ref expands (`§ref§` tokens recovered to original bytes). Both are proxies
   for "compression dropped something the model needed." If one command
   keeps showing up, its formatter needs work — file an issue.
