@@ -380,7 +380,8 @@ Wrap a server by prefixing its command in your MCP config:
 Flags: `--lazy-tools` shortens every tool description to one sentence and
 injects an `sqz_tool_help` tool that serves the full original docs on demand
 (some MCP servers spend 10-40k tokens on `tools/list` alone); `--no-desc`
-keeps descriptions verbatim; `--no-cache` disables dedup refs. Works with
+keeps descriptions verbatim; `--no-cache` stores nothing, so it sends no
+dedup refs and adds no `sqz_expand` tool. Works with
 every MCP client (Claude Code, Cursor, Windsurf, Zed, Codex, Kiro, ...)
 because the client just sees a normal MCP server. Full guide, including the
 server's own `sqz_read_file` / `sqz_grep` / `sqz_list_dir` tools and per-client
@@ -588,7 +589,7 @@ Stats are stored locally in SQLite under `~/.sqz/sessions.db` — nothing leaves
 
 2. **Table compactor** — aligned-column output from tools without a dedicated formatter (`ps aux`, `netstat`, database CLIs) collapses its padding runs to two-space separators. The detector is strict — indented lines, code, YAML, and JSON never match.
 3. **Structural summaries**: the engine has an API that reduces a code file to imports, function signatures and a call graph. The hook and MCP paths do not use it; they serve source in full.
-4. **Dedup cache**: SHA-256 content hash, persistent across sessions. Byte-identical output the model already has = 13-token reference. A line range of a file the model already has in full (`sed -n '40,80p'`, `sqz_read_file` with `offset`/`limit`) = `§ref:HASH:L40-80§`. A re-read after a small edit = only the changed lines, through the sqz MCP tools (the shell hook sends the edited file again). References are only served while the original is still in context (30-minute window, tunable via `SQZ_REF_TTL_SECS`, reset on compaction).
+4. **Dedup cache**: SHA-256 content hash, persistent across sessions. Byte-identical output the model already has = 13-token reference. A line range of a file the model already has in full (`sed -n '40,80p'`, `sqz_read_file` with `offset`/`limit`) = `§ref:HASH:L40-80§`. A re-read after a small edit = the changed lines with one unchanged line on each side, through the sqz MCP tools (the shell hook sends the edited file again); edits spread through the file come back in full. References are only served while the original is still in context (30-minute window, tunable via `SQZ_REF_TTL_SECS`, reset on compaction).
 5. **JSON pipeline**: strip nulls → drop bookkeeping fields (`__v`, `etag`, request and correlation ids) → flatten → collapse arrays → TOON encoding (lossless compact format). Fields whose value is an empty string, array or object are dropped at any depth, and strings over 500 characters are cut to their first 500 characters followed by `...`.
 6. **Safe mode**: stack traces (a trace header followed by its frames), SQL DDL at the start of a line, PEM blocks and credential lines (`key=value` or `key: value` with a secret-looking key) skip the pipeline and pass through unchanged at any size, with only ANSI codes stripped, and are never cached. On the shell hook a per-command formatter still runs first. Its summary is used only when it keeps every line of each paragraph that holds one of them unchanged, so it may summarize the rest of a test run around a trace; otherwise the whole output passes through. Output that only mentions a password, key, trace or migration outside those structures is compressed as usual but is not cached either, so anything a lossy stage drops from it cannot be expanded.
 

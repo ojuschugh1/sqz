@@ -19,10 +19,10 @@ Agents burn most of their context on three operations: reading files, grepping, 
 
 | Tool | What it does | Why it saves tokens |
 |---|---|---|
-| `sqz_read_file` | Read a file. Content is returned faithfully (every line, identifier and line number; only ANSI codes stripped). Output stops at 256 KB on a line boundary and the header gives `continue_with_offset` (`max_bytes` changes it, 0 lifts it). | A repeat read of unchanged content returns a 13-token `§ref:HASH§` reference instead of the file. Agents re-read the same file after every edit; this is where the savings are. |
+| `sqz_read_file` | Read a file. Content is returned faithfully (every line, identifier and line number; only ANSI codes stripped). Output stops at 256 KB on a line boundary and the header gives `continue_with_offset` (`max_bytes` changes it, 0 lifts it). | A repeat read of unchanged content returns a 13-token `§ref:HASH§` reference instead of the file, and a re-read after a small edit returns a delta: the changed lines with one unchanged line on each side. Agents re-read the same file after every edit; this is where the savings are. A ranged re-read is never a delta, and content of 13 tokens or fewer (an empty file, a search with no matches) is always sent in full and still stored. |
 | `sqz_grep` | Literal or regex search under a path, `path:lineno:text` output, capped at `max_matches` (default 200) and 100 KB (`max_bytes`). A match line over 400 chars is clipped to a window around the hit (`max_line_chars`). | The caps stop one popular term or one minified bundle from flooding the context. Repeat searches dedupe. |
 | `sqz_list_dir` | Directory listing that skips `.git`, `node_modules`, `target`, `dist`, `build`, `vendor`, `__pycache__`. `max_depth` 1 (the default) is the immediate children; stops at 1000 entries (`max_entries`). | No permission/owner/date columns, no bulk directories, repeat listings dedupe. |
-| `compress` | Run arbitrary text through the generic pipeline (log folding, JSON compaction, dedup). Per-command formatters run only on the shell path. | For output the agent already holds and wants to shrink before re-sending. |
+| `compress` | Run arbitrary text through the generic pipeline (log folding, JSON compaction, dedup). Per-command formatters run only on the shell path. When it drops low-information segments of text it stores, the output ends with `[full output: call expand with prefix "<16 hex>"]`. | For output the agent already holds and wants to shrink before re-sending. |
 | `passthrough` | Return text unchanged. | Escape hatch for models that cannot parse `§ref§` tokens. |
 | `expand` | Resolve a `§ref:HASH§` token (or bare hex prefix) to the original bytes. | Makes every cached compression reversible. |
 | `sqz_recall` | Full-text search (SQLite FTS5) over everything sqz has compressed in past sessions. | Recovers context lost to compaction without re-running commands. |
@@ -50,12 +50,14 @@ On the way back to the client the proxy:
 
 - compresses `tools/call` text results through the generic sqz pipeline: dedup `§ref` on repeats, stack traces, credential lines and migrations passed through unchanged, a 16-token net-win gate so small results are never made worse. With the cache on (the default), originals are persisted and recoverable, except results that mention credentials, a stack trace or a migration, which are never cached; `--no-cache` turns caching off.
 - compacts `tools/list` descriptions (whitespace collapsed, capped at 400 characters, input schemas untouched). With `--lazy-tools` the cap drops to one sentence (160 characters) and an injected `sqz_tool_help` tool serves the full original documentation for any tool on demand.
-- appends an `sqz_expand` tool to the upstream tool list and answers calls to it locally, so the agent can recover any cached or referenced result byte-exact.
-- adds a short note to the `initialize` instructions explaining what `§ref:HASH§` means.
+- appends an `sqz_expand` tool to the upstream tool list and answers calls to it locally, so the agent can recover any cached or referenced result byte-exact. With `--no-cache` nothing is stored, so the tool is left out.
+- adds a short note to the `initialize` instructions explaining what `§ref:HASH§` means. With `--no-cache` the note says only that results pass through the proxy.
 
 Error results, non-text content, notifications, and every client-to-server message pass through verbatim.
 
-Flags: `--lazy-tools` (one-sentence descriptions plus `sqz_tool_help`), `--no-desc` (keep descriptions verbatim), `--no-cache` (disable dedup refs). Run `sqz-mcp proxy --help`.
+Flags: `--lazy-tools` (one-sentence descriptions plus `sqz_tool_help`), `--no-desc` (keep descriptions verbatim), `--no-cache` (store nothing: no dedup refs and no `sqz_expand`). Run `sqz-mcp proxy --help`.
+
+When the client closes stdin, the proxy closes the upstream's stdin and gives it 2.5 seconds to exit, then stops it and waits up to another 2.5 seconds while it passes on a result it had already read. A response the upstream had not sent by then is lost; MCP clients keep stdin open while they wait, so this mostly affects scripted one-shot use.
 
 ## Per-client configuration
 
@@ -86,7 +88,7 @@ OpenCode uses its own `mcp` object in `opencode.json`: `"sqz": {"type": "local",
 
 Zed uses `context_servers` in `settings.json`; Continue uses `~/.continue/config.json`. Ready-to-paste snippets for every client are in [integrations/](integrations/).
 
-Server flags: `--transport stdio|sse` (default stdio), `--port PORT` (SSE, default 3000), `--preset-dir DIR`. Set `SQZ_DB_PATH` in the server's `env` block to keep the dedup cache and stats per project instead of in `~/.sqz/sessions.db`.
+Server flags: `--transport stdio|sse` (default stdio), `--port PORT` (SSE, default 3000), `--preset-dir DIR`, and `--version`, which prints the version and exits. Set `SQZ_DB_PATH` in the server's `env` block to keep the dedup cache and stats per project instead of in `~/.sqz/sessions.db`.
 
 ## How it relates to the shell hook
 
@@ -95,7 +97,8 @@ For Claude Code, Gemini CLI and Copilot CLI, `sqz init` also installs a hook tha
 ## Guarantees
 
 - **Zero LLM calls.** Every transform is deterministic Rust. Same input, same output, no model in the loop, works offline.
-- **Recoverable.** Every cached or deduplicated result can be expanded back to the original bytes with `expand` (server) or `sqz_expand` (proxy). Results that mention credentials, a stack trace or a migration are never cached, so a lossy compression of one cannot be expanded.
+- **Recoverable.** Every cached or deduplicated result can be expanded back to the original bytes with `expand` (server) or `sqz_expand` (proxy), and lossy output says which prefix to pass. Results that mention credentials, a stack trace or a migration are never cached, so a lossy compression of one cannot be expanded.
+- **Keeps serving.** The server answers MCP `ping`. A request that panics is still answered (`compress` returns its input unchanged, other tools return JSON-RPC error -32603, the proxy passes the upstream result on as it came) and the next one is served as usual. A line that is not valid UTF-8 gets a -32700 parse error from the server and is passed on by the proxy with the bad bytes replaced.
 - **Never worse.** A 16-token net-win gate returns the original when compression would not pay for its own header.
 - **Safe mode.** Stack traces, migrations, PEM blocks and credential lines come back unchanged at any size from the proxy and from the `compress` tool. No tool caches content that mentions credentials, a stack trace or a migration, so a repeat read of such a file is sent in full.
 - **No telemetry.** The dedup cache and stats live in a local SQLite file you own.

@@ -38,15 +38,18 @@ $ sed -n '41,80p' auth.py            # after `cat auth.py` earlier in the sessio
 §ref:e03d55889cad8a3a:L41-80§
 ```
 
-**The file after a small edit: a delta.** Through `sqz_read_file`, sqz detects the near-duplicate (SimHash, then a line-level diff) and returns only what changed. Measured on a 7,140-byte Python file with two lines appended: the re-read came back as 203 characters.
+**The file after a small edit: a delta.** Through `sqz_read_file`, sqz detects the near-duplicate (SimHash, then a line-level diff) and returns what changed, with one unchanged line on each side of each change as an anchor. Measured on a 7,140-byte Python file with two lines appended: the re-read came back as 181 characters.
 
 ```
 [sqz_read_file path=src/auth.py size=7182]
 §delta:e03d55889cad8a3a§
- @@ skip 238 unchanged lines @@
+ @@ skip 239 unchanged lines @@
+     return respond(user, status=200)
 +def handler_new(request):
 +    return None
 ```
+
+Line numbers in a delta count from 1, and the skipped and shown lines add up to the whole file. When the delta would not be shorter than the file, for example after edits spread all through it, the file is sent in full. A ranged read (`offset` and `limit`) never comes back as a delta: it is either the ranged reference above or the lines themselves. Content of 13 tokens or fewer, such as an empty file, is always sent in full, since a reference would cost as much; it is still stored, so `expand` and `sqz_recall` find it.
 
 None of these is a summary. Each points at bytes the model already has in its context, and the guidance `sqz init` writes for the agent (CLAUDE.md, AGENTS.md, Kiro steering) tells it exactly what the tokens mean and how to expand them if it needs the bytes again.
 
