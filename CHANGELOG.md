@@ -23,20 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commands.** From 0.7.0 through 1.9.0 the Cursor hook answered every
   rewrite with `"permission": "allow"`, which lets Cursor run the
   command without its own approval, and from 0.6.0 through 1.9.0 the
-  OpenCode hook answered with `"decision": "approve"`. `sqz init` 0.6.0
-  and 0.7.0 wrote `.cursor/hooks.json` running `<sqz path> hook cursor`
-  (0.6.0 in Claude Code's hook format), and later versions left the
-  file in place, so in a project set up with 0.7.0 every command the
-  hook rewrote was approved. Cursor reads any answer to a permission
-  hook as a decision and takes a new command only together with one, so
-  `sqz hook cursor` now prints nothing, writes one line to stderr and
-  exits 1, which Cursor treats as a failed hook: its normal approval
-  applies and the command runs as written, uncompressed. `sqz doctor`
-  reports such a hook in `.cursor/hooks.json` or `~/.cursor/hooks.json`,
-  and `sqz doctor --fix` and `sqz uninstall` remove it, keeping any
-  other hooks and deleting the file when nothing else is left. The
-  OpenCode hook now returns only the rewritten command; `sqz init` has
-  never installed it, since OpenCode gets the plugin.
+  OpenCode hook answered with `"decision": "approve"`. `sqz init` 0.4.0
+  through 0.7.0 wrote `.cursor/hooks.json` running
+  `<sqz path> hook cursor` (0.4.0 to 0.6.0 in Claude Code's hook
+  format), and later versions left the file in place, so in a project
+  set up with 0.7.0 every command the hook rewrote was approved. Cursor
+  reads any answer to a permission hook as a decision and takes a new
+  command only together with one, so `sqz hook cursor` now prints
+  nothing, writes one line to stderr and exits 1, which Cursor treats as
+  a failed hook: its normal approval applies and the command runs as
+  written, uncompressed. `sqz doctor` reports such a hook in
+  `.cursor/hooks.json` or `~/.cursor/hooks.json`, and `sqz doctor --fix`
+  and `sqz uninstall` remove it, keeping any other hooks and deleting
+  the file when nothing else is left. The OpenCode hook now returns only
+  the rewritten command; `sqz init` has never installed it, since
+  OpenCode gets the plugin.
 
 ### Added
 

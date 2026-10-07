@@ -34,7 +34,7 @@ Cursor picks up MCP server changes on restart. `sqz doctor` shows Cursor as conf
 
 ## Hooks from older sqz versions
 
-`sqz init` 0.6.0 and 0.7.0 also wrote `.cursor/hooks.json`, with a hook that runs `sqz hook cursor`. From 0.7.0 through 1.9.0, `sqz hook cursor` answered every rewrite with an approval, which lets Cursor run the command without asking. It now prints nothing and exits 1, which Cursor treats as a failed hook: Cursor's own approval applies and the command runs as written, uncompressed. `sqz doctor` reports such a hook in `.cursor/hooks.json` or `~/.cursor/hooks.json`, and `sqz doctor --fix` and `sqz uninstall` remove it, keeping any other hooks in the file and deleting the file when nothing else is left.
+`sqz init` 0.4.0 through 0.7.0 also wrote `.cursor/hooks.json`, with a hook that runs `sqz hook cursor` (0.4.0 to 0.6.0 in Claude Code's hook format). From 0.7.0 through 1.9.0, `sqz hook cursor` answered every rewrite with an approval, which lets Cursor run the command without asking. It now prints nothing and exits 1, which Cursor treats as a failed hook: Cursor's own approval applies and the command runs as written, uncompressed. `sqz doctor` reports such a hook in `.cursor/hooks.json` or `~/.cursor/hooks.json`, and `sqz doctor --fix` and `sqz uninstall` remove it, keeping any other hooks in the file and deleting the file when nothing else is left.
 
 ## What you get
 
