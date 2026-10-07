@@ -108,7 +108,7 @@ fn plan_for(command: &str, shell: Shell) -> Result<Plan<'_>, Skip> {
         && segs[hoisted - 1].sep == Some(Sep::And)
         && rest[..rest.len() - 1]
             .iter()
-            .any(|s| matches!(s.sep, Some(Sep::Semi | Sep::Or | Sep::Newline)))
+            .any(|s| s.depth == 0 && matches!(s.sep, Some(Sep::Semi | Sep::Or | Sep::Newline)))
     {
         return Err(Skip::StateChange);
     }
@@ -873,6 +873,7 @@ struct Seg {
     assign: bool,
     /// Reserved words seen (`if`, `then`, `do`, `!`, `time`, ...).
     kw: usize,
+    depth: usize,
     subshell: bool,
     tokens: usize,
     /// The separator after this command and the offset just past it.
@@ -899,6 +900,7 @@ impl Seg {
 fn segments(command: &str, toks: &[Tok]) -> Res<Vec<Seg>> {
     let mut segs = vec![Seg::default()];
     let mut at_cmd = true;
+    let mut depth = 0;
     // After `command`/`builtin`, the next non-option word is the command.
     let mut wrapper = false;
     for tok in toks {
@@ -913,6 +915,7 @@ fn segments(command: &str, toks: &[Tok]) -> Res<Vec<Seg>> {
                 }
                 seg.sep = Some(*kind);
                 seg.end = *end;
+                seg.depth = depth;
                 segs.push(Seg::default());
                 at_cmd = true;
                 wrapper = false;
@@ -949,6 +952,11 @@ fn segments(command: &str, toks: &[Tok]) -> Res<Vec<Seg>> {
                 if is_assignment(&command[*start..]) {
                     seg.assign = true;
                     continue;
+                }
+                match plain.as_str() {
+                    "if" | "while" | "until" | "for" | "select" => depth += 1,
+                    "fi" | "done" => depth = depth.saturating_sub(1),
+                    _ => {}
                 }
                 match plain.as_str() {
                     "if" | "then" | "elif" | "else" | "do" | "while" | "until" | "!" | "time" => {
@@ -1126,12 +1134,23 @@ mod tests {
         assert_eq!(p.prefix, "builtin cd /tmp &&");
         let p = plan("cd sub; make\nmake test").unwrap();
         assert_eq!((p.prefix, p.body), ("cd sub;", " make\nmake test"));
+        for cmd in [
+            "cd sub && for f in a b; do echo $f; done",
+            "cd sub && if [ -f x ]; then cat x; fi",
+            "cd sub && while read l; do echo $l; done < list.txt",
+            "cd sub && for f in a; do for g in b; do echo $f$g; done; done && make",
+        ] {
+            assert_eq!(grouped(cmd).prefix, "cd sub &&", "{cmd:?}");
+        }
         skipped("cd a;", Skip::Empty);
         skipped("cd /tmp", Skip::StateChange);
         skipped("cd a || exit 1", Skip::StateChange);
         skipped("cd sub && make\nmake test", Skip::StateChange);
         skipped("cd sub && make; make test", Skip::StateChange);
         skipped("cd sub && make || echo failed", Skip::StateChange);
+        skipped("cd sub && for f in a b; do echo $f; done; echo next", Skip::StateChange);
+        skipped("cd sub && if [ -f x ]; then cat x; fi\necho next", Skip::StateChange);
+        skipped("cd sub && for f in a; do make; done || echo failed", Skip::StateChange);
     }
 
     #[test]

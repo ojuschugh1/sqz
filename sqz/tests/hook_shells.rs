@@ -127,6 +127,8 @@ const CASES: &[&str] = &[
     "cd missing-dir && echo never",
     "cd sub; ls ..",
     "cd missing-dir; ls\necho next",
+    "cd sub && for f in a b; do echo \"$f\"; done",
+    "cd missing-dir && if true; then echo never; fi",
     "printf 'no newline at end'",
     "seq 3 | grep 2; echo \"status $?\"",
     "echo $(echo nested | tr a-z A-Z)",
@@ -179,6 +181,8 @@ const CD_CASES: &[&str] = &[
     "cd missing-dir && ls\necho next",
     "cd missing-dir && ls; echo next",
     "cd missing-dir && ls || echo next",
+    "cd missing-dir && for f in a b; do echo $f; done; echo next",
+    "cd missing-dir && if true; then echo never; fi\necho next",
 ];
 
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
