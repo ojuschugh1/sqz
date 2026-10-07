@@ -7,16 +7,17 @@
 //!
 //! - compresses `tools/call` text results (dedup `§ref` on repeats, the
 //!   full pipeline on first pass, net-win gated, Safe-routed content left
-//!   verbatim). Originals are persisted, so every compression is
-//!   recoverable via the injected `sqz_expand` tool.
+//!   verbatim). Unless `--no-cache`, originals are persisted, so every
+//!   compression is recoverable via the injected `sqz_expand` tool.
 //! - compacts `tools/list` tool descriptions (whitespace + length cap,
 //!   schemas untouched) unless `--no-desc`. With `--lazy-tools` the cap
 //!   drops to one sentence and an injected `sqz_tool_help` tool serves
 //!   the full original documentation on demand.
 //! - appends a `sqz_expand` tool to the upstream's tool list and answers
-//!   calls to it locally.
+//!   calls to it locally, except with `--no-cache`.
 //! - appends a short protocol note to the `initialize` instructions so
-//!   the model knows what `§ref:HASH§` means.
+//!   the model knows what `§ref:HASH§` means (with `--no-cache`, only
+//!   that results pass through the proxy).
 //!
 //! Error results, non-text content, notifications, and every client→server
 //! message (except `sqz_expand` calls) pass through verbatim.

@@ -39,7 +39,7 @@ impl Default for DeltaConfig {
 /// A single edit operation in a delta.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeltaOp {
-    /// Keep N lines unchanged (not emitted in output, just tracked).
+    /// Keep N lines unchanged (only the context lines next to a change are emitted).
     Keep(usize),
     /// Insert new lines.
     Insert(Vec<String>),
