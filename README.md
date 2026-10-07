@@ -511,9 +511,9 @@ $ sqz stats --breakdown
 ```
 
 `sqz stats` and `sqz gain` count cl100k tokens of what sqz actually printed,
-abbreviation legend and expand hint included. A run of one character class longer than 2 KB,
-such as a long separator line, is counted in 2 KB slices, which can be off by
-about 1% plus 4 tokens.
+abbreviation legend and expand hint included. A run of one character class
+longer than 2 KB, such as a long separator line, is counted in 2 KB slices,
+which can be off by about 1% plus 4 tokens.
 
 ### Honest accounting: cost and regret
 
