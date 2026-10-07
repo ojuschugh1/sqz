@@ -526,7 +526,12 @@ loops and heredocs as written and the PostToolUse hook compresses their
 output after a successful run), grouped lists and pipelines (Gemini CLI,
 Copilot CLI, Claude Code in bypass mode) skip the per-command formatters,
 and the 16-token net-win gate skips compressions that wouldn't pay for their
-own markers.
+own markers. A command is also left as written when its rewrite could run a
+different set of commands than the original. In `ls ${DEST:?}; echo next`,
+piping `ls` on its own would let `echo next` run after the failed expansion
+stopped the shell, and where a list goes through sqz as one group, a failed
+`cd` in `cd build && make; make test` would skip the group instead of only
+`make`.
 <img width="3456" height="1918" alt="image" src="https://github.com/user-attachments/assets/d308bc60-81f3-4935-9728-b30534e5b5e5" />
 
 
