@@ -14,11 +14,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude Code an allow skips the permission prompt, so a command like
   `git push --force` or `rm -rf build` ran without the prompt your
   settings would have shown (deny and ask rules still applied). Copilot
-  CLI 1.0.66 and later treat its `allow` the same way. Both hooks now
-  return only the rewritten input and leave the decision to the client.
-  Checked against Claude Code 2.1.286: a command that needed approval
-  before still needs it after the rewrite, and one your rules allow
-  still runs without a prompt.
+  CLI 1.0.66 and later treat its `allow` the same way. The Claude Code
+  and Copilot CLI hooks now return only the rewritten input and leave
+  the decision to the client. Checked against Claude Code 2.1.286: a
+  command that needed approval before still needs it after the rewrite,
+  and one your rules allow still runs without a prompt.
+- **`sqz hook cursor` and `sqz hook opencode` no longer approve
+  commands.** From 0.7.0 through 1.9.0 the Cursor hook answered every
+  rewrite with `"permission": "allow"`, which lets Cursor run the
+  command without its own approval, and from 0.6.0 through 1.9.0 the
+  OpenCode hook answered with `"decision": "approve"`. `sqz init` 0.6.0
+  and 0.7.0 wrote `.cursor/hooks.json` running `<sqz path> hook cursor`
+  (0.6.0 in Claude Code's hook format), and later versions left the
+  file in place, so in a project set up with 0.7.0 every command the
+  hook rewrote was approved. Cursor reads any answer to a permission
+  hook as a decision and takes a new command only together with one, so
+  `sqz hook cursor` now prints nothing, writes one line to stderr and
+  exits 1, which Cursor treats as a failed hook: its normal approval
+  applies and the command runs as written, uncompressed. `sqz doctor`
+  reports such a hook in `.cursor/hooks.json` or `~/.cursor/hooks.json`,
+  and `sqz doctor --fix` and `sqz uninstall` remove it, keeping any
+  other hooks and deleting the file when nothing else is left. The
+  OpenCode hook now returns only the rewritten command; `sqz init` has
+  never installed it, since OpenCode gets the plugin.
 
 ### Added
 
@@ -33,24 +51,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the parts the rewrite adds, `Bash(set -o pipefail)` and
   `Bash(sqz compress --cmd *)`; neither runs anything. Until they are
   there the hook leaves commands alone, and `sqz doctor` flags an older
-  install (`--fix` adds them). Pipelines, loops and heredocs are left as
-  written, except in bypass mode where nothing is checked. On the
-  11,203 real agent commands below, 55.7% are rewritten in default mode
-  (1.9.0 rewrote 28.7%, and approved all of them) and 96.6% in bypass
-  mode; 4,186 of the rest contain a pipe, where the agent is usually
+  install (`--fix` adds them and keeps the hook's sqz binary while it
+  resolves, a bare `sqz` on `PATH` included). Pipelines, loops and
+  heredocs are left as written, except in bypass mode where nothing is
+  checked. A list is also left as written, in every mode, when one of
+  its piped commands could stop the shell on a failed expansion
+  (`${DEST:?}`, `$((1/0))`, and unless `$SHELL` is bash an unquoted glob
+  that matches nothing, `=cmd` or `~user`) and another command follows
+  after `;`, a newline or `||`: piped on its own the failing command
+  would stop only its pipe, and the rest would run. `&&` is fine, since
+  `pipefail` stops the list there. On 12,676 real agent commands, 56.3%
+  are rewritten in default mode with zsh as `$SHELL` (56.4% with bash;
+  1.9.0 rewrote 26.7%, and approved all of them) and 95.4% in bypass
+  mode; 4,261 of the rest contain a pipe, where the agent is usually
   filtering the output already.
 - **Claude Code PostToolUse hook.** When a command the PreToolUse hook
   left alone exits 0, `sqz hook claude-post` compresses its stdout and
   stderr in place through `updatedToolOutput`, which keeps the Bash
   result's shape. Output Claude Code has already cut to a preview
   (`BASH_MAX_OUTPUT_LENGTH`, 30,000 characters by default), images and
-  interrupted commands are left as they are.
+  interrupted commands are left as they are. It always answers with the
+  compressed text, never a `§ref` to earlier output, so a second copy of
+  the hook can't point the model at output it never saw; the original
+  is still stored for `sqz expand`. A repeated output shows in
+  `sqz stats` and `sqz gain` as an ordinary compression, not a dedup
+  hit or a quick re-run.
+- **`sqz-mcp --version`.** It printed nothing and started the stdio
+  server, which then waited on stdin; it now prints `sqz-mcp <version>`
+  and exits, like `--help`. Flags it doesn't know still start the
+  server, as before. 1.9.0 and earlier started the server.
 
 ### Changed
 
 - **sqz adds fewer tokens to every model request.** The sqz-mcp tool
   and parameter descriptions went from 4,907 to 1,871 characters, so
-  `tools/list` dropped from 8,705 to 5,645 bytes (about 2,177 to 1,412
+  `tools/list` dropped from 8,705 to 5,779 bytes (about 2,177 to 1,445
   tokens by doctor's estimate), and `§ref:HASH§` is explained once, on
   `expand`. The guidance `sqz init` writes for Kiro, Codex, Zed,
   Cursor, Windsurf and Cline is one shared text of under 1 KB; the
@@ -72,7 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now the same marked block, so your own rules in `.clinerules` survive
   later upgrades and `sqz uninstall`, and the old text in
   `.windsurfrules` is removed without the rules that follow it. Files
-  sqz did not write are never touched. Doctor's overhead report counts
+  sqz did not write are never touched, and a current copy saved with
+  CRLF line endings counts as current. Doctor's overhead report counts
   the shared block once, on a line for each file Codex and Zed read.
 - **`sqz doctor` shows the integration tier of every client.**
   Transparent clients (Claude Code, Copilot CLI, Gemini CLI, OpenCode)
@@ -118,16 +154,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The shell hook rewrites pipes, lists, loops and heredocs.** It
   skipped any command containing `|`, `&&`, `;`, `>` or `<<`, which left
-  71% of one machine's 11,203 real agent commands uncompressed. A
+  73% of one machine's 12,676 real agent commands uncompressed. A
   quote-aware scanner now pipes the whole command through sqz as one
   group (Gemini CLI, Copilot CLI, and Claude Code in bypass mode; other
   Claude Code sessions get the per-command form above), keeps a leading
   `cd dir &&` outside it so the directory change sticks, and leaves
   alone anything that changes shell state (`export`, `source`, `set`, a
-  later `cd`), backgrounds a job, follows output (`tail -f`,
-  `docker logs -f`, `kubectl get -w`) or runs a server (`npm run dev`,
-  `rails s`, `docker compose up` without `-d`). On those commands the
-  share rewritten went from 28.7% to 96.2%, and every rewrite parses in
+  later `cd`, a variable set in a loop or `if` body), backgrounds a
+  job, follows output (`tail -f`, `docker logs -f`, `kubectl get -w`),
+  runs a server (`npm run dev`, `rails s`, `docker compose up` without
+  `-d`), already runs sqz (a Windows path to `sqz.exe` included) or
+  nests more than 64 levels deep. It also leaves a command alone when
+  the group could run different commands than the original: when a
+  leading `cd dir &&` is followed by `;`, `||` or another line, all of
+  which a failed `cd` would skip along with the group, and, with bash
+  as `$SHELL`, when more lines follow one with an arithmetic expansion
+  or a `${...}` such as `${VAR:?}` or `${VAR^^}`, since bash goes on to
+  the next line after some failed expansions. On those commands the
+  share rewritten went from 26.7% to 94.9%, and every rewrite parses in
   bash and zsh wherever the original did. Lists and pipelines skip the
   per-command formatters, since their output is partial or comes from
   several commands. `python` and `node` running a script, `-c` code or
@@ -164,6 +208,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sqz compress` call up to 10 KB, most of it process start and building
   the tokenizer, 76-86 ms at 100 KB and 330-525 ms at 1 MB, on an Apple
   M4 Pro.
+- **The docs site, extension guides and npm README are corrected.**
+  Links on the docs site that led nowhere now resolve, the Chrome and
+  Firefox guides describe the `wasm-pack --target no-modules` build that
+  `background.js` loads (Firefox 140 or later), and the npm README lists
+  the same clients and commands as the main one.
+- **Large outputs can need more memory than in 1.9.0.** Output that now
+  keeps most of its data also feeds more text to the n-gram
+  abbreviation pass: on 10 MB inputs, a `cargo test` log peaks at about
+  1.05 GB and an error-heavy log at 1.1 GB, against 353 and 731 MB in
+  1.9.0. `SQZ_NO_ABBREV=1` brings the `cargo test` case down to 250 MB.
+- **`sqz init` leaves Claude Code hooks to the user-level settings.**
+  When `~/.claude/settings.json` already has the sqz hooks, `sqz init`
+  at project scope no longer adds them to `.claude/settings.local.json`
+  and says why. `sqz doctor` flags hooks installed at both scopes, and
+  `--fix` removes the project copy, keeping its permissions; the file
+  is deleted only if nothing else is left.
+- **`sqz doctor` checks which sqz binary each hook runs.** It reports
+  hook and plugin files whose sqz binary no longer exists (Claude Code,
+  Gemini CLI, Copilot CLI, OpenCode), and `--fix` points them at the
+  running binary; it never writes a hook whose binary does not exist. It
+  also notes hooks that run a different sqz binary than the one running
+  doctor, so after an upgrade reinstall sqz first, then run
+  `sqz doctor --fix`.
+- **`sqz uninstall` and `sqz reset` need an answer.** Without `--yes`,
+  an empty answer counted as yes, so with stdin closed or piped from
+  nothing they went ahead. When stdin is not a terminal and gives no
+  answer they now stop with a message; `y` or `yes` on a pipe still
+  works, and a terminal keeps the `[Y/n]` default. 1.9.0 and earlier
+  went ahead.
 
 ### Fixed
 
@@ -353,6 +426,196 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measured.** Its suggestions gave a reduction range per command, none
   of them measured, including `kubectl get`, which no longer has a
   formatter. It now names the commands without numbers.
+- **The exit status survives an expansion error.** A rewritten
+  `{ cmd; printf trailer; } | sqz` printed no trailer when `cmd`
+  stopped the shell on an expansion error, such as `${X:?}`, a zsh
+  `=cmd` that isn't found or a zsh `for` loop over a glob that matches
+  nothing, so sqz exited 0 and the agent saw success. The command now
+  runs in a subshell inside the group, so the trailer always reports
+  its status. Gemini CLI, Copilot CLI, Windsurf, the OpenCode plugin
+  and Claude Code in bypass mode use this form; it shipped for single
+  commands in 1.6.1 through 1.9.0.
+- **Negative and wide exit codes in the trailer.** PowerShell reports
+  a crashed native command as a negative `$LASTEXITCODE` such as
+  -1073741819, and the trailer parser took only digits, so the marker
+  stayed in the output and sqz exited 0; a code of 256 also came out
+  as 0. sqz now exits with the low byte on Unix (1 when that byte is
+  0) and the full code on Windows. Shipped in 1.6.1 through 1.9.0.
+- **Copilot CLI's `toolArgs` as a JSON string.** GitHub documents
+  `toolArgs` as a string of JSON, and the hook read only an object, so
+  it rewrote nothing for that form. It now parses the string and still
+  answers with a `modifiedArgs` object. Shipped in 1.5.0 through 1.9.0.
+- **`sqz hook opencode` keeps the command's exit status.** It piped
+  the command straight into sqz, so a failing command reported success.
+  Outside Windows it now uses the same trailer as the other hooks, as
+  the OpenCode plugin already does. Shipped in 0.6.0 through 1.9.0.
+- **Large non-ASCII output no longer crashes `sqz compress`.** The
+  verifier cut its scan at byte 1,048,576, and when that byte fell
+  inside a multibyte character sqz panicked and the command's whole
+  output was lost. It now cuts on a character boundary. 1.9.0 had the
+  same bug.
+- **`git log` and `git show` no longer crash on a non-ASCII `commit`
+  line.** Their formatters cut the hash by bytes. 1.9.0 had the same
+  bug.
+- **Long runs of one character no longer stall or crash token
+  counting.** tiktoken-rs is quadratic on a long run of one character
+  class and overflows its stack at about 1 MiB, so 256 KB of `=` took
+  about 14 s and 1 MiB crashed sqz on every path. Runs over 2,048
+  bytes are now counted in slices, which can be off by about 1% plus 4
+  tokens, and counts for other text are unchanged. 1.9.0 had the same
+  problem.
+- **A panic during compression no longer loses the output.**
+  `sqz compress` prints its input unchanged, keeps the command's exit
+  status and prints one line on stderr, and `sqz hook claude-post`
+  leaves the result as it was. With `RUST_BACKTRACE` set (and not
+  `0`), the stderr line names the file, line and column of the panic.
+  In 1.9.0 and earlier a panic lost the output.
+- **Token pruning no longer rewrites whole lines.** Once it removed one
+  filler word anywhere, it rebuilt every prose-looking line with single
+  spaces. That collapsed indentation in unlabeled diffs and markdown,
+  turned CRLF into LF and dropped words from error lines. It now
+  rewrites only lines that lose a word, keeps their spacing, and leaves
+  diff lines, indented lines, lines starting with `-` and error lines
+  alone. 1.9.0 had the same bug.
+- **Colored traces, DDL, PEM blocks and credential lines are protected
+  like plain ones.** The router read raw lines, so ANSI color codes hid
+  them: a colored 40-frame backtrace kept 50 of 83 lines and was
+  cached. Routing, never-store and protected-line checks now strip ANSI
+  first. 1.9.0 had the same bug.
+- **`sqz stats` counts what was printed.** The stats line and the
+  session database logged the compressed size from before the
+  abbreviation legend and expand hint were added, so savings were
+  overstated by a median of 19 tokens per affected command. 1.9.0 had
+  the same bug.
+- **`sqz compress --cmd -j` works.** A label starting with `-` was
+  parsed as a flag, so sqz exited 2 with no output. 1.9.0 had the same
+  bug.
+- **A panic in one request no longer stops sqz-mcp.** A panic while
+  handling a request ended the server, and in `sqz-mcp proxy` it left
+  a lock poisoned, so the next message ended the proxy too; the
+  tokenizer overflowing its stack on a long run of one character was
+  one way to get there. Each request is now caught: `compress` returns
+  its input unchanged, other tools answer with JSON-RPC error -32603,
+  the proxy passes the upstream result on as it came, and the next
+  request is served as usual. 1.9.0 had the same crash.
+- **A line that is not UTF-8 no longer ends an MCP session.** One
+  invalid byte made sqz-mcp exit. In `sqz-mcp proxy` a bad line from
+  the client ended the proxy without an answer, and one from the
+  upstream lost that response and every later one. The server now
+  answers such a line with -32700 and a null id and keeps reading; the
+  proxy forwards it with the bad bytes replaced. 1.9.0 had the same
+  bug.
+- **sqz-mcp answers `ping`.** MCP expects an empty result; it returned
+  -32601 method not found. 1.9.0 had the same bug.
+- **`sqz-mcp proxy` stops an upstream that ignores end of input.**
+  After the client closed stdin, the proxy waited for the upstream to
+  close its stdout, so an upstream that kept running kept the proxy
+  running, and a later SIGTERM to the proxy left it orphaned. The proxy
+  now closes the upstream's stdin, waits up to 2.5 seconds for it to
+  exit, then kills it and waits up to another 2.5 seconds while it
+  finishes passing on a result it had already read. A response the
+  upstream had not sent by then is lost; MCP clients keep stdin open
+  while they wait, so this mostly affects scripted one-shot use. A
+  SIGTERM to the proxy itself still leaves such an upstream running.
+  1.9.0 had the same bug.
+- **Deltas number lines from 1 and account for every line.** The
+  position of removed lines was 0-based, and the unchanged lines next
+  to each change were neither shown nor counted. A delta now shows one
+  unchanged line on each side of a change, and its skip counts add up
+  to the whole file. This applies to every delta sqz-mcp returns:
+  `sqz_read_file`, `sqz_list_dir`, `sqz_grep`, `compress` and the
+  proxy. The context lines make a delta longer, so a re-read with
+  edits spread through the file now comes back in full. 1.9.0 had the
+  same bug.
+- **No reference where it costs more than the content.** Empty and
+  tiny results (13 tokens or fewer, such as an empty file or a search
+  with no matches) came back as a 13-token `§ref:HASH§`, and a ranged
+  `sqz_read_file` of an unchanged file could come back as a delta
+  against the previous range. Both are now sent in full and still
+  stored, so `expand` and `sqz_recall` find them. A ranged re-read of a
+  file read in full is still a line-range reference. 1.9.0 had the
+  same bug.
+- **The `compress` tool says how to get dropped segments back.** When
+  it dropped low-information segments from text it stores, nothing in
+  the output said how to recover them. The output now ends with
+  `[full output: call expand with prefix "<16 hex>"]`, and the tool's
+  `sqz:transforms` list names the step. 1.9.0 gave no hint either.
+- **`sqz-mcp proxy --no-cache` no longer offers `sqz_expand`.**
+  Nothing is stored with `--no-cache`, so every call to it failed. The
+  tool is left out, and the instructions note no longer mentions
+  `§ref:HASH§`. 1.9.0 had the same bug.
+- **`sqz uninstall` no longer deletes a `.gemini/settings.json` sqz
+  didn't write.** It removes only sqz's hook and deletes the file only
+  when nothing else is left. 1.9.0 and earlier deleted the whole file.
+- **`sqz init` adds its Gemini CLI hook to an existing
+  `.gemini/settings.json`.** It skipped the file when it existed, and
+  doctor's suggested fix then had nothing to do. A file with comments,
+  or one that doesn't parse, is left alone, and `sqz init` and
+  `sqz doctor` give the entry to add by hand. 1.9.0 and earlier
+  skipped the file silently.
+- **User hooks that look like sqz's survive.** sqz recognised its own
+  Claude Code hooks by substring (`resume`, `hook precompact`,
+  `hook claude`), so `sqz init`, `sqz doctor --fix` and `sqz uninstall`
+  deleted user hooks such as `/usr/local/bin/on-resume.sh` or
+  `~/bin/save-notes --hook precompact`, and replaced ones that wrap
+  sqz, such as `/usr/bin/time /opt/sqz hook claude`. An entry is now
+  sqz's only when it runs a `sqz` or `sqz.exe` binary directly, quoted
+  or not, with exactly the arguments sqz writes. 1.9.0 and earlier
+  deleted and replaced them.
+- **`sqz uninstall` removes the `CLAUDE.md` guidance block and the
+  `mcpServers.sqz` entry in `~/.claude.json`.** 1.9.0 and earlier left
+  both.
+- **An outdated `CLAUDE.md` guidance block is replaced.** Once written,
+  the block was never refreshed, so it still described the 1.9.0
+  rewrite and the `SQZ_NO_DEDUP=1 git log | sqz compress` placement
+  that never reached sqz. `sqz doctor` now reports an old block, and
+  `sqz init` and `sqz doctor --fix` replace it in place, keeping the
+  binary path it names while that resolves and every byte outside the
+  markers; a current block saved with CRLF line endings counts as
+  current. 1.9.0 and earlier never refreshed it.
+- **Removing the shell rc block keeps every other byte.** Uninstall
+  collapsed every run of blank lines in the whole file and dropped its
+  final newline. It now removes exactly the sqz block and the blank
+  line install added before it. 1.9.0 and earlier had the same bug.
+- **JSON configs sqz edits keep their final newline and file mode.**
+  1.9.0 and earlier dropped the final newline, gave `opencode.json` one
+  it didn't have, and left Claude Code settings at 0600. Key order
+  still changes.
+- **Hook files older sqz versions wrote are cleaned up.** `sqz doctor`
+  reports them, and `sqz doctor --fix` and `sqz uninstall` remove sqz's
+  entries from `.windsurf/hooks.json`, `.cline/hooks.json` and Cursor's
+  `hooks.json` and the old `.clinerules/hooks/PreToolUse` script,
+  deleting a file when nothing else is left in it. Uninstall ends by
+  listing the files it keeps, such as the preset and shell completions.
+  1.9.0 and earlier left them all.
+- **The uninstall plan lists only files that hold sqz entries**, so a
+  second `sqz uninstall` says there is nothing to uninstall; 1.9.0 and
+  earlier listed every existing config file. The plan also names the
+  user-level Kiro steering and `~/.kiro/settings/mcp.json` (when it has
+  `mcpServers.sqz`), which uninstall changed without listing them, and
+  when they are the only sqz files left uninstall removes them instead
+  of saying there is nothing to uninstall.
+- **`cargo test` no longer writes to your home directory.** Several
+  tests wrote the Copilot CLI hook, the Codex and Zed configs and the
+  session database under the real home directory; they now use
+  temporary directories. In 1.9.0,
+  `test_reinit_is_idempotent_at_project_scope` already wrote the
+  Copilot CLI hook there whenever `~/.copilot` existed, pointing it at
+  `/usr/bin/sqz`.
+- **`pipx install sqz` fetches the right release.** The PyPI wrapper
+  downloaded the 0.1.0 binaries whatever its own version, asked for a
+  `.tar.gz` on Windows, where releases ship a `.zip`, and used a type
+  hint that fails on Python 3.8. It now takes its version from the
+  installed package and the archive each release target ships. 1.9.0
+  and earlier had all three bugs.
+- **The npm package declares its licence as `Elastic-2.0` and ships
+  `LICENSE`.** `package.json` said `ELv2`, which is not an SPDX id, and
+  the publish jobs did not copy `LICENSE` into the package. 1.9.0 and
+  earlier had both.
+- **`sqz --help` describes `sqz proxy` as it works.** It called the
+  command "[Coming soon]"; it now says the local endpoint compresses an
+  OpenAI, Anthropic or Google AI request body and sends it back without
+  forwarding it.
 
 ## [1.9.0] — 2026-09-23
 
