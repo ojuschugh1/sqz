@@ -18,7 +18,7 @@ The settings file gets these hooks:
 - PreCompact: `sqz hook precompact` marks cached references stale when Claude Code compacts.
 - SessionStart (after compaction): `sqz resume` re-injects the session context.
 
-It also adds two allow rules to `permissions.allow`, `Bash(set -o pipefail)` and `Bash(sqz compress --cmd *)`, which cover only the parts the rewrite adds. The hook does not approve commands: Claude Code's own permission rules still decide whether a command runs or asks first. Until both rules are there the hook leaves commands alone. Outside bypass mode, pipelines, loops and heredocs are left as written.
+It also adds two allow rules to `permissions.allow`, `Bash(set -o pipefail)` and `Bash(sqz compress --cmd *)`, which cover only the parts the rewrite adds. The hook does not approve commands: Claude Code's own permission rules still decide whether a command runs or asks first. When Claude Code asks, or denies a command, its message quotes the rewritten command, such as `set -o pipefail; git tag v0 2>&1` for `git tag v0`. Until both rules are there the hook leaves commands alone. Outside bypass mode, pipelines, loops and heredocs are left as written.
 
 Your existing settings are kept; sqz merges its entries.
 

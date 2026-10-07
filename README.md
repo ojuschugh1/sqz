@@ -183,6 +183,9 @@ preserved — sqz merges its entries rather than overwriting.
 The entries are its hooks and two allow rules, `Bash(set -o pipefail)` and
 `Bash(sqz compress --cmd *)`, which cover only the parts its rewrite adds.
 sqz does not approve commands; your own permission rules still decide.
+When Claude Code asks before a rewritten command, or denies it, its message
+quotes the rewritten command, such as `set -o pipefail; git tag v0 2>&1` for
+`git tag v0`.
 
 Plain `sqz init` (project scope) is useful when you want sqz active only
 inside one repo.
