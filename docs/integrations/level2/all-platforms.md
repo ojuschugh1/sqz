@@ -8,7 +8,7 @@ All Level 2 platforms follow the same two-step setup: run `sqz init`, then add t
 sqz init
 ```
 
-This writes a hook or plugin for Claude Code, Gemini CLI, Copilot CLI and OpenCode, agent guidance for Kiro, Codex, Zed, Cursor, Windsurf and Cline, and the MCP entry for Claude Code, Kiro, Codex, Zed and OpenCode. It also adds the `sqz_run` shell helpers to your shell profile and creates default presets. Goose, Aider and Amp are not configured by `sqz init`.
+This writes a hook or plugin for Claude Code, Gemini CLI, Copilot CLI and OpenCode, agent guidance for Kiro, Codex, Zed, Cursor, Windsurf and Cline, and the MCP entry for Claude Code, Kiro, Codex, Zed and OpenCode. An existing `.gemini/settings.json` gets the Gemini CLI hook merged in; if it has comments or doesn't parse, `sqz init` leaves it alone and prints the entry to add by hand. It also adds the `sqz_run` shell helpers to your shell profile and creates default presets. Goose, Aider and Amp are not configured by `sqz init`.
 
 ## Step 2 — Add MCP config
 

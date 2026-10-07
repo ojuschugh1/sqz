@@ -168,7 +168,8 @@ quotes the rewritten command, such as `set -o pipefail; git tag v0 2>&1` for
 `git tag v0`.
 
 Plain `sqz init` (project scope) is useful when you want sqz active only
-inside one repo.
+inside one repo. If `~/.claude/settings.json` already has the sqz hooks, it
+leaves them out of the project file, since they already run in every project.
 
 **Only using one agent?** Pass `--only` (or `--skip`) to limit which
 configs are written:
@@ -221,10 +222,16 @@ double-loading, see issue #10).
 without comment support, Cursor, Windsurf and Cline get markdown rules
 files, and Codex gets a TOML entry in `~/.codex/config.toml` that keeps
 your comments, so the automated path is non-destructive there. Use
-`sqz init --only <tool>` for those.
+`sqz init --only <tool>` for those. An existing `.gemini/settings.json`
+gets sqz's hook merged in; if it has comments or doesn't parse, `sqz init`
+leaves it alone and prints the entry to add by hand.
 
 Run `sqz doctor` afterwards to see what was configured for each client
-and which integration tier it is on.
+and which integration tier it is on. After upgrading sqz, run
+`sqz doctor --fix` once: it brings hooks and guidance an older version
+wrote up to date and points hooks whose sqz binary is gone at the running
+one. `sqz uninstall` removes only sqz's own entries and ends by listing the
+files it kept.
 
 ## How It Works
 
@@ -297,6 +304,8 @@ sqz stats --project .         # Stats for current project only
 sqz stats --project list      # List all tracked projects
 sqz stats --share             # Five-line share card sized for a paste into an issue or post
 sqz doctor                    # Verify sqz is installed, wired into your clients, and active
+sqz doctor --fix              # Apply the fixes doctor prints (run once after upgrading)
+sqz uninstall                 # Remove sqz's hooks, guidance and MCP entries, keep the rest
 sqz discover                  # Find missed savings (incl. your weakest-compressing commands)
 sqz discover --replay         # Counterfactual replay of your agent transcripts (Claude Code, Kiro)
 sqz recall "auth timeout"     # Full-text search everything sqz has compressed

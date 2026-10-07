@@ -20,7 +20,7 @@ The settings file gets these hooks:
 
 It also adds two allow rules to `permissions.allow`, `Bash(set -o pipefail)` and `Bash(sqz compress --cmd *)`, which cover only the parts the rewrite adds. The hook does not approve commands: Claude Code's own permission rules still decide whether a command runs or asks first. When Claude Code asks, or denies a command, its message quotes the rewritten command, such as `set -o pipefail; git tag v0 2>&1` for `git tag v0`. Until both rules are there the hook leaves commands alone. Outside bypass mode, pipelines, loops and heredocs are left as written. In every mode, so is a list where one of the piped commands could stop the shell on a failed expansion (`${DEST:?}`, `$((1/0))`, and unless `$SHELL` is bash an unquoted glob that matches nothing, `=cmd` or `~user`) and more commands follow after `;`, `||` or a newline: piped on its own, the failing command would stop only its pipe and the rest would run. Bypass mode pipes pipelines and loops as one group, and leaves one as written when the group could run different commands than the original: when its leading `cd dir &&` is followed by `;`, `||` or another line, or, with bash as `$SHELL`, when lines follow one with an expansion such as `$((...))`, since bash would still run them if it failed.
 
-Your existing settings are kept; sqz merges its entries.
+Your existing settings are kept; sqz merges its entries. If `~/.claude/settings.json` already has the sqz hooks, `sqz init` at project scope leaves them out of `.claude/settings.local.json`; `sqz doctor` flags a project copy, and `sqz doctor --fix` removes it and keeps the file's permissions.
 
 ### 2. MCP server
 
@@ -45,10 +45,18 @@ It also writes a guidance block to `CLAUDE.md` in the project.
 sqz doctor
 ```
 
-Claude Code should show as configured, transparent. Doctor also flags an older install without the allow rules (`sqz doctor --fix` adds them).
+Claude Code should show as configured, transparent. Doctor also flags an older install without the allow rules and an outdated `CLAUDE.md` block (`sqz doctor --fix` adds the rules and replaces the block).
 
 ## What you get
 
 - Shell output compressed before it reaches the context window
 - Repeated output replaced by a short `§ref:HASH§` reference, re-sent in full after compaction
 - `sqz_read_file`, `sqz_grep` and `sqz_list_dir` for reads the hook cannot see: Claude Code's built-in Read tool does not go through Bash, and sqz does not rewrite its results
+
+## Uninstall
+
+```sh
+sqz uninstall
+```
+
+Removes sqz's hooks and allow rules from the settings file, the guidance block from `CLAUDE.md` and the `sqz` entry from `~/.claude.json`, leaving everything else.

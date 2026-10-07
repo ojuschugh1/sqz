@@ -188,12 +188,20 @@ quotes the rewritten command, such as `set -o pipefail; git tag v0 2>&1` for
 `git tag v0`.
 
 Plain `sqz init` (project scope) is useful when you want sqz active only
-inside one repo.
+inside one repo. If `~/.claude/settings.json` already has the sqz hooks, it
+leaves them out of the project file, since they already run in every project.
 
 After installing, `sqz doctor` checks the whole chain — binary, database,
 shell hook, which clients are detected vs actually routed through sqz, and
 whether anything was compressed recently — and prints the fix for each gap
-it finds.
+it finds. `sqz doctor --fix` applies those fixes. After upgrading sqz, run it
+once: it brings hooks and guidance an older version wrote up to date, removes
+hook files current sqz no longer uses and a project copy of hooks that
+`~/.claude/settings.json` already has, points hooks whose sqz binary is gone
+at the running one, and notes any hook that still runs a different sqz
+binary. `sqz uninstall` removes only sqz's own entries, deletes a file only
+when nothing else is left in it, and ends by listing the files it kept.
+Without a terminal to answer its prompt it needs `--yes`, like `sqz reset`.
 
 ### See what sqz would have saved, before installing any hook
 
@@ -288,7 +296,9 @@ double-loading, see issue #10).
 without comment support, Cursor, Windsurf and Cline get markdown rules
 files, and Codex gets a TOML entry in `~/.codex/config.toml` that keeps
 your comments, so the automated path is non-destructive there. Use
-`sqz init --only <tool>` for those.
+`sqz init --only <tool>` for those. An existing `.gemini/settings.json`
+gets sqz's hook merged in; if it has comments or doesn't parse, `sqz init`
+leaves it alone and prints the entry to add by hand.
 
 Run `sqz doctor` afterwards to see what was configured for each client
 and which integration tier it is on.
@@ -400,6 +410,8 @@ sqz stats --project .         # Stats for current project only
 sqz stats --project list      # List all tracked projects
 sqz stats --share             # Five-line share card sized for a paste into an issue or post
 sqz doctor                    # Verify sqz is installed, wired into your clients, and active
+sqz doctor --fix              # Apply the fixes doctor prints (run once after upgrading)
+sqz uninstall                 # Remove sqz's hooks, guidance and MCP entries, keep the rest
 sqz discover                  # Find missed savings (incl. your weakest-compressing commands)
 sqz discover --replay         # Counterfactual replay of your agent transcripts (Claude Code, Kiro)
 sqz recall "auth timeout"     # Full-text search everything sqz has compressed
