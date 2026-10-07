@@ -242,6 +242,6 @@ Being honest about limitations:
 | Content Type | Typical Reduction | Why |
 |---|---|---|
 | Short messages (< 100 chars) | 0% | Below minimum threshold |
-| Prose | 1.6% on the benchmark paragraph | Token pruning removes a few filler words; no other stage changes it |
+| Prose | 1.6% on the benchmark paragraph | Token pruning removes a few predictable words (`to` in `in order to`) and rewrites only the lines that lose one, keeping their spacing; it never touches indented, diff or error lines, and no other stage changes prose |
 | Stack traces | 0% (safe mode) | Routed to safe mode and passed through unchanged at any size |
 | Database migrations | 0% (safe mode) | Same safe-mode routing as stack traces |
