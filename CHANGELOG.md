@@ -215,10 +215,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `background.js` loads (Firefox 140 or later), and the npm README lists
   the same clients and commands as the main one.
 - **Large outputs can need more memory than in 1.9.0.** Output that now
-  keeps most of its data also feeds more text to the n-gram
-  abbreviation pass: on 10 MB inputs, a `cargo test` log peaks at about
-  1.05 GB and an error-heavy log at 1.1 GB, against 353 and 731 MB in
-  1.9.0. `SQZ_NO_ABBREV=1` brings the `cargo test` case down to 250 MB.
+  keeps most of its data also feeds more text to the n-gram abbreviation
+  pass. Piped into `sqz compress` without `--cmd`, a 10 MB `cargo test`
+  log peaks at about 1.05 GB and an error-heavy log at 1.1 GB, against
+  353 and 731 MB in 1.9.0. With the command as the label, as the hooks
+  pass it for a single command, the `cargo test` log peaks at 128 MB
+  against 122 MB in 1.9.0, and the error log, labelled
+  `kubectl logs api`, at 1.1 GB against 132 MB, since the 1.9.0
+  `kubectl logs` formatter cut it to 4 KB. `SQZ_NO_ABBREV=1` brings the
+  unlabelled `cargo test` run down to 250 MB and the labelled error log
+  to 274 MB.
 - **`sqz init` leaves Claude Code hooks to the user-level settings.**
   When `~/.claude/settings.json` already has the sqz hooks, `sqz init`
   at project scope no longer adds them to `.claude/settings.local.json`
