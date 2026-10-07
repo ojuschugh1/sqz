@@ -104,9 +104,21 @@ fn plan_for(command: &str, shell: Shell) -> Result<Plan<'_>, Skip> {
     if watch_text(command) {
         return Err(Skip::LongRunning);
     }
-    let line_error = (0..rest.len()).any(|i| {
-        rest[i].fatal == Fatal::Any
-            && rest[i..rest.len() - 1].iter().any(|s| s.sep == Some(Sep::Newline))
+    if hoisted > 0
+        && segs[hoisted - 1].sep == Some(Sep::And)
+        && rest[..rest.len() - 1]
+            .iter()
+            .any(|s| matches!(s.sep, Some(Sep::Semi | Sep::Or | Sep::Newline)))
+    {
+        return Err(Skip::StateChange);
+    }
+    let line = segs[..hoisted]
+        .iter()
+        .rposition(|s| s.sep == Some(Sep::Newline))
+        .map_or(0, |i| i + 1);
+    let line_error = (line..segs.len()).any(|i| {
+        segs[i].fatal == Fatal::Any
+            && segs[i..segs.len() - 1].iter().any(|s| s.sep == Some(Sep::Newline))
     });
     if shell == Shell::Bash && line_error {
         return Err(Skip::LineError);
@@ -1112,9 +1124,14 @@ mod tests {
         assert_eq!((p.prefix, p.body, p.simple), ("cd /tmp\n", "ls -la", true));
         let p = plan("builtin cd /tmp && ls").unwrap();
         assert_eq!(p.prefix, "builtin cd /tmp &&");
+        let p = plan("cd sub; make\nmake test").unwrap();
+        assert_eq!((p.prefix, p.body), ("cd sub;", " make\nmake test"));
         skipped("cd a;", Skip::Empty);
         skipped("cd /tmp", Skip::StateChange);
         skipped("cd a || exit 1", Skip::StateChange);
+        skipped("cd sub && make\nmake test", Skip::StateChange);
+        skipped("cd sub && make; make test", Skip::StateChange);
+        skipped("cd sub && make || echo failed", Skip::StateChange);
     }
 
     #[test]
@@ -1335,7 +1352,8 @@ mod tests {
             "for i in 1; do ls $((1/0)); done\necho next",
             "ls ${a b} | cat\necho next",
             "ls ${X:?unset} && make\n\necho next",
-            "cd sub && ls \"${X^^}\"\nls",
+            "cd sub; ls \"${X^^}\"\nls",
+            "cd $((1/0)); ls\necho next",
         ] {
             assert_eq!(plan_for(cmd, Shell::Bash), Err(Skip::LineError), "{cmd:?}");
             assert!(plan_for(cmd, Shell::Zsh).is_ok(), "{cmd:?}");

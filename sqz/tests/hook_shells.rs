@@ -126,6 +126,7 @@ const CASES: &[&str] = &[
     "cd sub && pwd",
     "cd missing-dir && echo never",
     "cd sub; ls ..",
+    "cd missing-dir; ls\necho next",
     "printf 'no newline at end'",
     "seq 3 | grep 2; echo \"status $?\"",
     "echo $(echo nested | tr a-z A-Z)",
@@ -171,6 +172,13 @@ const LINE_CASES: &[&str] = &[
     "ls ${a b}\necho next",
     "for i in 1; do ls $((1/0)); done\necho next",
     "ls $((1/0)) | cat\necho next",
+    "cd $((1/0)); ls\necho next",
+];
+
+const CD_CASES: &[&str] = &[
+    "cd missing-dir && ls\necho next",
+    "cd missing-dir && ls; echo next",
+    "cd missing-dir && ls || echo next",
 ];
 
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -227,7 +235,7 @@ fn claude_rewrites_behave_like_the_original() {
                 .unwrap_or_else(|| panic!("not rewritten: {command:?}"));
             assert_same(shell, command, &rewritten, &dir, &home);
         }
-        for command in STOP_CASES.iter().chain(LINE_CASES) {
+        for command in STOP_CASES.iter().chain(LINE_CASES).chain(CD_CASES) {
             if let Some(rewritten) = claude(command, "bypassPermissions", shell, fixture.path()) {
                 assert_same(shell, command, &rewritten, &dir, &home);
             }
@@ -243,6 +251,11 @@ fn rewrites_keep_the_lines_after_a_failed_one() {
             match grouped(command, shell, fixture.path()) {
                 Some(rewritten) => assert_same(shell, command, &rewritten, &dir, &home),
                 None => assert_ne!(shell, "zsh", "not rewritten: {command:?}"),
+            }
+        }
+        for command in CD_CASES {
+            if let Some(rewritten) = grouped(command, shell, fixture.path()) {
+                assert_same(shell, command, &rewritten, &dir, &home);
             }
         }
     }
