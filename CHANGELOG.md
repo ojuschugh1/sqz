@@ -622,7 +622,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`sqz --help` describes `sqz proxy` as it works.** It called the
   command "[Coming soon]"; it now says the local endpoint compresses an
   OpenAI, Anthropic or Google AI request body and sends it back without
-  forwarding it.
+  forwarding it. 1.9.0 and earlier had the same help text.
 
 ## [1.9.0] — 2026-09-23
 
