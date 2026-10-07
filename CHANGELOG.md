@@ -64,8 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pipefail` stops the list there. On 12,676 real agent commands, 56.3%
   are rewritten in default mode with zsh as `$SHELL` (56.4% with bash;
   1.9.0 rewrote 26.7%, and approved all of them) and 95.4% in bypass
-  mode; 4,261 of the rest contain a pipe, where the agent is usually
-  filtering the output already.
+  mode (95.5% with bash); 4,261 of the rest contain a pipe, where the
+  agent is usually filtering the output already.
 - **Claude Code PostToolUse hook.** When a command the PreToolUse hook
   left alone exits 0, `sqz hook claude-post` compresses its stdout and
   stderr in place through `updatedToolOutput`, which keeps the Bash
@@ -167,17 +167,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `-d`), already runs sqz (a Windows path to `sqz.exe` included) or
   nests more than 64 levels deep. It also leaves a command alone when
   the group could run different commands than the original: when a
-  leading `cd dir &&` is followed by `;`, `||` or another line, all of
-  which a failed `cd` would skip along with the group, and, with bash
-  as `$SHELL`, when more lines follow one with an arithmetic expansion
-  or a `${...}` such as `${VAR:?}` or `${VAR^^}`, since bash goes on to
-  the next line after some failed expansions. On those commands the
-  share rewritten went from 26.7% to 94.9%, and every rewrite parses in
-  bash and zsh wherever the original did. Lists and pipelines skip the
-  per-command formatters, since their output is partial or comes from
-  several commands. `python` and `node` running a script, `-c` code or
-  `-m` module are rewritten too; bare REPLs, `-i` and dev servers still
-  aren't.
+  leading `cd dir &&` is followed by `;`, `||` or another line outside a
+  loop or `if`, all of which a failed `cd` would skip along with the
+  group, and, with bash as `$SHELL`, when more lines follow one with an
+  arithmetic expansion or a `${...}` such as `${VAR:?}` or `${VAR^^}`,
+  since bash goes on to the next line after some failed expansions. On
+  those commands the share rewritten went from 26.7% to 94.9%, and every
+  rewrite parses in bash and zsh wherever the original did. Lists and
+  pipelines skip the per-command formatters, since their output is
+  partial or comes from several commands. `python` and `node` running a
+  script, `-c` code or `-m` module are rewritten too; bare REPLs, `-i`
+  and dev servers still aren't.
 - **`sqz compress` is faster on large and error-heavy output.** The
   checks that make sure no error line is lost searched the whole output
   once per error line, so a 1 MB log where every line is an error took
