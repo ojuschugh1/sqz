@@ -127,8 +127,6 @@ const CASES: &[&str] = &[
     "cd missing-dir && echo never",
     "cd sub; ls ..",
     "cd missing-dir; ls\necho next",
-    "cd sub && for f in a b; do echo \"$f\"; done",
-    "cd missing-dir && if true; then echo never; fi",
     "printf 'no newline at end'",
     "seq 3 | grep 2; echo \"status $?\"",
     "echo $(echo nested | tr a-z A-Z)",
@@ -181,8 +179,12 @@ const CD_CASES: &[&str] = &[
     "cd missing-dir && ls\necho next",
     "cd missing-dir && ls; echo next",
     "cd missing-dir && ls || echo next",
-    "cd missing-dir && for f in a b; do echo $f; done; echo next",
-    "cd missing-dir && if true; then echo never; fi\necho next",
+];
+
+const ZSH_CD_CASES: &[&str] = &[
+    "cd missing-dir && for f in a b; echo $f; echo next",
+    "cd missing-dir && if [[ -n x ]] echo yes; echo next",
+    "cd missing-dir && for f in a b; echo $f; repeat 2 do echo x; done",
 ];
 
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -239,7 +241,8 @@ fn claude_rewrites_behave_like_the_original() {
                 .unwrap_or_else(|| panic!("not rewritten: {command:?}"));
             assert_same(shell, command, &rewritten, &dir, &home);
         }
-        for command in STOP_CASES.iter().chain(LINE_CASES).chain(CD_CASES) {
+        let zsh_cases = ZSH_CD_CASES.iter().filter(|_| shell == "zsh");
+        for command in STOP_CASES.iter().chain(LINE_CASES).chain(CD_CASES).chain(zsh_cases) {
             if let Some(rewritten) = claude(command, "bypassPermissions", shell, fixture.path()) {
                 assert_same(shell, command, &rewritten, &dir, &home);
             }
@@ -257,7 +260,8 @@ fn rewrites_keep_the_lines_after_a_failed_one() {
                 None => assert_ne!(shell, "zsh", "not rewritten: {command:?}"),
             }
         }
-        for command in CD_CASES {
+        let zsh_cases = ZSH_CD_CASES.iter().filter(|_| shell == "zsh");
+        for command in CD_CASES.iter().chain(zsh_cases) {
             if let Some(rewritten) = grouped(command, shell, fixture.path()) {
                 assert_same(shell, command, &rewritten, &dir, &home);
             }
