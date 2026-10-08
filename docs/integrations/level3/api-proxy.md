@@ -10,7 +10,7 @@ No release has forwarded requests, though 1.9.0 and earlier printed `OPENAI_BASE
 sqz proxy --port 8080
 ```
 
-`--port` (default 8080) is the only option. The endpoint listens on 127.0.0.1 and runs until you stop it. It handles one connection at a time and reads at most 1 MB of each request.
+`--port` (default 8080) is the only option. The endpoint listens on 127.0.0.1 and runs until you stop it. It handles one connection at a time and takes each request from one read of at most 1 MB. A body that does not arrive in that read is cut short and sent back unparsed, as a string in `compressed_body`; on macOS that happened to every body over about 64 KB.
 
 ## Send it a request
 
