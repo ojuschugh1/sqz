@@ -2,7 +2,7 @@
 
 `sqz proxy` starts a local HTTP endpoint that compresses an OpenAI, Anthropic or Google AI request body and sends it back. It does not forward requests: nothing reaches the provider, and an API client pointed at it as its base URL gets the compressed request back instead of a model response. Use it to see what sqz would change in a request, or to compress a body in your own code before you send it to the provider yourself.
 
-No release has forwarded requests, though 1.9.0 and earlier printed `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` examples when the endpoint started.
+No release has forwarded requests, though 0.5.0 through 1.9.0 printed `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` examples when the endpoint started.
 
 ## Start it
 
