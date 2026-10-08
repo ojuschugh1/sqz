@@ -133,6 +133,36 @@ fn test_help_exits_zero() {
 }
 
 #[test]
+fn test_proxy_says_it_sends_the_body_back() {
+    use std::io::{Read, Write};
+    let home = tempfile::tempdir().unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
+    let mut child = sandboxed(Command::new(sqz_bin()).args(["proxy", "--port", port.as_str()]), home.path())
+        .current_dir(home.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn sqz");
+    let mut reply = String::new();
+    for _ in 0..200 {
+        if let Ok(mut conn) = std::net::TcpStream::connect(format!("127.0.0.1:{port}")) {
+            let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let _ = conn.write_all(b"POST /v1/messages HTTP/1.1\r\ncontent-length: 8\r\n\r\nnot json");
+            let _ = conn.read_to_string(&mut reply);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let err = stderr(&child.wait_with_output().unwrap());
+    assert!(err.contains("request body and sends it back; it does not forward requests"), "{err}");
+    assert!(!err.contains("BASE_URL") && !err.contains("base URL"), "{err}");
+    assert!(err.contains("sending the body back uncompressed"), "{err}");
+    assert!(reply.contains("\"compressed_body\": \"not json\""), "{reply}");
+}
+
+#[test]
 fn test_version_exits_zero() {
     let o = run(&["--version"]);
     assert!(o.status.success());

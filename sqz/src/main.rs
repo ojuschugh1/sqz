@@ -1803,7 +1803,7 @@ fn cmd_dashboard(port: u16) {
     }
 }
 
-/// `sqz proxy [--port N]` — transparent HTTP proxy that compresses API requests.
+/// `sqz proxy [--port N]`: local HTTP endpoint that compresses an API request body and sends it back.
 fn cmd_proxy(port: u16) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1824,9 +1824,8 @@ fn cmd_proxy(port: u16) {
     };
 
     eprintln!("[sqz] proxy listening on http://{addr}");
-    eprintln!("[sqz] configure your API client to use http://{addr} as the base URL");
-    eprintln!("[sqz] example: OPENAI_BASE_URL=http://{addr}/v1");
-    eprintln!("[sqz] example: ANTHROPIC_BASE_URL=http://{addr}");
+    eprintln!("[sqz] it compresses an OpenAI, Anthropic or Google AI request body and sends it back; it does not forward requests");
+    eprintln!("[sqz] example: curl -s http://{addr}/v1/chat/completions --data-binary @request.json");
     eprintln!();
 
     for stream in listener.incoming() {
@@ -1896,7 +1895,7 @@ fn cmd_proxy(port: u16) {
                 ) {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("[sqz] proxy: compression error: {e}, forwarding uncompressed");
+                        eprintln!("[sqz] proxy: compression error: {e}, sending the body back uncompressed");
                         (body.clone(), sqz_engine::ProxyStats::default())
                     }
                 };
