@@ -621,10 +621,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LICENSE`.** `package.json` said `ELv2`, which is not an SPDX id, and
   the publish jobs did not copy `LICENSE` into the package. 1.9.0 and
   earlier had both.
-- **`sqz --help` describes `sqz proxy` as it works.** It called the
-  command "[Coming soon]"; it now says the local endpoint compresses an
-  OpenAI, Anthropic or Google AI request body and sends it back without
-  forwarding it. 1.9.0 and earlier had the same help text.
+- **`sqz proxy`, its help and its guide say what it does.** `sqz --help`
+  called the command "[Coming soon]"; it now says the local endpoint
+  compresses an OpenAI, Anthropic or Google AI request body and sends it
+  back without forwarding it. When it started, the endpoint told you to
+  set `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` to its address, which
+  hands your client the compressed request instead of a model response;
+  it now says what it does and shows a `curl` example, and a body it
+  cannot compress is reported as sent back rather than forwarded. The
+  API proxy guide described forwarding, a `proxy.toml` sqz never reads
+  and two options that do not exist, `--upstream` and `--dry-run`; it
+  now describes the endpoint and its one option, `--port`. 1.9.0 and
+  earlier had the same help text and, from 0.5.0, printed the base URL
+  advice.
 
 ## [1.9.0] — 2026-09-23
 

@@ -46,7 +46,7 @@ Native extensions for VS Code, JetBrains, Chrome (5 web UIs), and API proxy mode
 | Firefox Add-ons | [`level3/firefox-addons.md`](./level3/firefox-addons.md) |
 | API proxy (OpenAI, Anthropic, Google AI) | [`level3/api-proxy.md`](./level3/api-proxy.md) |
 
-The guides in the table cover publishing to each store; [`level3/api-proxy.md`](./level3/api-proxy.md) covers proxy configuration.
+The guides in the table cover publishing to each store; [`level3/api-proxy.md`](./level3/api-proxy.md) describes `sqz proxy`, which compresses a request body and sends it back.
 
 ---
 

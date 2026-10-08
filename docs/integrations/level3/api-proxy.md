@@ -1,107 +1,60 @@
-# API Proxy Mode
+# API proxy
 
-> **Status: Implemented (since v0.5.0).** The `sqz proxy` subcommand starts an HTTP proxy that compresses LLM API request payloads before forwarding them to the upstream provider.
+`sqz proxy` starts a local HTTP endpoint that compresses an OpenAI, Anthropic or Google AI request body and sends it back. It does not forward requests: nothing reaches the provider, and an API client pointed at it as its base URL gets the compressed request back instead of a model response. Use it to see what sqz would change in a request, or to compress a body in your own code before you send it to the provider yourself.
 
-sqz acts as a transparent HTTP proxy that sits between your application and the OpenAI, Anthropic, or Google AI APIs. Every request passes through the sqz compression pipeline before being forwarded, reducing token usage without changing your application code.
+No release has forwarded requests, though 1.9.0 and earlier printed `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` examples when the endpoint started.
 
-## How it works
-
-```
-Your app  →  sqz proxy (localhost:8080)  →  OpenAI / Anthropic / Google AI
-```
-
-sqz intercepts the request body, compresses the `messages` context through the standard pipeline, then forwards the modified request to the upstream API. The response is returned unchanged.
-
-## Start the proxy
+## Start it
 
 ```sh
 sqz proxy --port 8080
 ```
 
-By default sqz reads your API keys from the standard environment variables and forwards to the real endpoints.
+`--port` (default 8080) is the only option. The endpoint listens on 127.0.0.1 and runs until you stop it. It handles one connection at a time and reads at most 1 MB of each request.
 
-## OpenAI
+## Send it a request
 
-Point your OpenAI client at the sqz proxy by overriding the base URL:
+POST the request body to a path that names its format:
 
-```sh
-export OPENAI_API_KEY=sk-...
-sqz proxy --port 8080 --upstream https://api.openai.com
-```
+| Path contains | Format | Example path |
+|---|---|---|
+| `/chat/completions` | OpenAI | `/v1/chat/completions` |
+| `/messages` | Anthropic | `/v1/messages` |
+| `/generateContent` | Google AI | `/v1beta/models/gemini-2.5-flash/generateContent` |
 
-```python
-import openai
-client = openai.OpenAI(
-    api_key="sk-...",
-    base_url="http://localhost:8080/v1",
-)
-```
-
-```js
-import OpenAI from "openai";
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  baseURL: "http://localhost:8080/v1",
-});
-```
-
-The proxy rewrites the `Authorization` header automatically if you set `OPENAI_API_KEY` in the environment.
-
-## Anthropic
+Google AI's own `models/<model>:generateContent` path has no `/` before `generateContent`, so the endpoint answers it with 404.
 
 ```sh
-export ANTHROPIC_API_KEY=sk-ant-...
-sqz proxy --port 8080 --upstream https://api.anthropic.com
+curl -s http://127.0.0.1:8080/v1/chat/completions --data-binary @request.json
 ```
 
-```python
-import anthropic
-client = anthropic.Anthropic(
-    api_key="sk-ant-...",
-    base_url="http://localhost:8080",
-)
+The answer is a JSON object, with the estimated saving in an `x-sqz-tokens-saved` header. For a 13-message OpenAI request with two long older turns and a 30-row JSON tool result:
+
+```json
+{
+  "compressed_body": { "messages": [ ... ], "model": "gpt-4o" },
+  "compressed_tokens": 334,
+  "messages_compressed": 2,
+  "messages_summarized": 2,
+  "original_tokens": 1048,
+  "reduction_pct": "68.1%",
+  "sqz_proxy": true
+}
 ```
 
-sqz detects Anthropic's prompt cache headers and preserves cache boundaries during compression to maintain the 90% cache discount.
+`compressed_body` is the request with sqz's changes. The token figures are estimates.
 
-## Google AI (Gemini)
+## What it changes
 
-```sh
-export GOOGLE_API_KEY=AIza...
-sqz proxy --port 8080 --upstream https://generativelanguage.googleapis.com
-```
+- OpenAI: `system` and `tool` messages go through the sqz compression pipeline, and `user` and `assistant` messages before the 10 most recent are summarized.
+- Anthropic: the `system` prompt and `tool_result` blocks go through the pipeline, and `user` and `assistant` messages before the 10 most recent are summarized.
+- Google AI: the `system_instruction` parts and the text parts of `contents` go through the pipeline, except that long text parts before the 10 most recent contents are summarized instead.
 
-```python
-import google.generativeai as genai
-genai.configure(
-    api_key="AIza...",
-    transport="rest",
-    client_options={"api_endpoint": "http://localhost:8080"},
-)
-```
+A summary keeps the first and last line of a message that has more than three lines and about 200 characters or more, with `[... N lines, M chars ...]` between them. Only string content is changed; for Anthropic that includes the text of `tool_result` blocks. The rest of the body comes back as it was sent, though the order of keys may change.
 
-## Configuration file
+## Other answers
 
-Create `~/.config/sqz/proxy.toml` to set persistent options:
-
-```toml
-[proxy]
-port = 8080
-preset = "default"
-
-[proxy.upstreams]
-openai   = "https://api.openai.com"
-anthropic = "https://api.anthropic.com"
-google   = "https://generativelanguage.googleapis.com"
-
-[proxy.compression]
-# Inherit from the active preset; override specific stages here
-strip_nulls = true
-condense = true
-```
-
-## Notes
-
-- The proxy is entirely local — no data leaves your machine except the compressed request forwarded to the upstream API.
-- All compression happens in-process.
-- Use `sqz proxy --dry-run` to log what would be compressed without forwarding requests.
+- `/` and `/health`, with any method: `{"status":"ok","service":"sqz-proxy"}`.
+- Any other path with a method other than POST: 405.
+- A POST to a path without one of the strings above: 404.
+- A body that is not JSON: sent back unchanged, as a string in `compressed_body`, with a line on stderr.
