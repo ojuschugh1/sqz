@@ -4,7 +4,7 @@
   "description": "Compress and manage LLM context in VS Code. Intercepts file reads, shows token budget, and reduces context window waste.",
   "version": "0.6.0",
   "publisher": "ojuschugh1",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT OR Apache-2.0",
   "icon": "icon.png",
   "repository": {
     "type": "git",

@@ -212,8 +212,8 @@ jobs:
           "
           echo "Publishing sqz-cli@${VERSION} to npm"
 
-      - name: Copy LICENSE into the package
-        run: cp LICENSE npm/LICENSE
+      - name: Copy the license files into the package
+        run: cp LICENSE-APACHE LICENSE-MIT npm/
 
       - name: Publish
         run: |

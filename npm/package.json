@@ -22,7 +22,7 @@
     "type": "git",
     "url": "https://github.com/ojuschugh1/sqz.git"
   },
-  "license": "Elastic-2.0",
+  "license": "(MIT OR Apache-2.0)",
   "mcpName": "io.github.ojuschugh1/sqz",
   "bin": {
     "sqz": "bin/sqz",
@@ -33,7 +33,9 @@
   },
   "files": [
     "bin/",
-    "install.js"
+    "install.js",
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
   ],
   "engines": {
     "node": ">=14"

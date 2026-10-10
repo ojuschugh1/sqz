@@ -36,7 +36,7 @@ Contribution(s) with the project.
 
 You acknowledge that the project maintainers may, at their sole discretion,
 offer the project under additional license terms (including commercial
-licenses) in addition to the Elastic License 2.0. Your Contributions may be
+licenses) in addition to the MIT License and the Apache License, Version 2.0. Your Contributions may be
 included in such alternatively-licensed versions.
 
 ### 5. Representations

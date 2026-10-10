@@ -29,7 +29,7 @@ FROM alpine:3.20
 LABEL io.modelcontextprotocol.server.name="io.github.ojuschugh1/sqz"
 LABEL org.opencontainers.image.source="https://github.com/ojuschugh1/sqz"
 LABEL org.opencontainers.image.description="sqz MCP server — pre-injection LLM context compression"
-LABEL org.opencontainers.image.licenses="Elastic-2.0"
+LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 RUN adduser -D sqz
 USER sqz

@@ -30,8 +30,8 @@ jobs:
           cd npm
           npm version "$VERSION" --no-git-tag-version --allow-same-version
 
-      - name: Copy LICENSE into the package
-        run: cp LICENSE npm/LICENSE
+      - name: Copy the license files into the package
+        run: cp LICENSE-APACHE LICENSE-MIT npm/
 
       - name: Publish to npm
         run: |
