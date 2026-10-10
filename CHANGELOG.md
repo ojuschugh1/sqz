@@ -17,11 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin now carries both: OpenCode 1 calls `server` as before,
   OpenCode 2 calls `setup`, which registers an `execute.before` hook,
   and both go through the same rewrite, so OpenCode 1 runs the same
-  commands as with 2.0.0. sqz 1.0.5 through 2.0.0 wrote the OpenCode 1
-  object `{ id, server }`, and 0.6.0 through 1.0.4 only a `SqzPlugin`
-  export, which OpenCode 2 refuses too. `sqz doctor` reports a plugin
-  an older sqz wrote, and `sqz doctor --fix` and `sqz init` rewrite it
-  in place; `--fix` keeps the sqz binary it runs.
+  commands as with 2.0.0. A command OpenCode 2 runs in the background
+  is left as it is, since `sqz compress` holds output until the
+  command exits. sqz 1.0.5 through 2.0.0 wrote the OpenCode 1 object
+  `{ id, server }`, and 0.6.0 through 1.0.4 only a `SqzPlugin` export,
+  which OpenCode 2 refuses too. `sqz doctor` reports a plugin an older
+  sqz wrote, and `sqz doctor --fix` and `sqz init` rewrite it in place;
+  `--fix` keeps the sqz binary it runs.
 
 ## [2.0.0] - 2026-10-10
 
