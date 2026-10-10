@@ -10,7 +10,7 @@ No release has forwarded requests, though 0.5.0 through 1.9.0 printed `OPENAI_BA
 sqz proxy --port 8080
 ```
 
-`--port` (default 8080) is the only option. The endpoint listens on 127.0.0.1 and runs until you stop it. It handles one connection at a time and takes each request from one read of at most 1 MB. A body that does not arrive in that read is cut short and sent back unparsed, as a string in `compressed_body`; on macOS that happened to every body over about 64 KB.
+`--port` (default 8080) is the only option. The endpoint listens on 127.0.0.1 and runs until you stop it. It handles one connection at a time and takes each request from one read of at most 1 MB. A body that has not fully arrived when that read returns is cut short: it comes back unparsed, as a string in `compressed_body`, or the client gets a connection error and no complete answer. Whether and where a body is cut depends on timing, not on a fixed size: on macOS, bodies of 60 KB to 160 KB were sometimes cut and sometimes not, no body of 200 KB or more came back whole, and one 200 KB body was cut after 16 KB.
 
 ## Send it a request
 
