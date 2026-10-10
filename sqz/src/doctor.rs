@@ -112,6 +112,8 @@ pub struct Managed {
     pub claude_stale: bool,
     /// sqz's Claude Code hooks are in both the user-level and the project settings.
     pub claude_duplicate: bool,
+    /// The OpenCode plugin file was written by an older sqz.
+    pub opencode_plugin_stale: bool,
     /// Hook and plugin files that run a sqz binary that does not exist, as `file (binary)`.
     pub missing_binaries: Vec<String>,
     /// Hook files an older sqz wrote that current sqz no longer uses.
@@ -210,6 +212,12 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
         problems.push(Problem {
             message: "the Claude Code hook comes from an older sqz install: without the two allow rules for its pipe it leaves commands uncompressed, and the PostToolUse hook is missing".to_string(),
             fix: Some(format!("{FIX_CMD}   (adds Bash(set -o pipefail) and Bash(sqz compress --cmd *) to the allow list)")),
+        });
+    }
+    if managed.opencode_plugin_stale {
+        problems.push(Problem {
+            message: "the OpenCode plugin was written by an older sqz, so OpenCode 2 does not load it and runs every command uncompressed".to_string(),
+            fix: Some(format!("{FIX_CMD}   (rewrites it for the sqz binary it already runs)")),
         });
     }
     if !managed.legacy_hooks.is_empty() {
@@ -688,6 +696,13 @@ fn apply_fixes(store: &sqz_engine::SessionStore, managed: &Managed, project_dir:
             Err(e) => println!("  ERR --fix: could not update {}: {e}", path.display()),
         }
     }
+    let opencode = sqz_engine::opencode_plugin_path();
+    if managed.opencode_plugin_stale && !missing.iter().any(|(p, _)| *p == opencode) {
+        match sqz_engine::refresh_opencode_plugin(&opencode, &fallback) {
+            Ok(_) => println!("  ok  --fix: refreshed {}", opencode.display()),
+            Err(e) => println!("  ERR --fix: could not refresh {}: {e}", opencode.display()),
+        }
+    }
     let gemini = project_dir.join(".gemini").join("settings.json");
     for (path, _) in missing.iter().filter(|(p, _)| !claude_settings_paths(project_dir).contains(p)) {
         if sqz_engine::resolve_sqz_binary(&fallback).is_none() {
@@ -770,6 +785,7 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
             && sqz_engine::claude_settings_have_sqz_hooks(
                 &project_dir.join(".claude").join("settings.local.json"),
             ),
+        opencode_plugin_stale: sqz_engine::opencode_plugin_stale(&sqz_engine::opencode_plugin_path()),
         missing_binaries: missing_hook_binaries(project_dir)
             .into_iter()
             .map(|(path, bin)| format!("{} ({bin})", path.display()))
@@ -972,6 +988,7 @@ mod tests {
             shell_block_stale: false,
             claude_stale: false,
             claude_duplicate: false,
+            opencode_plugin_stale: false,
             missing_binaries: Vec::new(),
             legacy_hooks: Vec::new(),
             gemini_unparseable: false,
@@ -1194,6 +1211,16 @@ mod tests {
         assert!(problems[0].message.contains("older sqz"));
         let fix = problems[0].fix.as_deref().unwrap();
         assert!(fix.starts_with(FIX_CMD) && fix.contains("Bash(sqz compress --cmd *)"), "{fix}");
+    }
+
+    #[test]
+    fn stale_opencode_plugin_is_flagged() {
+        let tools = vec![tool("OpenCode", "opencode", Detection::Detected, ConfigScope::Global)];
+        let managed = Managed { opencode_plugin_stale: true, ..clean() };
+        let problems = diagnose(&tools, &active(), &managed);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("OpenCode 2 does not load it"), "{}", problems[0].message);
+        assert!(problems[0].fix.as_deref().unwrap().starts_with(FIX_CMD));
     }
 
     #[test]

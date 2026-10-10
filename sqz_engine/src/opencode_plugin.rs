@@ -283,6 +283,33 @@ pub(crate) fn install_opencode_plugin_at(plugin_path: &Path, sqz_path: &str) -> 
     Ok(true)
 }
 
+/// Whether the plugin file at `path` was written by an older sqz: it names its
+/// binary on sqz's `SQZ_PATH` line but is not what this sqz writes for it.
+pub fn opencode_plugin_stale(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    crate::tool_hooks::sqz_hook_binaries(path)
+        .first()
+        .is_some_and(|bin| text.replace("\r\n", "\n") != generate_opencode_plugin(bin))
+}
+
+/// Bring a stale plugin file (see [`opencode_plugin_stale`]) up to date,
+/// keeping the sqz binary it already runs when that still exists.
+pub fn refresh_opencode_plugin(path: &Path, fallback_sqz: &str) -> Result<bool> {
+    if !opencode_plugin_stale(path) {
+        return Ok(false);
+    }
+    let sqz_path = crate::tool_hooks::sqz_hook_binaries(path)
+        .into_iter()
+        .find(|p| crate::tool_hooks::resolve_sqz_binary(p).is_some())
+        .unwrap_or_else(|| fallback_sqz.to_string());
+    if crate::tool_hooks::resolve_sqz_binary(&sqz_path).is_none() {
+        return Err(crate::error::SqzError::Other(format!(
+            "{sqz_path} does not exist, so the plugin was left as it is"
+        )));
+    }
+    install_opencode_plugin_at(path, &sqz_path)
+}
+
 /// Locate an existing OpenCode project config. Returns the path to
 /// `opencode.jsonc` if present, else `opencode.json` if present, else
 /// `None`. Prefers `.jsonc` because a user who bothered to write a
@@ -2065,6 +2092,56 @@ process.stdout.write(JSON.stringify({ id: plugin.id, names: registered.map(([nam
         assert_eq!(got["legacy"], true);
         assert_eq!(got["v1"], serde_json::json!([wrapped, "vim notes.txt", wrapped]));
         assert_eq!(got["v2"], serde_json::json!([input(&wrapped), input("vim notes.txt"), input(&wrapped)]));
+    }
+
+    #[test]
+    fn plugin_from_an_older_sqz_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sqz.ts");
+        assert!(!opencode_plugin_stale(&path));
+        let current = generate_opencode_plugin("/opt/sqz");
+        let old = "const SQZ_PATH = \"/opt/sqz\";\nexport const SqzPlugin = async () => ({});\n";
+        let mine = "export default { id: \"mine\", server: async () => ({}) };\n";
+        for (text, stale) in [
+            (current.clone(), false),
+            (current.replace('\n', "\r\n"), false),
+            (old.to_string(), true),
+            (mine.to_string(), false),
+        ] {
+            std::fs::write(&path, &text).unwrap();
+            assert_eq!(opencode_plugin_stale(&path), stale, "{text}");
+        }
+    }
+
+    #[test]
+    fn refreshing_a_stale_plugin_keeps_its_sqz_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kept, fallback) = (dir.path().join("sqz"), dir.path().join("fallback-sqz"));
+        std::fs::write(&kept, "").unwrap();
+        std::fs::write(&fallback, "").unwrap();
+        let (kept, fallback) = (kept.to_string_lossy().into_owned(), fallback.to_string_lossy().into_owned());
+        let old = |bin: &str| {
+            format!("const SQZ_PATH = {};\nexport const SqzPlugin = async () => ({{}});\n", serde_json::to_string(bin).unwrap())
+        };
+        let path = dir.path().join("sqz.ts");
+
+        std::fs::write(&path, old(&kept)).unwrap();
+        assert!(refresh_opencode_plugin(&path, &fallback).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), generate_opencode_plugin(&kept));
+        assert!(!refresh_opencode_plugin(&path, &fallback).unwrap());
+
+        std::fs::write(&path, old("/gone/sqz")).unwrap();
+        assert!(refresh_opencode_plugin(&path, &fallback).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), generate_opencode_plugin(&fallback));
+
+        std::fs::write(&path, old("/gone/sqz")).unwrap();
+        assert!(refresh_opencode_plugin(&path, "/gone/too").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old("/gone/sqz"));
+
+        let mine = "export default { id: \"mine\", server: async () => ({}) };\n";
+        std::fs::write(&path, mine).unwrap();
+        assert!(!refresh_opencode_plugin(&path, &fallback).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
     }
 
     /// Companion to the above: the TS plugin (which runs inside

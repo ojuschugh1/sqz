@@ -166,6 +166,7 @@ pub use opencode_plugin::{
     plan_opencode_config_change, PlannedOpencodeChange,
     remove_sqz_from_opencode_config, strip_jsonc_comments,
     process_opencode_hook, opencode_plugin_path,
+    opencode_plugin_stale, refresh_opencode_plugin,
 };
 pub use codex_integration::{
     agents_md_guidance_block, agents_md_guidance_state, agents_md_path,
