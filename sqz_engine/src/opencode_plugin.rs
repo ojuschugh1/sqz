@@ -207,6 +207,7 @@ export default {{
 
       const cmd = event.input?.command;
       if (typeof cmd !== "string") return;
+      if (event.input.background === true) return;
       const rewritten = rewriteCommand(cmd);
       if (rewritten) event.input = {{ ...event.input, command: rewritten }};
     }});
@@ -2075,7 +2076,9 @@ for (const command of commands) {
   for (const [name, callback] of registered) if (name === "execute.before") await callback(event);
   v2.push(event.input);
 }
-process.stdout.write(JSON.stringify({ id: plugin.id, names: registered.map(([name]) => name), legacy: SqzPlugin === plugin.server, v1, v2 }));
+const background = { tool: "shell", input: { command: "cargo test", background: true } };
+for (const [name, callback] of registered) if (name === "execute.before") await callback(background);
+process.stdout.write(JSON.stringify({ id: plugin.id, names: registered.map(([name]) => name), legacy: SqzPlugin === plugin.server, v1, v2, background: background.input }));
 "#
         .replace("COMMANDS", &commands.to_string());
         std::fs::write(dir.path().join("drive.mjs"), driver).unwrap();
@@ -2092,6 +2095,7 @@ process.stdout.write(JSON.stringify({ id: plugin.id, names: registered.map(([nam
         assert_eq!(got["legacy"], true);
         assert_eq!(got["v1"], serde_json::json!([wrapped, "vim notes.txt", wrapped]));
         assert_eq!(got["v2"], serde_json::json!([input(&wrapped), input("vim notes.txt"), input(&wrapped)]));
+        assert_eq!(got["background"], serde_json::json!({ "command": "cargo test", "background": true }));
     }
 
     #[test]
