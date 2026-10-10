@@ -42,8 +42,15 @@ Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Spanish trans
 | ref expand | expansión de referencia (ref expands) | A row label in `sqz stats`. |
 | tokens saved | tokens ahorrados (tokens saved) | Printed by `sqz stats` and `sqz gain`. |
 | property-based test | prueba basada en propiedades | |
-| pull request, issue | pull request, issue | Kept in English, as on GitHub. |
+| pull request, issue | pull request, issue | Kept in English, as on GitHub. Both masculine: el pull request, el issue. |
 | Contributor License Agreement | Acuerdo de Licencia de Contribuidor (CLA) | |
+| commit | commit | Kept in English. "Before committing" is antes de hacer commit. |
+| fork | fork | Kept in English. "Fork the repo" is haz un fork del repositorio. |
+| crate | crate | Kept in English. Plural crates. The Cargo workspace is el espacio de trabajo. |
+| shell | shell | Masculine: el shell. Shell pipelines are tuberías, to keep them apart from the compression pipeline. |
+| release binary | binario de release | |
+| benchmark | benchmark | Kept in English. The quality benchmark is benchmark de calidad. |
+| changelog | registro de cambios | |
 
 ## Keep in English
 
