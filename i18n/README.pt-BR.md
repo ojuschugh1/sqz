@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md sha256:e20e0153585ab14d62a29797338f75e9415f19639ba4f71317cabc907c46f4f6 -->
+<!-- i18n-source: README.md sha256:22ce122cfde9573a5bcbe1adf9a93612646c9e816ae56ece5ccdbd98d469c59c -->
 <!-- i18n:languages -->
 [English](../README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md)
 <!-- /i18n:languages -->
@@ -251,6 +251,8 @@ O `sqz init` lê e regrava o seu arquivo de configuração com um parser JSON pa
 
 Os comentários no resto do arquivo continuam onde estão. O OpenCode encontra o arquivo do plugin automaticamente; não é preciso uma entrada no array `plugin` (adicionar uma faz o plugin carregar duas vezes, veja a issue #10).
 
+O mesmo arquivo do plugin é carregado no OpenCode 1 e no 2. O OpenCode 2 não carrega o plugin escrito pelo sqz 2.0.0 e por versões anteriores, então, depois de atualizar o sqz, rode `sqz doctor --fix` (ou rode de novo a linha `print-opencode-plugin` acima) para reescrevê-lo.
+
 **Outras ferramentas**: o Claude Code e o Gemini CLI usam configurações em JSON puro, sem suporte a comentários, o Cursor, o Windsurf e o Cline recebem arquivos de regras em markdown, e o Codex recebe uma entrada TOML em `~/.codex/config.toml` que mantém os seus comentários, então o caminho automático não é destrutivo nesses casos. Use `sqz init --only <tool>` para eles. Um `.gemini/settings.json` existente recebe o hook do sqz mesclado; se ele tiver comentários ou não puder ser interpretado, o `sqz init` não mexe nele e mostra a entrada para você adicionar à mão.
 
 Depois, rode `sqz doctor` para ver o que foi configurado em cada cliente e em qual nível de integração ele está.
@@ -288,7 +290,7 @@ O que não é comprimido:
 | Cline | Instruções em `.clinerules` (orientativo/advisory); servidor MCP adicionado à mão | `sqz init` |
 | Gemini CLI | Hook BeforeTool (transparente/transparent) | `sqz init` |
 | Kiro | Steering + servidor MCP (orientativo/advisory) | `sqz init` |
-| OpenCode | Plugin TypeScript + servidor MCP (transparente/transparent) | `sqz init` |
+| OpenCode | Plugin TypeScript para OpenCode 1 e 2 + servidor MCP (transparente/transparent) | `sqz init` |
 | Codex CLI | Instruções em AGENTS.md + servidor MCP (orientativo/advisory) | `sqz init` |
 | Zed | Instruções em AGENTS.md + servidor MCP (orientativo/advisory) | `sqz init` |
 | Copilot CLI | Hook preToolUse (transparente/transparent), quando `~/.copilot` existe | `sqz init` |

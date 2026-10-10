@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md sha256:e20e0153585ab14d62a29797338f75e9415f19639ba4f71317cabc907c46f4f6 -->
+<!-- i18n-source: README.md sha256:22ce122cfde9573a5bcbe1adf9a93612646c9e816ae56ece5ccdbd98d469c59c -->
 <!-- i18n:languages -->
 [English](../README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md)
 <!-- /i18n:languages -->
@@ -251,6 +251,8 @@ sqz init --skip cursor,windsurf       # everything except Cursor and Windsurf
 
 파일의 나머지 부분에 있는 주석은 그대로 남습니다. OpenCode는 플러그인 파일을 자동으로 찾으므로 `plugin` 배열에 항목을 넣을 필요가 없습니다(넣으면 두 번 로드됩니다. 이슈 #10을 참고하십시오).
 
+같은 플러그인 파일이 OpenCode 1과 2에서 로드됩니다. OpenCode 2는 sqz 2.0.0 및 이전 버전이 작성한 플러그인을 로드하지 않으므로, sqz를 업그레이드한 뒤에는 `sqz doctor --fix`를 실행해(또는 위의 `print-opencode-plugin` 줄을 다시 실행해) 플러그인을 다시 작성하십시오.
+
 **다른 도구**: Claude Code와 Gemini CLI는 주석을 지원하지 않는 일반 JSON 설정을 사용하고, Cursor, Windsurf, Cline에는 마크다운 규칙 파일이 생성되며, Codex에는 `~/.codex/config.toml`에 주석을 보존하는 TOML 항목이 추가됩니다. 따라서 이 도구들에서는 자동 방식이 기존 내용을 망가뜨리지 않습니다. 이 도구들에는 `sqz init --only <tool>`을 사용하십시오. 기존 `.gemini/settings.json`에는 sqz의 훅이 병합됩니다. 이 파일에 주석이 있거나 파싱되지 않으면 `sqz init`은 파일을 건드리지 않고 직접 추가할 항목을 출력합니다.
 
 그런 다음 `sqz doctor`를 실행해 각 클라이언트에 무엇이 설정되었는지, 어떤 통합 등급에 해당하는지 확인하십시오.
@@ -288,7 +290,7 @@ Claude → git status → [sqz hook rewrites] → compressed output
 | Cline | `.clinerules` 지침, 권고형(advisory); MCP 서버는 직접 추가 | `sqz init` |
 | Gemini CLI | BeforeTool 훅, 투명형(transparent) | `sqz init` |
 | Kiro | Steering + MCP 서버, 권고형(advisory) | `sqz init` |
-| OpenCode | TypeScript 플러그인 + MCP 서버, 투명형(transparent) | `sqz init` |
+| OpenCode | OpenCode 1과 2용 TypeScript 플러그인 + MCP 서버, 투명형(transparent) | `sqz init` |
 | Codex CLI | AGENTS.md 지침 + MCP 서버, 권고형(advisory) | `sqz init` |
 | Zed | AGENTS.md 지침 + MCP 서버, 권고형(advisory) | `sqz init` |
 | Copilot CLI | preToolUse 훅, 투명형(transparent), `~/.copilot`이 있는 경우 | `sqz init` |

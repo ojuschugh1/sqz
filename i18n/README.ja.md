@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md sha256:e20e0153585ab14d62a29797338f75e9415f19639ba4f71317cabc907c46f4f6 -->
+<!-- i18n-source: README.md sha256:22ce122cfde9573a5bcbe1adf9a93612646c9e816ae56ece5ccdbd98d469c59c -->
 <!-- i18n:languages -->
 [English](../README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md)
 <!-- /i18n:languages -->
@@ -251,6 +251,8 @@ sqz init --skip cursor,windsurf       # everything except Cursor and Windsurf
 
 ファイルの他の部分にあるコメントはそのまま残ります。OpenCodeはプラグインファイルを自動的に検出するため、`plugin`配列へのエントリーは不要です（追加すると二重に読み込まれます。Issue #10を参照してください）。
 
+同じプラグインファイルが、OpenCode 1でも2でも読み込まれます。OpenCode 2はsqz 2.0.0以前が書き込んだプラグインを読み込まないため、sqzをアップグレードした後は`sqz doctor --fix`を実行して（または上の`print-opencode-plugin`の行をもう一度実行して）、プラグインを書き直してください。
+
 **その他のツール**：Claude CodeとGemini CLIはコメントに対応していない通常のJSON設定を使い、Cursor、Windsurf、Clineにはmarkdownのルールファイルが作られ、Codexには`~/.codex/config.toml`に、コメントを保持するTOMLのエントリーが追加されます。そのため、これらのツールでは自動での設定でも内容が損なわれません。これらには`sqz init --only <tool>`を使ってください。既存の`.gemini/settings.json`にはsqzのフックがマージされます。そのファイルにコメントがあるか、解析できない場合、`sqz init`はファイルに手を加えず、手動で追加するエントリーを表示します。
 
 その後`sqz doctor`を実行すると、各クライアントに何が設定されたか、どの統合レベルにあるかを確認できます。
@@ -288,7 +290,7 @@ Claude → git status → [sqz hook rewrites] → compressed output
 | Cline | `.clinerules`のガイダンス、助言型（advisory）。MCPサーバーは手動で追加 | `sqz init` |
 | Gemini CLI | BeforeToolフック、透過型（transparent） | `sqz init` |
 | Kiro | Steering + MCPサーバー、助言型（advisory） | `sqz init` |
-| OpenCode | TypeScriptプラグイン + MCPサーバー、透過型（transparent） | `sqz init` |
+| OpenCode | OpenCode 1と2向けのTypeScriptプラグイン + MCPサーバー、透過型（transparent） | `sqz init` |
 | Codex CLI | AGENTS.mdのガイダンス + MCPサーバー、助言型（advisory） | `sqz init` |
 | Zed | AGENTS.mdのガイダンス + MCPサーバー、助言型（advisory） | `sqz init` |
 | Copilot CLI | preToolUseフック、透過型（transparent）。`~/.copilot`がある場合 | `sqz init` |

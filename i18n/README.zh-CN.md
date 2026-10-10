@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md sha256:e20e0153585ab14d62a29797338f75e9415f19639ba4f71317cabc907c46f4f6 -->
+<!-- i18n-source: README.md sha256:22ce122cfde9573a5bcbe1adf9a93612646c9e816ae56ece5ccdbd98d469c59c -->
 <!-- i18n:languages -->
 [English](../README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md)
 <!-- /i18n:languages -->
@@ -251,6 +251,8 @@ sqz init --skip cursor,windsurf       # everything except Cursor and Windsurf
 
 文件其余部分的注释保持不变。OpenCode 会自动发现插件文件，不需要在 `plugin` 数组中添加条目（添加后会导致重复加载，见 issue #10）。
 
+同一个插件文件在 OpenCode 1 和 2 上都能加载。OpenCode 2 不会加载 sqz 2.0.0 及更早版本写入的插件，所以升级 sqz 之后，请运行 `sqz doctor --fix`（或再次运行上面的 `print-opencode-plugin` 那一行）来重写它。
+
 **其他工具**：Claude Code 和 Gemini CLI 使用不支持注释的普通 JSON 配置，Cursor、Windsurf 和 Cline 使用 markdown 规则文件，Codex 则会在 `~/.codex/config.toml` 中得到一个保留你注释的 TOML 条目，因此对这些工具来说，自动方式不会造成破坏。对这些工具请使用 `sqz init --only <tool>`。已有的 `.gemini/settings.json` 会合并进 sqz 的钩子；如果它含有注释或无法解析，`sqz init` 不会改动它，而是打印出需要手动添加的条目。
 
 之后运行 `sqz doctor`，查看为每个客户端配置了什么，以及它处于哪个集成层级。
@@ -288,7 +290,7 @@ Claude → git status → [sqz hook rewrites] → compressed output
 | Cline | `.clinerules` 指引，建议式（advisory）；MCP 服务器需手动添加 | `sqz init` |
 | Gemini CLI | BeforeTool 钩子，透明式（transparent） | `sqz init` |
 | Kiro | Steering + MCP 服务器，建议式（advisory） | `sqz init` |
-| OpenCode | TypeScript 插件 + MCP 服务器，透明式（transparent） | `sqz init` |
+| OpenCode | 适用于 OpenCode 1 和 2 的 TypeScript 插件 + MCP 服务器，透明式（transparent） | `sqz init` |
 | Codex CLI | AGENTS.md 指引 + MCP 服务器，建议式（advisory） | `sqz init` |
 | Zed | AGENTS.md 指引 + MCP 服务器，建议式（advisory） | `sqz init` |
 | Copilot CLI | preToolUse 钩子，透明式（transparent），在 `~/.copilot` 存在时安装 | `sqz init` |
