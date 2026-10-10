@@ -218,6 +218,11 @@ Comments in the rest of your file stay put. OpenCode auto-discovers
 the plugin file; no `plugin` array entry needed (adding one causes
 double-loading, see issue #10).
 
+The same plugin file loads on OpenCode 1 and 2. OpenCode 2 does not
+load the plugin sqz 2.0.0 and earlier wrote, so after upgrading sqz run
+`sqz doctor --fix` (or the `print-opencode-plugin` line above again) to
+rewrite it.
+
 **Other tools**: Claude Code and Gemini CLI use plain JSON configs
 without comment support, Cursor, Windsurf and Cline get markdown rules
 files, and Codex gets a TOML entry in `~/.codex/config.toml` that keeps
@@ -262,7 +267,7 @@ What doesn't get compressed:
 | Cline | `.clinerules` guidance (advisory); MCP server added by hand | `sqz init` |
 | Gemini CLI | BeforeTool hook (transparent) | `sqz init` |
 | Kiro | Steering + MCP server (advisory) | `sqz init` |
-| OpenCode | TypeScript plugin + MCP server (transparent) | `sqz init` |
+| OpenCode | TypeScript plugin for OpenCode 1 and 2 + MCP server (transparent) | `sqz init` |
 | Codex CLI | AGENTS.md guidance + MCP server (advisory) | `sqz init` |
 | Zed | AGENTS.md guidance + MCP server (advisory) | `sqz init` |
 | Copilot CLI | preToolUse hook (transparent), when `~/.copilot` exists | `sqz init` |

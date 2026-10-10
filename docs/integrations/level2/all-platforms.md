@@ -136,6 +136,8 @@ File: `opencode.json` (project root) or `~/.config/opencode/opencode.json`
 }
 ```
 
+`sqz init` also writes the plugin `~/.config/opencode/plugins/sqz.ts`, which routes shell commands through sqz on OpenCode 1 and 2 (`sqz print-opencode-plugin` prints it). OpenCode 2 does not load the plugin sqz 2.0.0 and earlier wrote; `sqz doctor` reports it, and `sqz doctor --fix` or `sqz init` rewrites it.
+
 ---
 
 ### Goose
