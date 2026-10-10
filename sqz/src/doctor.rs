@@ -216,7 +216,7 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
     }
     if managed.opencode_plugin_stale {
         problems.push(Problem {
-            message: "the OpenCode plugin was written by an older sqz, so OpenCode 2 does not load it and runs every command uncompressed".to_string(),
+            message: "the OpenCode plugin was written by an older sqz".to_string(),
             fix: Some(format!("{FIX_CMD}   (rewrites it for the sqz binary it already runs)")),
         });
     }
@@ -1219,7 +1219,7 @@ mod tests {
         let managed = Managed { opencode_plugin_stale: true, ..clean() };
         let problems = diagnose(&tools, &active(), &managed);
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].message.contains("OpenCode 2 does not load it"), "{}", problems[0].message);
+        assert!(problems[0].message.contains("OpenCode plugin"), "{}", problems[0].message);
         assert!(problems[0].fix.as_deref().unwrap().starts_with(FIX_CMD));
     }
 
