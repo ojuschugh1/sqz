@@ -1,0 +1,39 @@
+name: Translations
+
+on:
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'i18n/**'
+      - '.github/workflows/translations.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'i18n/**'
+      - '.github/workflows/translations.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check translations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Test the checker
+        run: python3 -m unittest discover -s i18n -p 'test_*.py'
+
+      - name: Check translations against the English source
+        run: python3 i18n/check.py --github
