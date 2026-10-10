@@ -46,6 +46,10 @@
   <a href="https://discord.gg/j8EEyH5dSB">Discord</a>
 </p>
 
+<!-- i18n:languages -->
+[English](https://github.com/ojuschugh1/sqz/blob/main/README.md) | [简体中文](https://github.com/ojuschugh1/sqz/blob/main/i18n/README.zh-CN.md) | [日本語](https://github.com/ojuschugh1/sqz/blob/main/i18n/README.ja.md) | [한국어](https://github.com/ojuschugh1/sqz/blob/main/i18n/README.ko.md) | [Español](https://github.com/ojuschugh1/sqz/blob/main/i18n/README.es.md) | [Português (Brasil)](https://github.com/ojuschugh1/sqz/blob/main/i18n/README.pt-BR.md)
+<!-- /i18n:languages -->
+
 ---
 
 sqz compresses command output before it reaches your LLM. Single Rust binary, zero config.

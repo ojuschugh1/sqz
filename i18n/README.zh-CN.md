@@ -1,6 +1,6 @@
 <!-- i18n-source: README.md sha256:e20e0153585ab14d62a29797338f75e9415f19639ba4f71317cabc907c46f4f6 -->
 <!-- i18n:languages -->
-[English](../README.md) | [简体中文](README.zh-CN.md)
+[English](../README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md)
 <!-- /i18n:languages -->
 
 <!-- i18n:note -->

@@ -50,6 +50,10 @@
   <a href="https://discord.gg/j8EEyH5dSB">Discord</a>
 </p>
 
+<!-- i18n:languages -->
+[English](README.md) | [简体中文](i18n/README.zh-CN.md) | [日本語](i18n/README.ja.md) | [한국어](i18n/README.ko.md) | [Español](i18n/README.es.md) | [Português (Brasil)](i18n/README.pt-BR.md)
+<!-- /i18n:languages -->
+
 ---
 
 AI coding agents spend most of their input tokens on tool output: build logs, test runs, `git status`, the same file read again after every edit. All of it goes into the context window raw, and it is re-sent on every turn after that.

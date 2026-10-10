@@ -1,6 +1,6 @@
 <!-- i18n-source: CONTRIBUTING.md sha256:da3c749928a7f68e597cc1f0a0eba90065241548812430032de3fcc69b9d7188 -->
 <!-- i18n:languages -->
-[English](../CONTRIBUTING.md) | [简体中文](CONTRIBUTING.zh-CN.md)
+[English](../CONTRIBUTING.md) | [简体中文](CONTRIBUTING.zh-CN.md) | [日本語](CONTRIBUTING.ja.md) | [한국어](CONTRIBUTING.ko.md) | [Español](CONTRIBUTING.es.md) | [Português (Brasil)](CONTRIBUTING.pt-BR.md)
 <!-- /i18n:languages -->
 
 <!-- i18n:note -->

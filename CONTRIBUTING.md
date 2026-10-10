@@ -1,5 +1,9 @@
 # Contributing to sqz
 
+<!-- i18n:languages -->
+[English](CONTRIBUTING.md) | [简体中文](i18n/CONTRIBUTING.zh-CN.md) | [日本語](i18n/CONTRIBUTING.ja.md) | [한국어](i18n/CONTRIBUTING.ko.md) | [Español](i18n/CONTRIBUTING.es.md) | [Português (Brasil)](i18n/CONTRIBUTING.pt-BR.md)
+<!-- /i18n:languages -->
+
 Thanks for your interest in contributing. Here's how to get started.
 
 ## Setup

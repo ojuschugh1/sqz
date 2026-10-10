@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The README and the contributing guide in five more languages.**
+  Both are available in Simplified Chinese, Japanese, Korean, Spanish
+  and Brazilian Portuguese under `i18n/`. CI checks each translation
+  against the English text and reports any that fall behind.
+
 ### Fixed
 
 - **OpenCode 2 loads the sqz plugin.** OpenCode 2 starts a plugin
