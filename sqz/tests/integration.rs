@@ -1167,6 +1167,38 @@ fn test_doctor_fix_repoints_hooks_whose_sqz_binary_is_gone() {
 
 #[test]
 #[cfg(not(windows))]
+fn test_doctor_fix_and_init_refresh_an_old_opencode_plugin() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let plugin = home.path().join(".config").join("opencode").join("plugins").join("sqz.ts");
+    let other = home.path().join("bin").join("sqz");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, "").unwrap();
+    let old = |bin: &str| {
+        include_str!("fixtures/opencode-plugin-2.0.0.ts")
+            .replace("\"/usr/local/bin/sqz\"", &serde_json::to_string(bin).unwrap())
+    };
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "opencode"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+
+    let other = other.to_string_lossy().to_string();
+    std::fs::write(&plugin, old(&other)).unwrap();
+    let o = run_doctor(home.path(), project.path(), &[]);
+    assert!(stdout(&o).contains("the OpenCode plugin was written by an older sqz"), "{}", stdout(&o));
+    let o = run_doctor(home.path(), project.path(), &["--fix"]);
+    assert!(stdout(&o).contains(&format!("refreshed {}", plugin.display())), "{}", stdout(&o));
+    assert!(!stdout(&o).contains("OpenCode plugin was written by an older sqz"), "{}", stdout(&o));
+    assert_eq!(std::fs::read_to_string(&plugin).unwrap(), sqz_engine::generate_opencode_plugin(&other));
+
+    let bin = sqz_bin().to_string_lossy().replace('\\', "/");
+    std::fs::write(&plugin, old(&bin)).unwrap();
+    let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "opencode"]);
+    assert!(stdout(&o).contains("OpenCode plugin (replace the one an older sqz wrote)"), "{}", stdout(&o));
+    assert_eq!(std::fs::read_to_string(&plugin).unwrap(), sqz_engine::generate_opencode_plugin(&bin));
+}
+
+#[test]
+#[cfg(not(windows))]
 fn test_doctor_and_uninstall_remove_hooks_an_older_sqz_wrote() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();

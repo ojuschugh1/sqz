@@ -717,6 +717,14 @@ fn cmd_init(skip_confirm: bool, global: bool, only: Option<String>, skip: Option
                     }
                 }
             }
+            let plugin = sqz_engine::opencode_plugin_path();
+            if sqz_engine::opencode_plugin_stale(&plugin) {
+                plan.push((
+                    plugin.display().to_string(),
+                    "OpenCode plugin (replace the one an older sqz wrote)".to_string(),
+                    false,
+                ));
+            }
             continue;
         }
 
