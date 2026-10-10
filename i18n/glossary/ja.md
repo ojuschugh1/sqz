@@ -14,6 +14,9 @@ Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Japanese tran
 | dedup, deduplication | 重複排除 | |
 | reference | 参照 | The `§ref:HASH§` marker is 参照マーカー. |
 | dedup cache | 重複排除キャッシュ | |
+| re-read | 再読み込み、読み直す | |
+| line range | 行範囲 | |
+| entry (in a config file) | エントリー | |
 | hook | フック | |
 | MCP server | MCPサーバー | |
 | MCP proxy | MCPプロキシ | |
@@ -35,12 +38,12 @@ Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Japanese tran
 | compaction | コンパクション | |
 | prompt caching | プロンプトキャッシュ | |
 | counterfactual replay | 反実仮想リプレイ | |
-| estimate | 推定値 | |
+| estimate | 推定値 | `sqz discover --replay` prints the English word. Where the text quotes the report, write 推定値（estimate）. |
 | out of reach | 対象外（out of reach） | A row label in `sqz discover --replay`. |
 | regret signals | リグレットシグナル（regret signals） | A section of `sqz stats`. |
 | quick re-run | 短時間での再実行（quick re-runs） | A row label in `sqz stats`. |
 | ref expand | 参照の展開（ref expands） | A row label in `sqz stats`. |
-| tokens saved | 節約したトークン（tokens saved） | Printed by `sqz stats` and `sqz gain`. |
+| tokens saved | 節約したトークン（tokens saved） | Printed by `sqz stats` and `sqz gain`. The parentheses are for text that refers to that output; a plain count is written トークンを節約. |
 | property-based test | プロパティベーステスト | |
 | pull request, issue | プルリクエスト、Issue | |
 | Contributor License Agreement | コントリビューターライセンス契約（CLA） | |
