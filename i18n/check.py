@@ -395,14 +395,14 @@ def check_links(src, tr, src_name):
         "link target", src_name)
 
 
-def check_link_files(tr, root):
+def check_link_files(tr, root, level):
     out = []
     for key, resolved, target, line in tr["links"]:
         if resolved is None:
             continue
         path = urllib.parse.unquote(resolved)
         if path == ".." or path.startswith("../") or not os.path.exists(os.path.join(root, path)):
-            out.append(("error", line, "link target %s does not exist (resolves to %s)" % (target, resolved)))
+            out.append((level, line, "link target %s does not exist (resolves to %s)" % (target, resolved)))
     return out
 
 
@@ -426,13 +426,13 @@ def check_numbers(src, tr, src_name):
     return out
 
 
-def structure_checks(src, tr, src_name, root):
+def structure_checks(src, tr, src_name, root, stale):
     out = []
     out.extend(check_blocks(src, tr, src_name))
     out.extend(check_fences(src, tr, src_name))
     out.extend(check_inline_code(src, tr, src_name))
     out.extend(check_links(src, tr, src_name))
-    out.extend(check_link_files(tr, root))
+    out.extend(check_link_files(tr, root, "warning" if stale else "error"))
     out.extend(check_numbers(src, tr, src_name))
     return out
 
@@ -549,7 +549,7 @@ def check_translation(repo, rel):
         findings.append((name, "error", line, msg))
     src = analyse(src_lines, "")
     tr = analyse(tr_lines, FOLDER)
-    for level, line, msg in structure_checks(src, tr, name, repo.root):
+    for level, line, msg in structure_checks(src, tr, name, repo.root, stale is not None):
         findings.append((rel, level, line, msg))
     if stale is not None:
         findings.append((rel, "stale", 1, stale_message(repo, name, stale, src_lines, current)))

@@ -291,6 +291,14 @@ class CheckTest(unittest.TestCase):
         self.assertIn("stale: translated from README.md", out)
         self.assertIn("changed sections: ## Usage", out)
 
+    def test_moved_link_target_is_a_warning_while_stale(self):
+        os.rename(os.path.join(self.dir, "docs", "guide.md"), os.path.join(self.dir, "docs", "moved.md"))
+        self.write("README.md", SOURCE_SWITCHER + SOURCE_BODY.replace("docs/guide.md", "docs/moved.md"))
+        self.commit("move the guide")
+        out = self.assertClean()
+        self.assertIn("warning: link target ../docs/guide.md does not exist (resolves to docs/guide.md)", out)
+        self.assertIn("1 stale", out)
+
     def test_unknown_stamp_compares_with_current_source(self):
         self.write("i18n/README.ja.md", "<!-- i18n-source: README.md sha256:%s -->\n%s" % ("a" * 64, TRANSLATION_HEAD + TRANSLATION_BODY))
         out = self.assertClean()
