@@ -284,8 +284,7 @@ pub(crate) fn install_opencode_plugin_at(plugin_path: &Path, sqz_path: &str) -> 
     Ok(true)
 }
 
-/// Whether the plugin file at `path` was written by an older sqz: it names its
-/// binary on sqz's `SQZ_PATH` line but is not what this sqz writes for it.
+/// Whether the plugin at `path` names a sqz binary but is not what this sqz writes for it.
 pub fn opencode_plugin_stale(path: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else { return false };
     crate::tool_hooks::sqz_hook_binaries(path)
@@ -293,8 +292,7 @@ pub fn opencode_plugin_stale(path: &Path) -> bool {
         .is_some_and(|bin| text.replace("\r\n", "\n") != generate_opencode_plugin(bin))
 }
 
-/// Bring a stale plugin file (see [`opencode_plugin_stale`]) up to date,
-/// keeping the sqz binary it already runs when that still exists.
+/// Rewrite a stale OpenCode plugin in place, keeping its sqz binary while that resolves.
 pub fn refresh_opencode_plugin(path: &Path, fallback_sqz: &str) -> Result<bool> {
     if !opencode_plugin_stale(path) {
         return Ok(false);
