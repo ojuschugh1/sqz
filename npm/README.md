@@ -459,7 +459,13 @@ cargo build --release
 
 ## License
 
-[Elastic License 2.0](https://github.com/ojuschugh1/sqz/blob/main/LICENSE) (ELv2): use, fork, modify freely. Two restrictions: no competing hosted service, no removing license notices.
+sqz is licensed under either of the [Apache License, Version 2.0](https://github.com/ojuschugh1/sqz/blob/main/LICENSE-APACHE), or the [MIT license](https://github.com/ojuschugh1/sqz/blob/main/LICENSE-MIT), at your option.
+
+Copyright 2026 Ojus Chugh
+
+Releases up to and including 2.0.0 were published under the [Elastic License 2.0](https://github.com/ojuschugh1/sqz/blob/v2.0.0/LICENSE).
+
+Contributions are accepted under the [Contributor License Agreement](https://github.com/ojuschugh1/sqz/blob/main/CLA.md).
 
 ## Links
 

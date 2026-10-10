@@ -245,4 +245,4 @@ sqz demonstrates that significant token savings (24.7% average, 92% on dedup hit
 
 ---
 
-*sqz is open source under the Elastic License 2.0. Source code, benchmarks, and documentation available at [github.com/ojuschugh1/sqz](https://github.com/ojuschugh1/sqz).*
+*sqz is open source, dual-licensed under MIT and Apache 2.0. Source code, benchmarks, and documentation available at [github.com/ojuschugh1/sqz](https://github.com/ojuschugh1/sqz).*

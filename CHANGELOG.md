@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Brazilian Portuguese under `i18n/`. CI checks each translation
   against the English text and reports any that fall behind.
 
+### Changed
+
+- **sqz is now licensed under MIT OR Apache-2.0, at your option,
+  instead of the Elastic License 2.0.** `LICENSE-APACHE` and
+  `LICENSE-MIT` replace `LICENSE`, and the crates, the npm and PyPI
+  packages, the VS Code extension and the Docker image declare the
+  new license. Releases up to and including 2.0.0 keep the Elastic
+  License 2.0.
+
 ### Fixed
 
 - **OpenCode 2 loads the sqz plugin.** OpenCode 2 starts a plugin

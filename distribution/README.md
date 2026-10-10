@@ -75,9 +75,8 @@ Submission is a PR to their repo:
 Two things to know before submitting:
 
 - Their CONTRIBUTING.md asks that the server license "allows people to
-  consume it (MIT or Apache 2 are great, GPL is not)". sqz is ELv2, which
-  permits free use but is not OSI-approved; whether they accept it is their
-  call. Worst case the entry is rejected and the plain `docker run` path
-  above still works.
+  consume it (MIT or Apache 2 are great, GPL is not)". sqz is MIT OR
+  Apache-2.0, which fits. Releases up to and including 2.0.0 were ELv2,
+  so set `source.commit` to a later release.
 - Docker builds and hosts the image themselves under `mcp/sqz` once merged;
   the ghcr.io image is independent of that.

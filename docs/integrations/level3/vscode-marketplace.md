@@ -31,7 +31,7 @@ The following fields must be present and accurate before publishing:
     "type": "git",
     "url": "https://github.com/ojuschugh1/sqz"
   },
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "icon": "images/icon.png"
 }
 ```
