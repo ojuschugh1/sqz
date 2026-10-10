@@ -38,8 +38,8 @@ use crate::error::Result;
 ///
 /// The fix is a dual-export shape:
 ///
-/// 1. **Default export** — V1 object `{ id: "sqz", server: factory }`
-///    so the modern loader identifies the plugin by name.
+/// 1. **Default export** `{ id: "sqz", server: factory, setup }`: V1
+///    loaders run `server` and show the `id`, OpenCode 2 runs `setup`.
 /// 2. **Named export** `SqzPlugin` — legacy factory fallback. Old
 ///    OpenCode versions that don't know about V1 walk
 ///    `Object.values(mod)`; default export dedups against the named
@@ -66,122 +66,127 @@ pub fn generate_opencode_plugin(sqz_path: &str) -> String {
  * including one causes the plugin to load twice, per issue #10).
  */
 
+const SQZ_PATH = "{sqz_path}";
+
+// Commands that should not be intercepted.
+const INTERACTIVE = new Set([
+  "vim", "vi", "nano", "emacs", "less", "more", "top", "htop",
+  "ssh", "python", "python3", "node", "irb", "ghci",
+  "psql", "mysql", "sqlite3", "mongo", "redis-cli",
+]);
+
+function isInteractive(cmd: string): boolean {{
+  const base = cmd.split(/\s+/)[0]?.split("/").pop() ?? "";
+  if (INTERACTIVE.has(base)) return true;
+  if (cmd.includes("--watch") || cmd.includes("run dev") ||
+      cmd.includes("run start") || cmd.includes("run serve")) return true;
+  return false;
+}}
+
+// Don't rewrite commands containing shell operators. Appending
+// `2>&1 | sqz compress` to a heredoc, compound command, existing
+// pipe, or redirect corrupts the command. Issue #22: heredoc
+// terminators like `EOF 2>&1 | sqz compress --cmd git` are not
+// valid delimiters.
+function hasShellOperators(cmd: string): boolean {{
+  if (cmd.includes("&&") || cmd.includes("||") || cmd.includes(";")) return true;
+  if (cmd.includes(">") || cmd.includes("<")) return true;
+  if (cmd.includes("|")) return true;
+  if (cmd.includes("<<")) return true;
+  if (cmd.includes("$(") || cmd.includes("`")) return true;
+  return false;
+}}
+
+function shouldIntercept(tool: string): boolean {{
+  return ["bash", "shell", "terminal", "run_shell_command"].includes(tool.toLowerCase());
+}}
+
+// Detect that a command has already been wrapped by sqz. Before this
+// guard was in place OpenCode could call the hook twice on the same
+// command (for retried tool calls, or when a previous rewrite was
+// echoed back to the agent and the agent re-submitted it) and each
+// pass would prepend another `SQZ_CMD=$base` prefix, producing monsters
+// like `SQZ_CMD=SQZ_CMD=ddev SQZ_CMD=ddev ddev exec ...` (reported as
+// a follow-up to issue #5). We skip if any of these markers appear:
+//   * the case-insensitive substring "sqz_cmd=" or "sqz compress"
+//     (covers the tail of prior wraps regardless of case; SQZ_CMD= is
+//     legacy pre-issue-#10 but still valid in POSIX shell hooks)
+//   * a leading `VAR=` assignment that starts with SQZ_
+//     (defensive catch-all for exotic wrap variants)
+//   * the base command itself is sqz or sqz-mcp (running sqz directly
+//     — compressing sqz's own output is pointless and causes loops)
+function isAlreadyWrapped(cmd: string): boolean {{
+  const lowered = cmd.toLowerCase();
+  if (lowered.includes("sqz_cmd=")) return true;
+  if (lowered.includes("sqz compress")) return true;
+  if (lowered.includes("| sqz ") || lowered.includes("| sqz\t")) return true;
+  if (/^\s*SQZ_[A-Z0-9_]+=/.test(cmd)) return true;
+  const base = extractBaseCmd(cmd);
+  if (base === "sqz" || base === "sqz-mcp" || base === "sqz.exe") return true;
+  return false;
+}}
+
+// Extract the base command name defensively. If the command has
+// leading env-var assignments (VAR=val VAR2=val2 actual_cmd arg1),
+// skip past them so the base is `actual_cmd` — not `VAR=val`.
+function extractBaseCmd(cmd: string): string {{
+  const tokens = cmd.split(/\s+/).filter(t => t.length > 0);
+  for (const tok of tokens) {{
+    // A token is an env assignment if it matches NAME=VALUE where NAME
+    // is a valid env var identifier. Skip it and keep looking.
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) continue;
+    return tok.split("/").pop() ?? "unknown";
+  }}
+  return "unknown";
+}}
+
+// Shell-escape a command-name label so it's safe to inline into the
+// rewritten shell command. Agents occasionally invoke commands via
+// paths with spaces (`"/my tools/foo" --arg`) and in the LLM
+// roundtrip that can survive to `extractBaseCmd`'s output. Quote the
+// label unless it's pure ASCII alphanumeric.
+function shellEscapeLabel(s: string): string {{
+  if (/^[A-Za-z0-9_.-]+$/.test(s)) return s;
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}}
+
+// A pipe exits with sqz's status, so the command's own status rides
+// through as a trailer sqz strips and exits with. That form is POSIX;
+// OpenCode uses a POSIX shell outside Windows (it refuses fish and nu).
+const POSIX = process.platform !== "win32" &&
+  !/(^|\/)(fish|nu|csh|tcsh|xonsh|elvish)$/.test(process.env.SHELL ?? "");
+
+function wrap(cmd: string, label: string): string {{
+  if (!POSIX) return `${{cmd}} 2>&1 | ${{SQZ_PATH}} compress --cmd ${{label}}`;
+  return `{{ ( ${{cmd}}\n); printf '\\n__SQZ_EXIT_%d__\\n' "$?"; }} 2>&1 | ${{SQZ_PATH}} compress --cmd ${{label}}`;
+}}
+
+function rewriteCommand(cmd: string): string | undefined {{
+  if (!cmd || isAlreadyWrapped(cmd) || isInteractive(cmd) || hasShellOperators(cmd)) return;
+
+  // Rewrite: pipe through `sqz compress --cmd <base>`.
+  //
+  // Issue #10: the previous form was `SQZ_CMD=<base> <cmd> 2>&1 |
+  // <sqz> compress`, which uses sh-specific inline env-var syntax.
+  // On Windows, OpenCode Desktop routes bash-tool commands through
+  // PowerShell (or cmd.exe when $SHELL is unset), and both parse
+  // `SQZ_CMD=cmd` as a command name — raising CommandNotFoundException
+  // and producing zero compression. `--cmd NAME` is a normal CLI
+  // argument, shell-neutral, works in POSIX sh, zsh, fish, PowerShell,
+  // and cmd.exe.
+  const base = extractBaseCmd(cmd);
+  return wrap(cmd, shellEscapeLabel(base));
+}}
+
 const SqzPluginFactory = async (ctx: any) => {{
-  const SQZ_PATH = "{sqz_path}";
-
-  // Commands that should not be intercepted.
-  const INTERACTIVE = new Set([
-    "vim", "vi", "nano", "emacs", "less", "more", "top", "htop",
-    "ssh", "python", "python3", "node", "irb", "ghci",
-    "psql", "mysql", "sqlite3", "mongo", "redis-cli",
-  ]);
-
-  function isInteractive(cmd: string): boolean {{
-    const base = cmd.split(/\s+/)[0]?.split("/").pop() ?? "";
-    if (INTERACTIVE.has(base)) return true;
-    if (cmd.includes("--watch") || cmd.includes("run dev") ||
-        cmd.includes("run start") || cmd.includes("run serve")) return true;
-    return false;
-  }}
-
-  // Don't rewrite commands containing shell operators. Appending
-  // `2>&1 | sqz compress` to a heredoc, compound command, existing
-  // pipe, or redirect corrupts the command. Issue #22: heredoc
-  // terminators like `EOF 2>&1 | sqz compress --cmd git` are not
-  // valid delimiters.
-  function hasShellOperators(cmd: string): boolean {{
-    if (cmd.includes("&&") || cmd.includes("||") || cmd.includes(";")) return true;
-    if (cmd.includes(">") || cmd.includes("<")) return true;
-    if (cmd.includes("|")) return true;
-    if (cmd.includes("<<")) return true;
-    if (cmd.includes("$(") || cmd.includes("`")) return true;
-    return false;
-  }}
-
-  function shouldIntercept(tool: string): boolean {{
-    return ["bash", "shell", "terminal", "run_shell_command"].includes(tool.toLowerCase());
-  }}
-
-  // Detect that a command has already been wrapped by sqz. Before this
-  // guard was in place OpenCode could call the hook twice on the same
-  // command (for retried tool calls, or when a previous rewrite was
-  // echoed back to the agent and the agent re-submitted it) and each
-  // pass would prepend another `SQZ_CMD=$base` prefix, producing monsters
-  // like `SQZ_CMD=SQZ_CMD=ddev SQZ_CMD=ddev ddev exec ...` (reported as
-  // a follow-up to issue #5). We skip if any of these markers appear:
-  //   * the case-insensitive substring "sqz_cmd=" or "sqz compress"
-  //     (covers the tail of prior wraps regardless of case; SQZ_CMD= is
-  //     legacy pre-issue-#10 but still valid in POSIX shell hooks)
-  //   * a leading `VAR=` assignment that starts with SQZ_
-  //     (defensive catch-all for exotic wrap variants)
-  //   * the base command itself is sqz or sqz-mcp (running sqz directly
-  //     — compressing sqz's own output is pointless and causes loops)
-  function isAlreadyWrapped(cmd: string): boolean {{
-    const lowered = cmd.toLowerCase();
-    if (lowered.includes("sqz_cmd=")) return true;
-    if (lowered.includes("sqz compress")) return true;
-    if (lowered.includes("| sqz ") || lowered.includes("| sqz\t")) return true;
-    if (/^\s*SQZ_[A-Z0-9_]+=/.test(cmd)) return true;
-    const base = extractBaseCmd(cmd);
-    if (base === "sqz" || base === "sqz-mcp" || base === "sqz.exe") return true;
-    return false;
-  }}
-
-  // Extract the base command name defensively. If the command has
-  // leading env-var assignments (VAR=val VAR2=val2 actual_cmd arg1),
-  // skip past them so the base is `actual_cmd` — not `VAR=val`.
-  function extractBaseCmd(cmd: string): string {{
-    const tokens = cmd.split(/\s+/).filter(t => t.length > 0);
-    for (const tok of tokens) {{
-      // A token is an env assignment if it matches NAME=VALUE where NAME
-      // is a valid env var identifier. Skip it and keep looking.
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) continue;
-      return tok.split("/").pop() ?? "unknown";
-    }}
-    return "unknown";
-  }}
-
-  // Shell-escape a command-name label so it's safe to inline into the
-  // rewritten shell command. Agents occasionally invoke commands via
-  // paths with spaces (`"/my tools/foo" --arg`) and in the LLM
-  // roundtrip that can survive to `extractBaseCmd`'s output. Quote the
-  // label unless it's pure ASCII alphanumeric.
-  function shellEscapeLabel(s: string): string {{
-    if (/^[A-Za-z0-9_.-]+$/.test(s)) return s;
-    return "'" + s.replace(/'/g, "'\\''") + "'";
-  }}
-
-  // A pipe exits with sqz's status, so the command's own status rides
-  // through as a trailer sqz strips and exits with. That form is POSIX;
-  // OpenCode uses a POSIX shell outside Windows (it refuses fish and nu).
-  const POSIX = process.platform !== "win32" &&
-    !/(^|\/)(fish|nu|csh|tcsh|xonsh|elvish)$/.test(process.env.SHELL ?? "");
-
-  function wrap(cmd: string, label: string): string {{
-    if (!POSIX) return `${{cmd}} 2>&1 | ${{SQZ_PATH}} compress --cmd ${{label}}`;
-    return `{{ ( ${{cmd}}\n); printf '\\n__SQZ_EXIT_%d__\\n' "$?"; }} 2>&1 | ${{SQZ_PATH}} compress --cmd ${{label}}`;
-  }}
-
   return {{
     "tool.execute.before": async (input: any, output: any) => {{
       const tool = input.tool ?? "";
       if (!shouldIntercept(tool)) return;
 
       const cmd = output.args?.command ?? "";
-      if (!cmd || isAlreadyWrapped(cmd) || isInteractive(cmd) || hasShellOperators(cmd)) return;
-
-      // Rewrite: pipe through `sqz compress --cmd <base>`.
-      //
-      // Issue #10: the previous form was `SQZ_CMD=<base> <cmd> 2>&1 |
-      // <sqz> compress`, which uses sh-specific inline env-var syntax.
-      // On Windows, OpenCode Desktop routes bash-tool commands through
-      // PowerShell (or cmd.exe when $SHELL is unset), and both parse
-      // `SQZ_CMD=cmd` as a command name — raising CommandNotFoundException
-      // and producing zero compression. `--cmd NAME` is a normal CLI
-      // argument, shell-neutral, works in POSIX sh, zsh, fish, PowerShell,
-      // and cmd.exe.
-      const base = extractBaseCmd(cmd);
-      output.args.command = wrap(cmd, shellEscapeLabel(base));
+      const rewritten = rewriteCommand(cmd);
+      if (rewritten) output.args.command = rewritten;
     }},
   }};
 }};
@@ -195,6 +200,17 @@ const SqzPluginFactory = async (ctx: any) => {{
 export default {{
   id: "sqz",
   server: SqzPluginFactory,
+  async setup(ctx: any) {{
+    await ctx.tool.hook("execute.before", (event: any) => {{
+      const tool = event.tool ?? "";
+      if (!shouldIntercept(tool)) return;
+
+      const cmd = event.input?.command;
+      if (typeof cmd !== "string") return;
+      const rewritten = rewriteCommand(cmd);
+      if (rewritten) event.input = {{ ...event.input, command: rewritten }};
+    }});
+  }},
 }};
 
 // Legacy named export — pre-V1 OpenCode versions walk Object.values(mod)
@@ -1962,11 +1978,11 @@ mod tests {
         let content = generate_opencode_plugin("sqz");
         assert!(content.contains("printf '\\\\n__SQZ_EXIT_%d__\\\\n' \"$?\""), "{content}");
         assert!(content.contains("process.platform !== \"win32\""));
-        assert!(content.contains("output.args.command = wrap(cmd, shellEscapeLabel(base));"));
+        assert!(content.contains("return wrap(cmd, shellEscapeLabel(base));"));
 
         let Some(node) = which_node().filter(|_| cfg!(unix)) else { return };
-        let start = content.find("  const POSIX").unwrap();
-        let end = content[start..].find("\n  }\n").unwrap() + start + 4;
+        let start = content.find("const POSIX").unwrap();
+        let end = content[start..].find("\n}\n").unwrap() + start + 2;
         // Strip the TypeScript annotations so plain node can run it.
         let js = content[start..end]
             .replace("(cmd: string, label: string): string", "(cmd, label)")
@@ -1988,6 +2004,67 @@ mod tests {
     fn which_node() -> Option<&'static str> {
         let out = std::process::Command::new("node").arg("--version").output().ok()?;
         out.status.success().then_some("node")
+    }
+
+    #[test]
+    fn plugin_default_export_has_a_setup_for_opencode_2() {
+        let content = generate_opencode_plugin("sqz");
+        let default = &content[content.find("export default {").unwrap()..];
+        assert!(
+            default.contains("  async setup(ctx: any) {\n    await ctx.tool.hook(\"execute.before\", (event: any) => {"),
+            "{content}"
+        );
+        assert_eq!(content.matches("rewriteCommand(cmd)").count(), 2, "{content}");
+        assert_eq!(content.matches("wrap(cmd, ").count(), 1, "{content}");
+    }
+
+    #[test]
+    fn ts_plugin_rewrites_the_same_on_opencode_1_and_2() {
+        let Some(node) = which_node().filter(|_| cfg!(unix)) else { return };
+        let dir = tempfile::tempdir().unwrap();
+        // Strip the TypeScript annotations so plain node can run it.
+        let js = generate_opencode_plugin("sqz")
+            .replace(": string | undefined", "")
+            .replace(": string", "")
+            .replace(": boolean", "")
+            .replace(": any", "");
+        std::fs::write(dir.path().join("sqz.mjs"), js).unwrap();
+        let wrapped = crate::exit_marker::posix_rewrite("cargo test", "cargo");
+        let commands = serde_json::json!(["cargo test", "vim notes.txt", wrapped]);
+        let driver = r#"import plugin, { SqzPlugin } from "./sqz.mjs";
+const commands = COMMANDS;
+const hooks = await plugin.server({});
+const v1 = [];
+for (const command of commands) {
+  const output = { args: { command } };
+  await hooks["tool.execute.before"]({ tool: "bash" }, output);
+  v1.push(output.args.command);
+}
+const registered = [];
+await plugin.setup({ tool: { hook: async (name, callback) => { registered.push([name, callback]); } } });
+const v2 = [];
+for (const command of commands) {
+  const event = { tool: "shell", input: { command, workdir: "/tmp" } };
+  for (const [name, callback] of registered) if (name === "execute.before") await callback(event);
+  v2.push(event.input);
+}
+process.stdout.write(JSON.stringify({ id: plugin.id, names: registered.map(([name]) => name), legacy: SqzPlugin === plugin.server, v1, v2 }));
+"#
+        .replace("COMMANDS", &commands.to_string());
+        std::fs::write(dir.path().join("drive.mjs"), driver).unwrap();
+        let out = std::process::Command::new(node)
+            .arg(dir.path().join("drive.mjs"))
+            .env("SHELL", "/bin/zsh")
+            .output()
+            .unwrap();
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+        let input = |command: &str| serde_json::json!({ "command": command, "workdir": "/tmp" });
+        assert_eq!(got["id"], "sqz");
+        assert_eq!(got["names"], serde_json::json!(["execute.before"]));
+        assert_eq!(got["legacy"], true);
+        assert_eq!(got["v1"], serde_json::json!([wrapped, "vim notes.txt", wrapped]));
+        assert_eq!(got["v2"], serde_json::json!([input(&wrapped), input("vim notes.txt"), input(&wrapped)]));
     }
 
     /// Companion to the above: the TS plugin (which runs inside
