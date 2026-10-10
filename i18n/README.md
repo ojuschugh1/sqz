@@ -92,7 +92,7 @@ A stale translation never fails CI, so English changes can be merged without wai
 
 1. Open an issue labelled `translation` first, naming the language and who can review it, so two people do not start the same work.
 2. Add `i18n/README.<lang>.md`, `i18n/CONTRIBUTING.<lang>.md` and `i18n/glossary/<lang>.md`.
-3. Add the language to every languages block: both English files and every existing translation.
+3. Add the language to every languages block: both English files, `npm/README.md` and every existing translation.
 4. Add a row to the table above.
 5. Run `python3 i18n/check.py --stamp` on the two new files, then `python3 i18n/check.py`.
 
