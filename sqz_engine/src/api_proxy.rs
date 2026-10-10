@@ -1,16 +1,16 @@
-/// API Proxy — compresses LLM API request payloads before forwarding.
+/// API Proxy: compresses LLM API request payloads and returns them.
 ///
-/// Sits between the application and the LLM API (OpenAI, Anthropic, Google).
-/// Intercepts the full request body, compresses the messages array
-/// (system prompt, conversation history, tool results), and forwards
-/// the compressed version. This attacks the 70-80% of tokens that
-/// shell hooks and tool interception cannot reach.
+/// Takes the request body an application would send to an LLM API (OpenAI,
+/// Anthropic, Google), compresses the system prompt and tool results,
+/// summarizes old conversation turns, and returns the compressed body with
+/// token estimates. Nothing is forwarded: `sqz proxy` sends the compressed
+/// body back to the client that posted it.
 ///
 /// Compression targets:
-/// - System prompt: compress once, cache for the session
-/// - Conversation history: summarize old turns, keep recent ones verbatim
+/// - System prompt: apply the full sqz pipeline
+/// - Conversation history: summarize old turns, not the most recent ones
 /// - Tool results: apply the full sqz pipeline (strip nulls, TOON, condense, etc.)
-/// - Repeated content: dedup across messages in the same request
+/// - Google contents: apply the pipeline to text parts, summarize old long ones
 
 use std::collections::HashMap;
 
