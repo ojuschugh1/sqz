@@ -131,7 +131,12 @@ cargo test -p sqz-engine prop_
 - Use GitHub Issues
 - Include: OS, sqz version (`sqz --version`), steps to reproduce, expected vs actual behavior
 - For test failures: include the full `cargo test` output
+- Issues and pull requests can be written in English or in your own language. English gets the fastest reply
+
+## Translations
+
+The README and this guide are translated in `i18n/`. See [i18n/README.md](i18n/README.md) for the rules, how to update a translation and how to add a language.
 
 ## CLA
 
-By submitting a pull request, you agree to the [Contributor License Agreement](CLA.md).
+By submitting a pull request, you agree to the [Contributor License Agreement](CLA.md). The CLA is only available in English, and the English text is the one that applies.
