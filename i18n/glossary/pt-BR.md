@@ -23,6 +23,7 @@ Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Brazilian Por
 | advisory (tier) | orientativo (advisory) | Printed by `sqz doctor` and `sqz discover --replay`. Keep the English word in parentheses. |
 | per-command formatter | formatador por comando | |
 | compression pipeline | pipeline de compressão | |
+| engine | motor | "the sqz engine" is o motor do sqz, "the core engine" is o motor central. Crate names such as `sqz_engine` and `sqz-engine` stay as they are. |
 | stage | etapa | A compression stage is etapa de compressão. |
 | safe mode | modo seguro | |
 | stack trace | stack trace | Kept in English. |
@@ -40,10 +41,17 @@ Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Brazilian Por
 | regret signals | sinais de arrependimento (regret signals) | A section of `sqz stats`. |
 | quick re-run | reexecução rápida (quick re-runs) | A row label in `sqz stats`. |
 | ref expand | expansão de referência (ref expands) | A row label in `sqz stats`. |
-| tokens saved | tokens economizados (tokens saved) | Printed by `sqz stats` and `sqz gain`. |
+| tokens saved | tokens economizados (tokens saved) | Printed by `sqz stats` and `sqz gain`. Add the English in parentheses where the reader needs to match that output, not in the stats line at the top of the README. |
 | property-based test | teste baseado em propriedades | |
 | pull request, issue | pull request, issue | Kept in English, as on GitHub. |
 | Contributor License Agreement | Contrato de Licença de Contribuidor (CLA) | |
+| commit | commit | Kept in English. "Before committing" is antes de fazer commit. |
+| fork | fork | Kept in English. "Fork the repo" is faça um fork do repositório. |
+| crate, workspace | crate, workspace | Kept in English. Masculine: o crate, o workspace. Plural crates. |
+| shell | shell | Masculine: o shell. The shell hook is o hook do shell. |
+| release binary | binário de release | |
+| benchmark | benchmark | Kept in English. The quality benchmark is benchmark de qualidade. |
+| changelog | registro de alterações | |
 
 ## Keep in English
 
