@@ -35,7 +35,7 @@ Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Simplified Ch
 | compaction | 上下文精简（compaction） | Keeps it apart from sqz's 压缩. |
 | prompt caching | 提示缓存 | |
 | counterfactual replay | 反事实回放 | |
-| estimate | 估算 | |
+| estimate | 估算 | Where the text says what `sqz discover --replay` prints, keep the English word in parentheses: 估算（estimate）. |
 | out of reach | 无法触及（out of reach） | A row label in `sqz discover --replay`. |
 | regret signals | 遗憾信号（regret signals） | A section of `sqz stats`. |
 | quick re-run | 快速重跑（quick re-runs） | A row label in `sqz stats`. |
