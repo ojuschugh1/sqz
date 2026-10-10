@@ -5,6 +5,24 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **OpenCode 2 loads the sqz plugin.** OpenCode 2 starts a plugin
+  through the `setup` function on its default export, and the plugin
+  `sqz init` wrote had only OpenCode 1's `server`, so every OpenCode 2
+  release (2.0.0 through 2.0.26; reported on 2.0.16 to 2.0.21) logged
+  "failed to load plugin" and ran every command uncompressed. The
+  plugin now carries both: OpenCode 1 calls `server` as before,
+  OpenCode 2 calls `setup`, which registers an `execute.before` hook,
+  and both go through the same rewrite, so OpenCode 1 runs the same
+  commands as with 2.0.0. sqz 1.0.5 through 2.0.0 wrote the OpenCode 1
+  object `{ id, server }`, and 0.6.0 through 1.0.4 only a `SqzPlugin`
+  export, which OpenCode 2 refuses too. `sqz doctor` reports a plugin
+  an older sqz wrote, and `sqz doctor --fix` and `sqz init` rewrite it
+  in place; `--fix` keeps the sqz binary it runs.
+
 ## [2.0.0] - 2026-10-10
 
 ### Security
