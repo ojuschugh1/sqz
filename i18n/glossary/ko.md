@@ -1,6 +1,8 @@
 # Glossary: Korean (한국어)
 
-Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Korean translation writes them. Write in 합니다체.
+Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Korean translation writes them. Write in 합니다체: statements end in -ㅂ니다 or -습니다, instructions in -십시오 and questions in -ㅂ니까. A table cell or list item that is a fragment in English can stay a noun phrase.
+
+A particle after code, an English word or a link follows how its last word is read: `sqz`는, `sqz init`은, `sqz doctor`를, `--skip`은, `sqz gain`을. After a parenthesis it follows the word before the parenthesis: `sqz init`(프로젝트 범위)은.
 
 | English | 한국어 | Notes |
 |---|---|---|
@@ -14,6 +16,12 @@ Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Korean transl
 | dedup, deduplication | 중복 제거 | |
 | reference | 참조 | The `§ref:HASH§` marker is 참조 마커. |
 | dedup cache | 중복 제거 캐시 | |
+| re-read | 다시 읽기, 다시 읽다 | |
+| line range | 줄 범위 | |
+| entry | 항목 | A hook or MCP entry in a config file. |
+| rewrite | 재작성 | What the hook does to a shell command. |
+| allow rule | 허용 규칙 | Claude Code's permission rules are 권한 규칙. |
+| turn | 턴 | |
 | hook | 훅 | |
 | MCP server | MCP 서버 | |
 | MCP proxy | MCP 프록시 | |
@@ -35,13 +43,15 @@ Terms that recur in `README.md` and `CONTRIBUTING.md`, and how the Korean transl
 | compaction | 컴팩션 | |
 | prompt caching | 프롬프트 캐싱 | |
 | counterfactual replay | 반사실적 재생 | |
-| estimate | 추정치 | |
+| estimate | 추정치 | Write 추정치(estimate) where the text quotes the `sqz discover --replay` report, which prints the English word. |
 | out of reach | 범위 밖(out of reach) | A row label in `sqz discover --replay`. |
 | regret signals | 후회 신호(regret signals) | A section of `sqz stats`. |
 | quick re-run | 빠른 재실행(quick re-runs) | A row label in `sqz stats`. |
 | ref expand | 참조 확장(ref expands) | A row label in `sqz stats`. |
-| tokens saved | 절약한 토큰(tokens saved) | Printed by `sqz stats` and `sqz gain`. |
+| tokens saved | 절약한 토큰(tokens saved) | Printed by `sqz stats` and `sqz gain`. Keep the English in parentheses where the text refers to that output; a plain count, as in the README header, is 토큰 절약. |
 | property-based test | 속성 기반 테스트 | |
+| crate, workspace | 크레이트, 워크스페이스 | |
+| enum variant, match arm | 열거형 배리언트, match 갈래 | As in the Korean edition of the Rust book. |
 | pull request, issue | 풀 리퀘스트, 이슈 | |
 | Contributor License Agreement | 기여자 라이선스 계약(CLA) | |
 
