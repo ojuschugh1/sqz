@@ -1190,10 +1190,10 @@ fn test_doctor_fix_and_init_refresh_an_old_opencode_plugin() {
     assert!(!stdout(&o).contains("OpenCode plugin was written by an older sqz"), "{}", stdout(&o));
     assert_eq!(std::fs::read_to_string(&plugin).unwrap(), sqz_engine::generate_opencode_plugin(&other));
 
-    let bin = sqz_bin().to_string_lossy().replace('\\', "/");
-    std::fs::write(&plugin, old(&bin)).unwrap();
+    std::fs::write(&plugin, old(&other)).unwrap();
     let o = run_sandboxed(home.path(), project.path(), &["init", "--yes", "--only", "opencode"]);
     assert!(stdout(&o).contains("OpenCode plugin (replace the one an older sqz wrote)"), "{}", stdout(&o));
+    let bin = sqz_bin().to_string_lossy().replace('\\', "/");
     assert_eq!(std::fs::read_to_string(&plugin).unwrap(), sqz_engine::generate_opencode_plugin(&bin));
 }
 
