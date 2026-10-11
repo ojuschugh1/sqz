@@ -1,6 +1,6 @@
 [package]
 name = "sqz-cli"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Pre-injection context compression and session deduplication for AI coding agents: squeeze tool output, code, JSON and logs before they reach the LLM"
@@ -17,7 +17,7 @@ name = "sqz"
 path = "src/main.rs"
 
 [dependencies]
-sqz-engine = { path = "../sqz_engine", version = "2.1.0" }
+sqz-engine = { path = "../sqz_engine", version = "2.1.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

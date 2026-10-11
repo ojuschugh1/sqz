@@ -1,6 +1,6 @@
 [package]
 name = "sqz-wasm"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Browser WASM build of sqz — LLM context compression for browser extensions"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sqz"
-version = "2.1.0"
+version = "2.1.1"
 description = "Pre-injection context compression and session deduplication for AI coding agents: squeeze tool output, code, JSON and logs before they reach the LLM"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
