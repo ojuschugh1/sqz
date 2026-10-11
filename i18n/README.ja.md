@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md sha256:22ce122cfde9573a5bcbe1adf9a93612646c9e816ae56ece5ccdbd98d469c59c -->
+<!-- i18n-source: README.md sha256:9de81c95b725cb7bc266ef2b2a2cbcd1982f6433ee6ee9c84cfaf284e8b2efc8 -->
 <!-- i18n:languages -->
 [English](../README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md)
 <!-- /i18n:languages -->
@@ -542,7 +542,13 @@ cargo build --release
 
 ## ライセンス
 
-[Elastic License 2.0](../LICENSE)（ELv2）：自由に使用、フォーク、改変できます。制限は二つです。競合するホスティングサービスとして提供しないこと、ライセンス表示を削除しないことです。
+sqzのライセンスは[Apache License, Version 2.0](../LICENSE-APACHE)または[MIT License](../LICENSE-MIT)で、どちらかを選んで利用できます。
+
+Copyright 2026 Ojus Chugh
+
+2.0.0以前のリリースは[Elastic License 2.0](https://github.com/ojuschugh1/sqz/blob/v2.0.0/LICENSE)で公開されました。
+
+コントリビューションは[コントリビューターライセンス契約（CLA）](../CLA.md)に基づいて受け付けています。
 
 ## リンク
 

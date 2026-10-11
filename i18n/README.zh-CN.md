@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md sha256:22ce122cfde9573a5bcbe1adf9a93612646c9e816ae56ece5ccdbd98d469c59c -->
+<!-- i18n-source: README.md sha256:9de81c95b725cb7bc266ef2b2a2cbcd1982f6433ee6ee9c84cfaf284e8b2efc8 -->
 <!-- i18n:languages -->
 [English](../README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md)
 <!-- /i18n:languages -->
@@ -542,7 +542,13 @@ cargo build --release
 
 ## 许可证
 
-[Elastic License 2.0](../LICENSE)（ELv2）：可以自由使用、fork 和修改。有两项限制：不得提供与之竞争的托管服务，不得移除许可证声明。
+sqz 以 [Apache License, Version 2.0](../LICENSE-APACHE) 或 [MIT License](../LICENSE-MIT) 授权，你可以任选其一。
+
+Copyright 2026 Ojus Chugh
+
+2.0.0 及更早的版本以 [Elastic License 2.0](https://github.com/ojuschugh1/sqz/blob/v2.0.0/LICENSE) 发布。
+
+本项目依据[贡献者许可协议（CLA）](../CLA.md)接受贡献。
 
 ## 链接
 

@@ -1,4 +1,4 @@
-<!-- i18n-source: README.md sha256:22ce122cfde9573a5bcbe1adf9a93612646c9e816ae56ece5ccdbd98d469c59c -->
+<!-- i18n-source: README.md sha256:9de81c95b725cb7bc266ef2b2a2cbcd1982f6433ee6ee9c84cfaf284e8b2efc8 -->
 <!-- i18n:languages -->
 [English](../README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md)
 <!-- /i18n:languages -->
@@ -542,7 +542,13 @@ cargo build --release
 
 ## Licença
 
-[Elastic License 2.0](../LICENSE) (ELv2): use, faça fork e modifique livremente. Duas restrições: nenhum serviço hospedado concorrente e nenhuma remoção dos avisos de licença.
+O sqz é licenciado sob a [Apache License, Version 2.0](../LICENSE-APACHE) ou a [MIT License](../LICENSE-MIT), à sua escolha.
+
+Copyright 2026 Ojus Chugh
+
+As versões até a 2.0.0, inclusive, foram publicadas sob a [Elastic License 2.0](https://github.com/ojuschugh1/sqz/blob/v2.0.0/LICENSE).
+
+As contribuições são aceitas sob o [Contrato de Licença de Contribuidor (CLA)](../CLA.md).
 
 ## Links
 
