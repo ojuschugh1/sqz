@@ -5,6 +5,18 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`npm install -g sqz-cli` installs the binaries.** GitHub answers a
+  release download with a redirect, and the install script in the npm
+  package closed the file it downloads into before following it, so
+  nothing was saved, the script exited without an error and npm
+  reported success with no `sqz` binary in place. Every release on npm
+  had this. The script now opens the file for the final response only,
+  and a failed download fails the install.
+
 ## [2.1.0] - 2026-10-11
 
 ### Added

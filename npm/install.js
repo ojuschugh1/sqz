@@ -53,26 +53,22 @@ function getPlatformTarget() {
 
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
     const request = (u) => {
       https.get(u, (res) => {
         // Follow redirects (GitHub Releases uses them)
         if (res.statusCode === 301 || res.statusCode === 302) {
-          file.close();
+          res.resume();
           return request(res.headers.location);
         }
         if (res.statusCode !== 200) {
-          file.close();
-          fs.unlink(dest, () => {});
+          res.resume();
           return reject(new Error(`HTTP ${res.statusCode} downloading ${u}`));
         }
-        res.pipe(file);
+        const file = fs.createWriteStream(dest);
+        file.on("error", reject);
         file.on("finish", () => file.close(resolve));
-      }).on("error", (err) => {
-        file.close();
-        fs.unlink(dest, () => {});
-        reject(err);
-      });
+        res.pipe(file);
+      }).on("error", reject);
     };
     request(url);
   });
