@@ -6,7 +6,7 @@ This folder holds the translations of sqz's README and contributing guide, a glo
 
 Only `README.md` and `CONTRIBUTING.md`. They are the two pages a new user or contributor reads first, and they change slowly enough for translators to keep up.
 
-Everything else stays in English: the docs site under `docs/`, the changelog, `CLA.md`, `LICENSE`, the npm README, sqz's own output, code, comments and commit messages. These change with every release, or they are the text that applies, and a translation that falls behind would mislead readers.
+Everything else stays in English: the docs site under `docs/`, the changelog, `CLA.md`, `LICENSE-APACHE`, `LICENSE-MIT`, the npm README, sqz's own output, code, comments and commit messages. These change with every release, or they are the text that applies, and a translation that falls behind would mislead readers.
 
 The English files are the reference. Where a translation and the English text disagree, the English text applies.
 
