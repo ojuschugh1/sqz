@@ -2,6 +2,7 @@
 name = "sqz-mcp"
 version = "2.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "MCP server and proxy for sqz: compress tool results, file reads and other MCP servers' output before it enters the LLM context (stdio/SSE)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ojuschugh1/sqz"

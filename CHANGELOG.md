@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packages, the VS Code extension and the Docker image declare the
   new license. Releases up to and including 2.0.0 keep the Elastic
   License 2.0.
+- **sqz declares Rust 1.85 as its minimum version.** The crates set
+  `rust-version = "1.85"` and the workspace uses Cargo's MSRV-aware
+  resolver, so a build without a lock file picks dependency versions
+  that support Rust 1.85. Before, a fresh build on 1.85 picked
+  proptest 1.12, which needs Rust 1.88, and the tests did not build.
 
 ### Fixed
 

@@ -5,7 +5,7 @@ members = [
     "sqz-mcp",
     "sqz-wasm",
 ]
-resolver = "2"
+resolver = "3"
 
 # ── Release profile: strip symbols and enable LTO for minimal binary size ──
 # Requirement 16.1: single statically-linked binary per platform.
