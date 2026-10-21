@@ -1,0 +1,84 @@
+{
+  "$schema": "https://fundingjson.org/schema/v1.1.0.json",
+  "version": "v1.1.0",
+  "entity": {
+    "type": "individual",
+    "role": "owner",
+    "name": "Ojus Chugh",
+    "email": "ojuschugh@gmail.com",
+    "description": "I'm an open source software engineer based in India. I started sqz in April 2026 and maintain it myself, about ten hours a week.\n\nMost of my open source work has been on other people's projects. I did Google Summer of Code 2023 with the Eclipse Foundation, moving Eclipse Cargo Tracker to Jakarta EE 10, and the LFX Mentorship in 2025 with the Open Mainframe Project, where I wrote the Zowe Go client SDK. My merged work includes a fix to MIR value analysis in the Rust compiler (rust-lang/rust#163425), patches to rust-lang/cargo, Redox OS, VLC and Firefox Profiler, execveat tracing for bcc's execsnoop (iovisor/bcc#5557), error positions and JSON paths for ruby/json's parser (ruby/json#1062 and #1067), and changes in pgmpy and SHAP. A fix for MariaDB fractional seconds in prepared statements is waiting for review in php-src (php/php-src#24467).\n\nI also maintain two Ruby gems, BenchTrack and Foresight, and bpf-arch-matrix, which runs the same eBPF programs on x86-64 and arm64 kernels in CI.\n\nFor 2027 I'm asking FOSS United for ₹3,00,000, paid quarterly. The milestones for each quarter are in the funding plans.",
+    "webpageUrl": {
+      "url": "https://github.com/ojuschugh1/sqz",
+      "wellKnown": "https://github.com/ojuschugh1/sqz/blob/main/.well-known/funding-manifest-urls"
+    }
+  },
+  "projects": [
+    {
+      "guid": "sqz",
+      "name": "sqz",
+      "description": "sqz shrinks what coding agents read before it enters the model's context: shell command output, file reads and MCP tool results. It hooks into Claude Code, Gemini CLI, Copilot CLI and OpenCode, and can be set up for Cursor, Windsurf, Cline, Codex and Zed.\n\nYou can get it from crates.io, npm, PyPI or Homebrew, as a release binary for macOS, Linux and Windows, from the official MCP registry, or as a VS Code extension, a JetBrains plugin, a Firefox add-on or a GitHub Action for CI. A Chrome version is in the repository, but people have to load it by hand until it is on the Chrome Web Store.\n\nMost of the waste in an agent session is repetition: a file read again after a small edit, git status for the twentieth time, the same failing test output. sqz hashes everything it has served and sends a 13-token reference when the same bytes come back. Formatters for common commands trim the rest. Stack traces, source code and lines that look like credentials pass through untouched, and sqz expand returns the original bytes of any reference.\n\nOver 3,003 compressions in my own sessions the average reduction was 24.7%, and up to 92% on output the model already had. sqz stats --cost estimates the saving under prompt-cached billing, and a quality benchmark in the repository fails if any fact an agent needs is lost.\n\nIt makes no model or network calls and has no telemetry, so I can't count users. Since 2.1.0 (October 2026) all of it is MIT OR Apache-2.0; earlier releases were under the Elastic License. So far: 27 releases, about 9,800 release downloads, about 1,400 npm downloads a month and patches from five other developers.\n\nrtk, the best-known tool in this space, is far bigger, but its engine and proxy are under BUSL-1.1, which is not an open source licence. headroom is Apache-2.0 and works mainly as a proxy in front of the model API. sqz is the small, fully open option that never sits between the agent and the provider.",
+      "webpageUrl": {
+        "url": "https://github.com/ojuschugh1/sqz",
+        "wellKnown": "https://github.com/ojuschugh1/sqz/blob/main/.well-known/funding-manifest-urls"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/ojuschugh1/sqz",
+        "wellKnown": "https://github.com/ojuschugh1/sqz/blob/main/.well-known/funding-manifest-urls"
+      },
+      "licenses": ["spdx:MIT", "spdx:Apache-2.0"],
+      "tags": ["developer-tools", "artificial-intelligence", "productivity", "privacy", "cli", "llm", "ai-agents", "mcp", "rust", "context-compression"]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "bank-india",
+        "type": "bank",
+        "address": "",
+        "description": "Bank transfer to my account in India (NEFT, IMPS or RTGS). Email me for the details."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "grant-2027-q1",
+        "status": "active",
+        "name": "2027 grant, part 1 of 4 (January to March): Chrome Web Store release and fuzzing",
+        "description": "Publish the browser extension on the Chrome Web Store, which users have asked for (issue #14); Chrome users load it by hand today. This covers the one-time US$5 developer fee, a privacy policy, a justification for each permission, and building the Chrome and Firefox versions from one source. Add cargo-fuzz targets for the formatters, the dedup store and reference expansion, run them in CI and fix what they turn up. Post an update on the FOSS United forum.",
+        "amount": 75000,
+        "currency": "INR",
+        "frequency": "one-time",
+        "channels": ["bank-india"]
+      },
+      {
+        "guid": "grant-2027-q2",
+        "status": "active",
+        "name": "2027 grant, part 2 of 4 (April to June): billed cost",
+        "description": "Run the same scripted agent tasks on public repositories with and without sqz, on two model providers with prompt caching on, and compare what was billed rather than token counts. Publish the scripts and raw data, and correct sqz stats --cost wherever its estimate is off. Up to ₹15,000 of this part pays for API usage. Post the results on the FOSS United forum.",
+        "amount": 75000,
+        "currency": "INR",
+        "frequency": "one-time",
+        "channels": ["bank-india"]
+      },
+      {
+        "guid": "grant-2027-q3",
+        "status": "active",
+        "name": "2027 grant, part 3 of 4 (July to September): benchmark coverage and signed releases",
+        "description": "Extend the quality benchmark to output it doesn't cover yet: rustc and clippy, gcc and clang, Maven and Gradle, eslint, jest, mypy and docker build, checking that the facts an agent needs survive and the original comes back byte for byte. Publish checksums, signatures, build provenance and an SBOM with every release binary. Post an update on the FOSS United forum.",
+        "amount": 75000,
+        "currency": "INR",
+        "frequency": "one-time",
+        "channels": ["bank-india"]
+      },
+      {
+        "guid": "grant-2027-q4",
+        "status": "active",
+        "name": "2027 grant, part 4 of 4 (October to December): packages and more maintainers",
+        "description": "Ship .deb and .rpm packages with each release and submit sqz to the AUR, nixpkgs and winget. Write a maintainer guide and give review rights to at least two regular contributors, so sqz doesn't depend on one person. Offer sqz as a mentoring project in a FOSS United programme such as Season of Commits, submit a talk to IndiaFOSS, and publish a report on the year.",
+        "amount": 75000,
+        "currency": "INR",
+        "frequency": "one-time",
+        "channels": ["bank-india"]
+      }
+    ]
+  }
+}
