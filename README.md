@@ -170,7 +170,7 @@ cargo install sqz-cli sqz-mcp
 - macOS: Xcode Command Line Tools (`xcode-select --install`)
 - **Windows: Visual Studio Build Tools with the "Desktop development with C++" workload.** Without these, `cargo install` fails with `linker link.exe not found`. If you don't already have them, use the PowerShell or npm install above instead.
 
-Then initialize:
+Then initialize: 
 
 ```sh
 sqz init --global     # hooks apply to every project on this machine
