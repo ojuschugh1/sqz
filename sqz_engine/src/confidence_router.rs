@@ -53,13 +53,12 @@ impl ConfidenceRouter {
     /// Analyze content and return the recommended compression mode.
     pub fn route(&self, content: &str) -> CompressionMode {
         let content = &*without_ansi(content);
-        if content.len() < 100 {
-            return CompressionMode::Default;
-        }
-
         // Check for high-risk content patterns first (always → Safe)
         if self.is_high_risk(content) {
             return CompressionMode::Safe;
+        }
+        if content.len() < 100 {
+            return CompressionMode::Default;
         }
 
         // Use entropy to distinguish repetitive from normal content
@@ -84,7 +83,7 @@ impl ConfidenceRouter {
     /// Whether content must stay out of the persistent cache.
     pub fn never_store(&self, content: &str) -> bool {
         let content = &*without_ansi(content);
-        content.len() >= 100 && (self.mentions_high_risk(content) || self.is_high_risk(content))
+        self.mentions_high_risk(content) || self.is_high_risk(content)
     }
 
     /// Returns true if content contains high-risk patterns that should
@@ -184,9 +183,6 @@ impl ConfidenceRouter {
 }
 
 pub(crate) fn protected_lines(content: &str) -> Vec<&str> {
-    if without_ansi(content).len() < 100 {
-        return Vec::new();
-    }
     let raw: Vec<&str> = content.lines().collect();
     let plain: Vec<std::borrow::Cow<str>> = raw.iter().map(|l| without_ansi(l)).collect();
     let lines: Vec<&str> = plain.iter().map(|l| l.trim()).collect();
@@ -348,14 +344,11 @@ mod tests {
     #[test]
     fn multibyte_input_with_password_marker_does_not_panic() {
         let router = ConfidenceRouter::new();
-        // Must clear the router's 100-byte minimum or is_high_risk (and
-        // the vulnerable heuristic behind it) never runs.
         let content = "Привет мир строка номер 0\n\
                        Привет мир строка номер 1\n\
                        Привет мир строка номер 2\n\
                        пароль тут\n\
                        password: тайна";
-        assert!(content.len() >= 100, "fixture must reach is_high_risk");
         // High-risk (password) content routes to Safe; the point of the
         // test is that `route` returns at all instead of panicking.
         assert_eq!(router.route(content), CompressionMode::Safe);
@@ -436,7 +429,6 @@ mod tests {
     #[test]
     fn pem_key_routes_to_safe() {
         let router = ConfidenceRouter::new();
-        // PEM key must be > 100 chars to trigger routing
         let key = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP\nQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz==\n-----END RSA PRIVATE KEY-----\n";
         assert_eq!(router.route(key), CompressionMode::Safe);
     }
@@ -532,7 +524,19 @@ mod tests {
         let clean = output.replace("stack backtrace:", "note: run with `RUST_BACKTRACE=1`");
         assert!(protected_lines(&clean).is_empty());
         assert_ne!(router.route(&clean), CompressionMode::Safe);
-        assert!(protected_lines("password: hunter2\n").is_empty());
+    }
+
+    #[test]
+    fn short_credential_lines_are_routed_safe_and_never_stored() {
+        let router = ConfidenceRouter::new();
+        for line in ["API_KEY=sk_test_abc123", "password: hunter2", "export GITHUB_TOKEN=ghp_0123"] {
+            assert_eq!(router.route(line), CompressionMode::Safe, "{line}");
+            assert!(router.never_store(line), "{line}");
+            assert_eq!(protected_lines(line), [line], "{line}");
+        }
+        assert!(router.never_store("config.rs:12: password=hunter2"));
+        assert_eq!(router.route("build ok in 2.1s"), CompressionMode::Default);
+        assert!(!router.never_store("build ok in 2.1s"));
     }
 
     #[test]
@@ -560,6 +564,5 @@ mod tests {
             + "<footer><a href=\"/privacy\">Privacy Policy</a> <a href=\"/terms\">Terms of Service</a></footer>\n";
         assert_ne!(router.route(&page), CompressionMode::Safe);
         assert!(!router.never_store(&page));
-        assert!(!router.never_store("password=hunter2"));
     }
 }

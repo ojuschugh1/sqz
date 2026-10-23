@@ -971,6 +971,17 @@ mod tests {
     }
 
     #[test]
+    fn short_credential_output_is_never_stored() {
+        let (proxy, _dir) = isolated_proxy();
+        let output = "API_KEY=sk_test_abc123\n";
+        for run in ["first", "second"] {
+            assert_eq!(proxy.intercept_output("env", output), output, "{run}");
+        }
+        assert!(proxy.engine.cache_manager().check_dedup_with_meta(output.as_bytes()).unwrap().is_none());
+        assert!(proxy.engine.session_store().recall_search("sk_test_abc123", 5).unwrap().is_empty());
+    }
+
+    #[test]
     fn credential_mentions_are_compressed_but_never_stored() {
         let (proxy, _dir) = isolated_proxy();
         let mut log: String = (0..120)
