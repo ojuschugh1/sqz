@@ -93,6 +93,9 @@ pub struct Activity {
     /// estimator bug), and the tokens they hide from the saved total.
     pub inflated_rows: u32,
     pub inflated_tokens: u64,
+    /// Cached outputs holding content sqz never stores, such as the short
+    /// credential lines sqz 2.1.1 and earlier cached.
+    pub cached_secrets: u32,
 }
 
 /// State of the sqz-managed guidance and shell files doctor can repair.
@@ -260,6 +263,15 @@ pub fn diagnose(tools: &[ToolStatus], activity: &Activity, managed: &Managed) ->
                 if activity.net_negative { " and pushing the all-time total below zero" } else { "" },
             ),
             fix: Some(format!("{FIX_CMD}   (backs up the database, then corrects those rows)")),
+        });
+    }
+    if activity.cached_secrets > 0 {
+        problems.push(Problem {
+            message: format!(
+                "{} cached output(s) hold content sqz no longer caches, such as a credential line (sqz 2.1.1 and earlier cached short ones)",
+                activity.cached_secrets
+            ),
+            fix: Some(format!("{FIX_CMD}   (deletes them and rebuilds the database file)")),
         });
     }
 
@@ -586,9 +598,29 @@ fn approx_tokens(bytes: usize) -> usize {
     bytes.div_ceil(4)
 }
 
+/// Hashes of cache entries holding content sqz never stores.
+fn cached_secrets(engine: &sqz_engine::SqzEngine) -> Vec<String> {
+    engine
+        .session_store()
+        .cache_hashes_where(|original| engine.never_store(&String::from_utf8_lossy(original)))
+        .unwrap_or_default()
+}
+
 /// Repair the sqz-managed state doctor knows how to repair. Every change
 /// is to something sqz wrote; user-authored files are never touched.
-fn apply_fixes(store: &sqz_engine::SessionStore, managed: &Managed, project_dir: &Path) -> Result<(), ()> {
+fn apply_fixes(engine: &sqz_engine::SqzEngine, managed: &Managed, project_dir: &Path) -> Result<(), ()> {
+    let store = engine.session_store();
+    let secrets = cached_secrets(engine);
+    if !secrets.is_empty() {
+        match store.purge_cache_entries(&secrets) {
+            Ok(()) => println!("  ok  --fix: deleted {} cached output(s) sqz no longer caches", secrets.len()),
+            Err(e) => {
+                println!("  ERR --fix: could not delete cached outputs sqz no longer caches: {e}");
+                return Err(());
+            }
+        }
+    }
+
     let (rows, _) = store.inflated_rows().unwrap_or((0, 0));
     if rows > 0 {
         match backup_database(store) {
@@ -804,10 +836,11 @@ fn collect_managed(project_dir: &Path, hook: &ShellHook) -> Managed {
 
 /// Run the full check and print the report. Returns the process exit code.
 ///
-/// With `fix`, repairs what doctor can repair on its own: log rows a past
-/// bug wrote wrongly (after backing up the database), stale or duplicate
-/// sqz-managed Kiro steering, an outdated sqz shell block, and a Claude
-/// Code hook missing the allow rules and PostToolUse entry.
+/// With `fix`, repairs what doctor can repair on its own: cached outputs
+/// sqz no longer caches, log rows a past bug wrote wrongly (after backing
+/// up the database), stale or duplicate sqz-managed Kiro steering, an
+/// outdated sqz shell block, and a Claude Code hook missing the allow
+/// rules and PostToolUse entry.
 pub fn run(fix: bool) -> i32 {
     let version = env!("CARGO_PKG_VERSION");
     println!("sqz doctor — {version}");
@@ -840,7 +873,7 @@ pub fn run(fix: bool) -> i32 {
     let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if fix {
         let managed = collect_managed(&project_dir, &hook);
-        if apply_fixes(store, &managed, &project_dir).is_err() {
+        if apply_fixes(&engine, &managed, &project_dir).is_err() {
             return 2;
         }
     }
@@ -929,6 +962,7 @@ pub fn run(fix: bool) -> i32 {
             net_negative: stats.is_net_negative(),
             inflated_rows,
             inflated_tokens,
+            cached_secrets: cached_secrets(&engine).len() as u32,
         }
     };
     println!();
@@ -1271,6 +1305,16 @@ mod tests {
         let problems = diagnose(&tools, &activity, &clean());
         assert_eq!(problems.len(), 1);
         assert!(!problems[0].message.contains("below zero"));
+    }
+
+    #[test]
+    fn cached_secrets_are_flagged_with_fix_command() {
+        let tools = vec![tool("Kiro", "kiro", Detection::Detected, ConfigScope::Both)];
+        let activity = Activity { total_compressions: 700, last7_compressions: 100, cached_secrets: 2, ..Default::default() };
+        let problems = diagnose(&tools, &activity, &clean());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.starts_with("2 cached output(s)"), "{}", problems[0].message);
+        assert!(problems[0].fix.as_deref().unwrap().starts_with(FIX_CMD));
     }
 
     #[test]

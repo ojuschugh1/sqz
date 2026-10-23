@@ -1293,6 +1293,38 @@ fn test_doctor_fix_backs_up_the_database_the_engine_opened() {
 
 #[test]
 #[cfg(not(windows))]
+fn test_doctor_fix_deletes_cached_credentials() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let db = home.path().join("sessions.db");
+    let store = sqz_engine::SessionStore::open_or_create(&db).unwrap();
+    let cached = |text: &str| sqz_engine::CompressedContent {
+        data: text.to_string(),
+        tokens_compressed: 8,
+        tokens_original: 8,
+        stages_applied: vec![],
+        compression_ratio: 1.0,
+        provenance: Default::default(),
+        verify: None,
+    };
+    for (hash, text) in [("hash-secret", "API_KEY=sk_test_abc123\n"), ("hash-plain", "build ok in 2.1s\n")] {
+        store.save_cache_entry_with_original(hash, &cached(text), Some(text.as_bytes())).unwrap();
+    }
+    drop(store);
+
+    let doctor = |args: &[&str]| run_doctor(home.path(), project.path(), args);
+    let o = doctor(&[]);
+    assert!(stdout(&o).contains("1 cached output(s) hold content sqz no longer caches"), "{}", stdout(&o));
+    let o = doctor(&["--fix"]);
+    assert!(stdout(&o).contains("deleted 1 cached output(s)"), "{}", stdout(&o));
+    assert!(!stdout(&o).contains("cached output(s) hold"), "{}", stdout(&o));
+    let store = sqz_engine::SessionStore::open_or_create(&db).unwrap();
+    assert!(store.get_cache_entry("hash-secret").unwrap().is_none());
+    assert!(store.get_cache_entry("hash-plain").unwrap().is_some());
+}
+
+#[test]
+#[cfg(not(windows))]
 fn test_uninstall_and_reset_need_an_answer_when_stdin_is_not_a_terminal() {
     use std::io::Write;
     let home = tempfile::tempdir().unwrap();

@@ -1387,6 +1387,36 @@ impl SessionStore {
         Ok(count)
     }
 
+    /// Hashes of the cache entries whose original bytes `matches` flags.
+    pub fn cache_hashes_where(&self, matches: impl Fn(&[u8]) -> bool) -> Result<Vec<String>> {
+        let mut stmt = self.db.prepare("SELECT hash, original FROM cache_entries WHERE original IS NOT NULL")?;
+        let mut rows = stmt.query([])?;
+        let mut hashes = Vec::new();
+        while let Some(row) = rows.next()? {
+            let original: Vec<u8> = row.get(1)?;
+            if matches(&original) {
+                hashes.push(row.get(0)?);
+            }
+        }
+        Ok(hashes)
+    }
+
+    /// Delete the given cache entries, then rebuild the recall index and
+    /// the file so their bytes leave the disk, not just the tables.
+    pub fn purge_cache_entries(&self, hashes: &[String]) -> Result<()> {
+        for hash in hashes {
+            self.delete_cache_entry(hash)?;
+        }
+        self.db
+            .execute("INSERT INTO recall_index(recall_index) VALUES('optimize')", [])
+            .map_err(SqzError::SessionStore)?;
+        self.db.execute("VACUUM", []).map_err(SqzError::SessionStore)?;
+        self.db
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .map_err(SqzError::SessionStore)?;
+        Ok(())
+    }
+
     /// Clear compression stats (the `compression_log` table). After this,
     /// `sqz stats` and `sqz gain` will show zero until new compressions
     /// happen.
@@ -1826,6 +1856,34 @@ mod tests {
 
         store.reset_all().unwrap();
         assert!(store.recall_search("billing", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn purged_entries_leave_the_database_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        let store = SessionStore::open_or_create(&path).unwrap();
+        let content = test_content("c");
+        store
+            .save_cache_entry_with_original("hash-secret", &content, Some(b"API_KEY=sk_test_abc123\n"))
+            .unwrap();
+        store
+            .save_cache_entry_with_original("hash-plain", &content, Some(b"build ok in 2.1s\n"))
+            .unwrap();
+
+        let hashes = store.cache_hashes_where(|original| original.starts_with(b"API_KEY=")).unwrap();
+        assert_eq!(hashes, ["hash-secret"]);
+        let _other_process = SessionStore::open_or_create(&path).unwrap();
+        store.purge_cache_entries(&hashes).unwrap();
+        assert!(store.get_cache_entry("hash-secret").unwrap().is_none());
+        assert!(store.get_cache_entry("hash-plain").unwrap().is_some());
+        assert!(store.recall_search("sk_test_abc123", 5).unwrap().is_empty());
+        assert_eq!(store.recall_search("build", 5).unwrap().len(), 1);
+
+        for file in [path.clone(), dir.path().join("store.db-wal")] {
+            let bytes = std::fs::read(&file).unwrap_or_default();
+            assert!(!bytes.windows(14).any(|w| w == b"sk_test_abc123"), "{}", file.display());
+        }
     }
 
     #[test]
