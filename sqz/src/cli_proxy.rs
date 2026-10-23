@@ -356,10 +356,10 @@ impl CliProxy {
         match self.compress_output(cmd, output) {
             Ok(compressed) => {
                 let tokens_original = compressed.tokens_original;
-                let truncated = compressed
+                let lossy = compressed
                     .stages_applied
                     .iter()
-                    .any(|s| s == "entropy_truncate");
+                    .any(|s| s == "entropy_truncate" || s == "toon_encode");
                 // Persist to L2 cache, but never content that may contain
                 // secrets, API keys, passwords
                 let safe = self.engine.route_compression_mode(output) == sqz_engine::CompressionMode::Safe;
@@ -411,13 +411,14 @@ impl CliProxy {
                     compressed.data
                 };
 
-                // Spill ref: entropy truncation drops whole segments, but
-                // the untruncated original is sitting in the cache we just
-                // wrote. Tell the agent how to get it back, so truncation
-                // is a preview rather than a loss. Costs ~10 tokens; only
-                // added when the original was actually stored (a ref that
-                // can't resolve would be worse than nothing).
-                let abbreviated = if stored && truncated {
+                // Spill ref: entropy truncation drops whole segments and
+                // the JSON stages drop nulls, empty values, ids and long
+                // string tails, but the original is sitting in the cache we
+                // just wrote. Tell the agent how to get it back, so the
+                // output is a preview rather than a loss. Costs ~20 tokens;
+                // only added when the original was actually stored (a ref
+                // that can't resolve would be worse than nothing).
+                let abbreviated = if stored && lossy {
                     let hash = sqz_engine::CacheManager::sha256_hex(output.as_bytes());
                     format!("{abbreviated}\n[full output: sqz expand {}]", &hash[..16])
                 } else {
@@ -991,6 +992,36 @@ mod tests {
         let hash = sqz_engine::CacheManager::sha256_hex(output.as_bytes());
         assert!(result.ends_with(&format!("[full output: sqz expand {}]", &hash[..16])), "{result}");
         assert!(result.contains("low-information segments omitted"), "{result}");
+    }
+
+    fn api_response_json() -> String {
+        let description = format!(
+            "Customer reports the refund for ord_8812 was issued twice. {}Do not issue a third refund; escalate to payments on-call.",
+            "The thread has more context about provider retries and webhook timing. ".repeat(8)
+        );
+        serde_json::to_string_pretty(&serde_json::json!({
+            "request_id": "req_7f3a9c21",
+            "order_id": "ord_8812",
+            "assignee": null,
+            "tags": [],
+            "notes": "",
+            "description": description,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn compressed_json_points_at_the_cached_original() {
+        let (proxy, _dir) = isolated_proxy();
+        let json = api_response_json();
+        let result = proxy.intercept_output("curl", &json);
+        assert!(result.contains("TOON:") && !result.contains("req_7f3a9c21"), "{result}");
+        let hash = sqz_engine::CacheManager::sha256_hex(json.as_bytes());
+        assert!(result.ends_with(&format!("[full output: sqz expand {}]", &hash[..16])), "{result}");
+        match proxy.engine.cache_manager().expand_prefix(&hash[..16]).unwrap() {
+            Some(sqz_engine::ExpandResult::Original { bytes, .. }) => assert_eq!(bytes, json.as_bytes()),
+            other => panic!("expected the original, got {other:?}"),
+        }
     }
 
     #[test]
