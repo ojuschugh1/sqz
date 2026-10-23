@@ -5,6 +5,54 @@ All notable changes to sqz will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`SQZ_LOSSLESS=1` and `sqz compress --lossless` keep output as it
+  came.** Only ANSI codes are stripped: no per-command formatter, JSON
+  stage, truncation or abbreviation runs, and a repeat still comes back
+  as a `§ref:HASH§`. For sessions where every field matters, such as
+  debugging an API or checking a data contract.
+
+### Changed
+
+- **Compressed JSON says how to get the original back.** The JSON
+  stages drop nulls, empty values, bookkeeping ids and the tails of
+  long strings, so compressed JSON now ends with the pointer to the
+  cached original that entropy truncation already added:
+  `[full output: sqz expand <prefix>]` on the shell hook, and the
+  prefix to pass to `expand` from the MCP `compress` tool. Small JSON
+  that the pointer would make no shorter comes back as it came. The
+  README lists the JSON stages in the order they run, including the
+  `trace_id`, `debug_info` and `metadata.internal_id` fields it left
+  out.
+- **`--verify` says what its score measures.** The score is the share
+  of structural checks that passed (error lines, paths, numbers,
+  top-level JSON keys). It does not check that every value was kept, so
+  JSON that lost its nulls and ids can still score 100%. The help text
+  and BENCHMARKS.md now say so.
+
+### Fixed
+
+- **Short credential lines are never cached.** sqz only looked for
+  credential lines, PEM blocks, stack traces and migrations in output
+  of 100 bytes or more, so a short `API_KEY=...` line went through the
+  pipeline and into the cache, where `sqz expand`, `sqz recall` and the
+  MCP `expand` and `sqz_recall` tools could read it back. Every release
+  up to 2.1.1 had this. The check now runs at any size. `sqz doctor`
+  reports cached output current sqz would not cache, and
+  `sqz doctor --fix` deletes it, then rebuilds the database file and
+  truncates its write-ahead log so the bytes leave the disk. Backups an
+  earlier `sqz doctor --fix` made (`sessions.db.bak-*`) can hold the
+  same lines.
+- **A repeat smaller than its reference is sent again in full.** The
+  shell hook answered every repeat with a `§ref:HASH§` and a note on
+  stderr, about 38 tokens together, so an 8-token output came back as
+  38 tokens. A repeat now becomes a reference only when that saves at
+  least 16 tokens over sending it again, the margin the compression
+  path already uses.
+
 ## [2.1.1] - 2026-10-11
 
 ### Fixed
