@@ -523,8 +523,8 @@ impl McpServer {
             CacheResult::Delta { delta_text, token_cost, .. } if allow_delta && !tiny => (delta_text, token_cost),
             CacheResult::Dedup { .. } | CacheResult::Delta { .. } => return self.compress_fresh(text, lossless),
             CacheResult::Fresh { output } => {
-                let truncated = output.stages_applied.iter().any(|s| s == "entropy_truncate");
-                if truncated && !self.engine.never_store(text) {
+                let lossy = output.stages_applied.iter().any(|s| s == "entropy_truncate" || s == "toon_encode");
+                if lossy && !self.engine.never_store(text) {
                     let hash = sqz_engine::CacheManager::sha256_hex(text.as_bytes());
                     let data = format!("{}\n[full output: call expand with prefix \"{}\"]", output.data, &hash[..16]);
                     let tokens = self.engine.count_tokens(&data);
@@ -1949,6 +1949,36 @@ mod tests {
 
         let compress = default_tool_definitions().into_iter().find(|t| t.id == "compress").unwrap();
         assert!(compress.compression_transforms.iter().any(|t| t.starts_with("entropy_truncate:")));
+    }
+
+    #[test]
+    fn test_compress_tool_names_the_expand_prefix_for_json() {
+        let (mut server, _dir) = make_server();
+        let text = serde_json::to_string_pretty(&serde_json::json!({
+            "request_id": "req_7f3a9c21",
+            "order_id": "ord_8812",
+            "assignee": null,
+            "notes": "",
+            "description": "Refund issued twice. ".repeat(40),
+        }))
+        .unwrap();
+        let call = |server: &mut McpServer, tool: &str, input: serde_json::Value| {
+            server
+                .handle_tool_call(ToolCallRequest { tool_id: tool.to_string(), input, intent: None })
+                .unwrap()
+        };
+
+        let resp = call(&mut server, "compress", serde_json::json!({ "text": text }));
+        let hash = sqz_engine::CacheManager::sha256_hex(text.as_bytes());
+        assert!(resp.output.contains("TOON:") && !resp.output.contains("req_7f3a9c21"), "{}", resp.output);
+        assert!(
+            resp.output.ends_with(&format!("\n[full output: call expand with prefix \"{}\"]", &hash[..16])),
+            "{}",
+            resp.output
+        );
+
+        let expanded = call(&mut server, "expand", serde_json::json!({ "prefix": &hash[..16] }));
+        assert_eq!(expanded.output, format!("[sqz:expand hash={hash}]\n{text}"));
     }
 
     fn high_risk_texts() -> Vec<(&'static str, String)> {
