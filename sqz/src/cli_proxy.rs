@@ -170,6 +170,9 @@ pub fn catch_panic<T>(f: impl FnOnce() -> T) -> Result<T, Option<String>> {
 
 const NET_WIN_MIN_TOKENS: u32 = 16;
 
+/// Outputs this long dwarf a ref and its note, so the ref gate skips counting them.
+const REF_GATE_MAX_BYTES: usize = 1024;
+
 /// `formatted` is `output` up to trailing whitespace, so it saves under [`NET_WIN_MIN_TOKENS`].
 fn only_trailing_space_differs(output: &str, formatted: &str) -> bool {
     let body = output.trim_end();
@@ -272,12 +275,15 @@ impl CliProxy {
         if !opts.no_cache && self.l1_cache.borrow().contains(&fast_hash) {
             // L1 hit — check L2 persistent cache for the actual ref
             if let Ok(Some(hit)) = self.engine.cache_manager().check_dedup_with_meta(output.as_bytes()) {
-                if !quiet() {
-                    eprintln!("[sqz] dedup hit: {} (L1+L2)", hit.inline_ref);
+                let note = format!("[sqz] dedup hit: {} (L1+L2)", hit.inline_ref);
+                if self.ref_pays_off(output, &hit.inline_ref, &note) {
+                    if !quiet() {
+                        eprintln!("{note}");
+                    }
+                    self.maybe_log_rerun_regret(cmd, &hit);
+                    self.log_dedup_hit(cmd, output);
+                    return hit.inline_ref;
                 }
-                self.maybe_log_rerun_regret(cmd, &hit);
-                self.log_dedup_hit(cmd, output);
-                return hit.inline_ref;
             }
         }
 
@@ -286,12 +292,15 @@ impl CliProxy {
             if let Ok(Some(hit)) = self.engine.cache_manager().check_dedup_with_meta(output.as_bytes()) {
                 // Promote to L1 for faster future lookups
                 self.l1_cache.borrow_mut().insert(fast_hash);
-                if !quiet() {
-                    eprintln!("[sqz] dedup hit: {} (L2)", hit.inline_ref);
+                let note = format!("[sqz] dedup hit: {} (L2)", hit.inline_ref);
+                if self.ref_pays_off(output, &hit.inline_ref, &note) {
+                    if !quiet() {
+                        eprintln!("{note}");
+                    }
+                    self.maybe_log_rerun_regret(cmd, &hit);
+                    self.log_dedup_hit(cmd, output);
+                    return hit.inline_ref;
                 }
-                self.maybe_log_rerun_regret(cmd, &hit);
-                self.log_dedup_hit(cmd, output);
-                return hit.inline_ref;
             }
         }
 
@@ -299,14 +308,17 @@ impl CliProxy {
         // (`sed -n '40,80p' f`, `head -50 f` after `cat f`).
         if !opts.no_cache {
             if let Ok(Some(hit)) = self.engine.cache_manager().check_slice_with_meta(output.as_bytes()) {
-                if !quiet() {
-                    eprintln!(
-                        "[sqz] slice ref: lines {}-{} of {} already in context",
-                        hit.start_line, hit.end_line, hit.total_lines
-                    );
+                let note = format!(
+                    "[sqz] slice ref: lines {}-{} of {} already in context",
+                    hit.start_line, hit.end_line, hit.total_lines
+                );
+                if self.ref_pays_off(output, &hit.inline_ref, &note) {
+                    if !quiet() {
+                        eprintln!("{note}");
+                    }
+                    self.log_slice_hit(output, &hit);
+                    return hit.inline_ref;
                 }
-                self.log_slice_hit(output, &hit);
-                return hit.inline_ref;
             }
         }
 
@@ -433,6 +445,17 @@ impl CliProxy {
                 output.to_owned()
             }
         }
+    }
+
+    /// Whether serving `inline_ref`, with `note` on stderr, saves at least
+    /// [`NET_WIN_MIN_TOKENS`] over sending `output` again.
+    fn ref_pays_off(&self, output: &str, inline_ref: &str, note: &str) -> bool {
+        if output.len() >= REF_GATE_MAX_BYTES {
+            return true;
+        }
+        let note = if quiet() { 0 } else { self.engine.count_tokens(note) };
+        let cost = self.engine.count_tokens(inline_ref) + note;
+        self.engine.count_tokens(output).saturating_sub(cost) >= NET_WIN_MIN_TOKENS
     }
 
     /// Record a rerun-regret signal when a dedup hit lands within the
@@ -968,6 +991,21 @@ mod tests {
         let hash = sqz_engine::CacheManager::sha256_hex(output.as_bytes());
         assert!(result.ends_with(&format!("[full output: sqz expand {}]", &hash[..16])), "{result}");
         assert!(result.contains("low-information segments omitted"), "{result}");
+    }
+
+    #[test]
+    fn repeats_smaller_than_a_ref_and_its_note_come_back_whole() {
+        let (proxy, _dir) = isolated_proxy();
+        let tiny = "build ok in 2.1s\n";
+        let medium: String = (0..6)
+            .map(|i| format!("step {i}: compiled module_{i} with 3 warnings in {}ms\n", 100 + i))
+            .collect();
+        assert!(medium.len() < REF_GATE_MAX_BYTES);
+        for output in [tiny, medium.as_str()] {
+            proxy.intercept_output("make", output);
+        }
+        assert_eq!(proxy.intercept_output("make", tiny), tiny);
+        assert!(proxy.intercept_output("make", &medium).starts_with("§ref:"));
     }
 
     #[test]

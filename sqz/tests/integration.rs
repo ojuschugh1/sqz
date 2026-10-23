@@ -260,6 +260,18 @@ fn test_compress_stdin_tiny_input_passes_through() {
 }
 
 #[test]
+fn test_tiny_output_repeated_comes_back_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    for run in ["first", "second"] {
+        let o = run_with_db(&db, &["compress", "--cmd", "make"], Some("build ok in 2.1s\n"));
+        assert!(o.status.success(), "{run}");
+        assert_eq!(stdout(&o), "build ok in 2.1s\n", "{run}");
+        assert_eq!(stderr(&o), "", "{run}");
+    }
+}
+
+#[test]
 fn test_compress_takes_a_label_that_starts_with_a_dash() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("sqz.db");
