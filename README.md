@@ -199,12 +199,14 @@ After installing, `sqz doctor` checks the whole chain — binary, database,
 shell hook, which clients are detected vs actually routed through sqz, and
 whether anything was compressed recently — and prints the fix for each gap
 it finds. `sqz doctor --fix` applies those fixes. After upgrading sqz, run it
-once: it brings hooks and guidance an older version wrote up to date, removes
-hook files current sqz no longer uses and a project copy of hooks that
-`~/.claude/settings.json` already has, points hooks whose sqz binary is gone
-at the running one, and notes any hook that still runs a different sqz
-binary. `sqz uninstall` removes only sqz's own entries, deletes a file only
-when nothing else is left in it, and ends by listing the files it kept.
+once: it brings hooks and guidance an older version wrote up to date, deletes
+cached output current sqz never caches (sqz 2.1.1 and earlier cached short
+credential lines), removes hook files current sqz no longer uses and a
+project copy of hooks that `~/.claude/settings.json` already has, points
+hooks whose sqz binary is gone at the running one, and notes any hook that
+still runs a different sqz binary. `sqz uninstall` removes only sqz's own
+entries, deletes a file only when nothing else is left in it, and ends by
+listing the files it kept.
 Without a terminal to answer its prompt it needs `--yes`, like `sqz reset`.
 
 ### See what sqz would have saved, before installing any hook

@@ -238,9 +238,10 @@ leaves it alone and prints the entry to add by hand.
 Run `sqz doctor` afterwards to see what was configured for each client
 and which integration tier it is on. After upgrading sqz, run
 `sqz doctor --fix` once: it brings hooks and guidance an older version
-wrote up to date and points hooks whose sqz binary is gone at the running
-one. `sqz uninstall` removes only sqz's own entries and ends by listing the
-files it kept.
+wrote up to date, deletes cached output current sqz never caches (sqz
+2.1.1 and earlier cached short credential lines) and points hooks whose
+sqz binary is gone at the running one. `sqz uninstall` removes only sqz's
+own entries and ends by listing the files it kept.
 
 ## How It Works
 
