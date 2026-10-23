@@ -73,6 +73,7 @@ fn sqz(db: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output {
         .env("SQZ_DB_PATH", db)
         .env_remove("SQZ_NO_DEDUP")
         .env_remove("SQZ_NO_ABBREV")
+        .env_remove("SQZ_LOSSLESS")
         .env_remove("SQZ_CMD")
         .env("NO_COLOR", "1")
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })

@@ -76,6 +76,7 @@ fn run_with_db(db: &std::path::Path, args: &[&str], stdin: Option<&str>) -> Outp
         .env("SQZ_DB_PATH", db)
         .env_remove("SQZ_NO_DEDUP")
         .env_remove("SQZ_NO_ABBREV")
+        .env_remove("SQZ_LOSSLESS")
         .current_dir(workspace_root())
         .stdin(if stdin.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
         .stdout(std::process::Stdio::piped())
@@ -269,6 +270,38 @@ fn test_tiny_output_repeated_comes_back_whole() {
         assert_eq!(stdout(&o), "build ok in 2.1s\n", "{run}");
         assert_eq!(stderr(&o), "", "{run}");
     }
+}
+
+#[test]
+fn test_compress_lossless_keeps_every_json_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("sqz.db");
+    let json = format!(
+        r#"{{"request_id":"req_7f3a9c21","assignee":null,"tags":[],"notes":"","description":"{}"}}"#,
+        "Refund issued twice, do not refund again. ".repeat(20)
+    );
+    let flag = run_with_db(&db, &["compress", "--lossless", "--cmd", "curl"], Some(&json));
+    assert_eq!(stdout(&flag), json);
+    let positional = run_with_db(&db, &["compress", "--lossless", &json], None);
+    assert_eq!(stdout(&positional), json);
+
+    let env = Command::new(sqz_bin())
+        .args(["compress", "--cmd", "curl", "--no-cache"])
+        .env("SQZ_DB_PATH", &db)
+        .env("SQZ_LOSSLESS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(json.as_bytes())?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert_eq!(stdout(&env), json);
+    let lossy = run_with_db(&db, &["compress", "--cmd", "curl", "--no-cache"], Some(&json));
+    assert!(!stdout(&lossy).contains("req_7f3a9c21"), "{}", stdout(&lossy));
 }
 
 #[test]

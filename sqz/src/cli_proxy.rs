@@ -108,6 +108,9 @@ pub struct InterceptOptions {
     /// replaced, and the next `git checkout`/`cat` on it fails. See the
     /// regression test `abbreviator_opt_out_preserves_repeated_identifiers`.
     pub abbreviate: bool,
+    /// Serve the output as it came, apart from ANSI codes: no formatter,
+    /// pipeline stage or abbreviation runs. Repeats still come back as refs.
+    pub lossless: bool,
 }
 
 impl Default for InterceptOptions {
@@ -117,6 +120,7 @@ impl Default for InterceptOptions {
             // Default ON — matches upstream behaviour. Opt out per-call or
             // via SQZ_NO_ABBREV=1 when output contains paste-critical tokens.
             abbreviate: true,
+            lossless: false,
         }
     }
 }
@@ -124,10 +128,11 @@ impl Default for InterceptOptions {
 impl InterceptOptions {
     /// Build an `InterceptOptions` reflecting the current environment.
     ///
-    /// Reads two env vars, both following the same "any non-empty, non-`0`
+    /// Reads three env vars, all following the same "any non-empty, non-`0`
     /// value is true" rule the rest of sqz uses:
     ///   * `SQZ_NO_DEDUP=1`  → `no_cache = true`
     ///   * `SQZ_NO_ABBREV=1` → `abbreviate = false`
+    ///   * `SQZ_LOSSLESS=1`  → `lossless = true`
     ///
     /// Everything else keeps its [`Default`] (dedup on, abbreviation on),
     /// so a bare environment yields the historical behaviour unchanged.
@@ -139,6 +144,7 @@ impl InterceptOptions {
         Self {
             no_cache: env_true("SQZ_NO_DEDUP"),
             abbreviate: !env_true("SQZ_NO_ABBREV"),
+            lossless: env_true("SQZ_LOSSLESS"),
         }
     }
 }
@@ -320,6 +326,23 @@ impl CliProxy {
                     return hit.inline_ref;
                 }
             }
+        }
+
+        // Step 2c: lossless, the output as it came, stored for dedup.
+        if opts.lossless {
+            return match self.engine.compress_lossless(output) {
+                Ok(compressed) => {
+                    if !self.engine.never_store(output) {
+                        let _ = self.engine.cache_manager().store_compressed(output.as_bytes(), &compressed);
+                    }
+                    self.l1_cache.borrow_mut().insert(fast_hash);
+                    compressed.data
+                }
+                Err(e) => {
+                    eprintln!("[sqz] fallback: compression error for command '{cmd}': {e}");
+                    output.to_owned()
+                }
+            };
         }
 
         // Step 3: Try per-command formatter. Same net-win gate as the
@@ -912,7 +935,7 @@ mod tests {
         let log: String = (0..300)
             .map(|i| format!("2026-10-06T12:{:02}:{:02}Z INFO request served path=/health status=200 latency_ms={}\n", i / 60, i % 60, i % 7))
             .collect();
-        let opts = InterceptOptions { no_cache: false, abbreviate: false };
+        let opts = InterceptOptions { no_cache: false, abbreviate: false, ..InterceptOptions::default() };
         let result = proxy.intercept_output_with_options("tail -300 server.log", &log, opts);
         assert!(result.contains("[full output: sqz expand "), "{result}");
         let stats = proxy.engine.session_store().compression_stats().unwrap();
@@ -1022,6 +1045,15 @@ mod tests {
             Some(sqz_engine::ExpandResult::Original { bytes, .. }) => assert_eq!(bytes, json.as_bytes()),
             other => panic!("expected the original, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lossless_output_keeps_every_json_field_and_repeats_still_dedup() {
+        let (proxy, _dir) = isolated_proxy();
+        let json = api_response_json();
+        let opts = InterceptOptions { lossless: true, ..InterceptOptions::default() };
+        assert_eq!(proxy.intercept_output_with_options("curl", &json, opts), json);
+        assert!(proxy.intercept_output_with_options("curl", &json, opts).starts_with("§ref:"));
     }
 
     #[test]
@@ -1202,7 +1234,7 @@ mod tests {
         let tag = unique_sha();
         // Short unique prose: nothing here compresses meaningfully.
         let output = format!("one unique diagnostic line mentioning {tag} and nothing else\n");
-        let opts = InterceptOptions { no_cache: true, abbreviate: true };
+        let opts = InterceptOptions { no_cache: true, abbreviate: true, ..InterceptOptions::default() };
         let result = proxy.intercept_output_with_options("build", &output, opts);
         assert_eq!(result, output, "sub-threshold savings must pass through verbatim");
     }
@@ -1297,7 +1329,7 @@ mod tests {
              Resolving dependencies for revision {sha} in module-d\n"
         );
 
-        let opts = InterceptOptions { no_cache: false, abbreviate: false };
+        let opts = InterceptOptions { no_cache: false, abbreviate: false, ..InterceptOptions::default() };
         let result = proxy.intercept_output_with_options("build", &output, opts);
 
         // Unique content ⇒ first intercept is a cache MISS, so no §ref.

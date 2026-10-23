@@ -168,6 +168,15 @@ enum Command {
         /// uses so the agent can flip the switch without re-invoking sqz.
         #[arg(long)]
         no_abbrev: bool,
+        /// Keep the output as it came, apart from ANSI color codes: no
+        /// formatter, JSON stage, truncation or abbreviation. Repeats still
+        /// come back as a `§ref:HASH§`.
+        ///
+        /// Also honoured via `SQZ_LOSSLESS=1` in the environment, for
+        /// sessions where every field matters (API debugging, data
+        /// contracts).
+        #[arg(long)]
+        lossless: bool,
     },
 
     /// Expand a `§ref:PREFIX§` dedup token back to the content it points at.
@@ -507,8 +516,8 @@ fn main() {
 
         Some(Command::Init { yes, global, only, skip, ci }) => cmd_init(yes, global, only, skip, ci),
         Some(Command::Doctor { fix }) => std::process::exit(doctor::run(fix)),
-        Some(Command::Compress { text, mode, verify, no_cache, cmd, no_abbrev }) => {
-            cmd_compress(text, &mode, verify, no_cache, cmd, no_abbrev)
+        Some(Command::Compress { text, mode, verify, no_cache, cmd, no_abbrev, lossless }) => {
+            cmd_compress(text, &mode, verify, no_cache, cmd, no_abbrev, lossless)
         }
         Some(Command::Expand { prefix }) => cmd_expand(&prefix),
         Some(Command::Recall { query, limit }) => cmd_recall(&query.join(" "), limit),
@@ -1236,7 +1245,7 @@ fn remove_rules_file(path: &std::path::Path) {
 /// and cmd.exe). Legacy `SQZ_CMD=NAME` env var is still honoured for
 /// backward compatibility with the POSIX shell hook scripts. `--cmd`
 /// wins if both are set.
-fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: bool, cmd: Option<String>, no_abbrev: bool) {
+fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: bool, cmd: Option<String>, no_abbrev: bool, lossless: bool) {
     let is_stdin = text.is_none();
     // Hook rewrites append the command's exit status as a trailer;
     // strip it and re-raise it as our own exit code on every path out.
@@ -1292,6 +1301,7 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
     let opts = cli_proxy::InterceptOptions {
         no_cache: no_cache || env_opts.no_cache,
         abbreviate: !no_abbrev && env_opts.abbreviate,
+        lossless: lossless || env_opts.lossless,
     };
 
     // When reading from stdin in auto mode (the shell hook path), route
@@ -1336,6 +1346,7 @@ fn cmd_compress(text: Option<String>, mode: &str, show_verify: bool, no_cache: b
 
     // Apply mode override if specified
     let result = match cli_proxy::catch_panic(|| match mode {
+        _ if opts.lossless => engine.compress_lossless(&input),
         "safe" => {
             if engine.route_compression_mode(&input) == sqz_engine::CompressionMode::Safe {
                 eprintln!("[sqz] mode: safe (preserving all content)");
