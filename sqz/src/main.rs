@@ -127,7 +127,9 @@ enum Command {
         /// Compression mode: safe (no JSON field stages), default (balanced), aggressive (max reduction).
         #[arg(long, default_value = "auto")]
         mode: String,
-        /// Show verifier confidence score alongside token reduction.
+        /// Show the verifier's score alongside token reduction: the share
+        /// of its structural checks (error lines, paths, numbers, top-level
+        /// JSON keys) that passed, not proof that every value was kept.
         #[arg(long)]
         verify: bool,
         /// Bypass the dedup cache entirely — never emit a `§ref:HASH§`

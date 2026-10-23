@@ -34,7 +34,10 @@ by 10 points or more.
 
 **Verifier and safe mode:**
 After every compression the verifier runs 7 checks (table below) and turns them into a
-confidence score. Below 0.6, sqz re-compresses the input with the safe preset. That re-run
+confidence score. The checks look at structure (error lines, paths, numbers, top-level JSON
+keys, diff hunks, identifiers), not at every value: the JSON stages drop nulls, empty values,
+bookkeeping ids and the tails of long strings by design, and output that lost them can still
+score 100%. Below 0.6, sqz re-compresses the input with the safe preset. That re-run
 skips the configured lossy JSON stages but still runs the generic stages (JSON projection,
 TOON encoding, and entropy truncation on long text), so it does not keep everything; on the
 shell hook the original is cached, and when segments were dropped a
