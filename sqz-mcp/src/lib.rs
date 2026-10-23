@@ -527,8 +527,10 @@ impl McpServer {
                 if lossy && !self.engine.never_store(text) {
                     let hash = sqz_engine::CacheManager::sha256_hex(text.as_bytes());
                     let data = format!("{}\n[full output: call expand with prefix \"{}\"]", output.data, &hash[..16]);
-                    let tokens = self.engine.count_tokens(&data);
-                    (data, tokens)
+                    match self.engine.count_tokens(&data) {
+                        cost if cost < tokens => (data, cost),
+                        _ => (text.to_string(), tokens),
+                    }
                 } else {
                     (output.data, output.tokens_compressed)
                 }
@@ -1979,6 +1981,21 @@ mod tests {
 
         let expanded = call(&mut server, "expand", serde_json::json!({ "prefix": &hash[..16] }));
         assert_eq!(expanded.output, format!("[sqz:expand hash={hash}]\n{text}"));
+    }
+
+    #[test]
+    fn test_compress_tool_sends_small_json_as_it_came() {
+        let (mut server, _dir) = make_server();
+        let text = r#"{"order_id":"ord_8812","assignee":null,"status":"failed"}"#;
+        let resp = server
+            .handle_tool_call(ToolCallRequest {
+                tool_id: "compress".to_string(),
+                input: serde_json::json!({ "text": text }),
+                intent: None,
+            })
+            .unwrap();
+        assert_eq!(resp.output, text);
+        assert_eq!(resp.tokens_compressed, resp.tokens_original);
     }
 
     fn high_risk_texts() -> Vec<(&'static str, String)> {
