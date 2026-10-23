@@ -26,16 +26,16 @@ Facts are chosen for what an agent needs to act, not for what sqz happens to kee
 
 ## Results
 
-sqz main after 1.9.0, October 2026, default settings (dedup on, abbreviation on).
+sqz main after 2.1.1, October 2026, default settings (dedup on, abbreviation on).
 
 | Fixture | Command | Tokens in | Tokens out | Reduction | Facts kept | Noise dropped | Recovery |
 |---|---|---:|---:|---:|---:|---:|---|
 | grep, 45 matches in 3 files | `grep -rn compute_fee src tests` | 667 | 479 | 28.2% | 48/48 | n/a | byte-exact |
 | find, 80 files | `find . -name '*.py'` | 515 | 515 | 0.0% | 80/80 | n/a | byte-exact |
 | ls -la, 40 entries | `ls -la reports` | 592 | 592 | 0.0% | 40/40 | n/a | byte-exact |
-| kubectl get pods -o json | `kubectl get pods -o json` | 1671 | 627 | 62.5% | 13/13 | n/a | byte-exact |
+| kubectl get pods -o json | `kubectl get pods -o json` | 1671 | 638 | 61.8% | 13/13 | n/a | byte-exact |
 | kubectl apply with an error | `kubectl apply -f k8s/` | 89 | 89 | 0.0% | 3/3 | 0/1 | byte-exact |
-| aws ec2 describe-instances, 40 | `aws ec2 describe-instances` | 4693 | 1412 | 69.9% | 80/80 | n/a | byte-exact |
+| aws ec2 describe-instances, 40 | `aws ec2 describe-instances` | 4693 | 1423 | 69.7% | 80/80 | n/a | byte-exact |
 | gh pr view --json | `gh pr view 214 --json title,body,comments,files` | 109 | 109 | 0.0% | 4/4 | n/a | byte-exact |
 | gh pr diff | `gh pr diff 214` | 294 | 205 | 30.3% | 4/4 | n/a | byte-exact |
 | terraform plan | `terraform plan` | 159 | 103 | 35.2% | 3/3 | 1/1 | byte-exact |
@@ -50,12 +50,12 @@ sqz main after 1.9.0, October 2026, default settings (dedup on, abbreviation on)
 | npm install | `npm install` | 161 | 39 | 75.8% | 4/4 | 2/2 | byte-exact |
 | kubectl get pods | `kubectl get pods` | 183 | 183 | 0.0% | 10/10 | n/a | byte-exact |
 | docker ps | `docker ps` | 193 | 79 | 59.1% | 6/6 | 1/1 | byte-exact |
-| JSON API response | `curl https://api.example.com/v1/orders/ord_8812` | 129 | 130 | -0.8% | 11/11 | 1/1 | byte-exact |
+| JSON API response | `curl https://api.example.com/v1/orders/ord_8812` | 129 | 129 | 0.0% | 11/11 | 0/1 | byte-exact |
 | app log with repeats | `tail -n 200 app.log` | 1025 | 135 | 86.8% | 3/3 | 2/2 | byte-exact |
 | source file read | `cat src/billing/refund.py` | 221 | 221 | 0.0% | 5/5 | n/a | byte-exact |
 | python traceback | `python app.py` | 82 | 82 | 0.0% | 4/4 | n/a | passthrough, never cached |
 | dotenv with secrets | `cat .env` | 78 | 78 | 0.0% | 4/4 | n/a | passthrough, never cached |
-| **Aggregate** | | **12,264** | **5,932** | **51.6%** | **359/359** | | |
+| **Aggregate** | | **12,264** | **5,953** | **51.5%** | **359/359** | | |
 
 Regression gates enforced by the test: 100% fact recall on every fixture, output identical to the input (up to trailing whitespace) for the `git show rev:path`, traceback and secrets fixtures, byte-exact recovery for everything else, no persistence of the traceback and secrets fixtures, and at least 40% aggregate reduction across the other fixtures.
 
@@ -68,11 +68,10 @@ The 0.0% rows are deliberate and are the point of the benchmark. In each of them
 - **kubectl apply with an error, npm install failure.** A formatter's result is not used when it would lose a line that reports the failure (`Error from server`, `npm error`). The output then goes through the generic pipeline, which keeps error lines and here found less than 16 tokens to save.
 - **git show rev:path.** The `git show` formatter passes file contents through, and the pipeline treats them as source code, like the source file read below.
 - **git diff.** Every changed line is a fact. sqz's diff formatter found nothing safe to remove, and the generic pipeline agreed, so the output passed through untouched with no stats header. An earlier build reported this same fixture as a 15% reduction because it compared a BPE token count for the input against a bytes/4 estimate for the output. That mismatch inflated every pipeline-path number in `sqz stats` and is fixed.
+- **JSON API response.** Null stripping, flattening and TOON encoding cut the payload from 165 to 138 cl100k tokens. Compressed JSON also ends with a `[full output: sqz expand <prefix>]` line so the agent can get the dropped fields back, and here that line costs 20 tokens, which leaves 7 saved, under the gate.
 - **source file read.** An agent that runs `cat` on a file is usually about to edit it. The pipeline now detects source code and skips every line-dropping stage. Before this, the entropy truncator scored the imports and the `class` line as "low information" and removed them. The saving on file reads comes from dedup instead: the second read is 13 tokens.
 - **python traceback.** The `Traceback (most recent call last):` line followed by `File` lines routes it to safe mode, which passes it through unchanged at any size, a long chained traceback included. Like the dotenv fixture it is never written to the cache.
 - **dotenv.** The key assignments route it to safe mode, and credential lines pass through unchanged at any size. Safe-mode content is also never written to the cache on this path, which the test proves by checking that a repeat run does not produce a dedup reference.
-
-The **JSON API** row is the one where the agent sees more than the raw output. Null stripping, flattening and TOON encoding cut the payload from 165 to 138 cl100k tokens, enough to pass the net-win gate, but the `[sqz]` header line, which repeats the full `curl` URL, costs more than that saving, so the total in this table comes out one token larger.
 
 ## Regret: the metric that catches over-compression in the field
 
