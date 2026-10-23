@@ -40,7 +40,7 @@ bookkeeping ids and the tails of long strings by design, and output that lost th
 score 100%. Below 0.6, sqz re-compresses the input with the safe preset. That re-run
 skips the configured lossy JSON stages but still runs the generic stages (JSON projection,
 TOON encoding, and entropy truncation on long text), so it does not keep everything; on the
-shell hook the original is cached, and when segments were dropped a
+shell hook the original is cached, and when segments were dropped or JSON was re-encoded a
 `[full output: sqz expand ...]` line points at it. Stack traces, SQL migrations, PEM blocks
 and credential lines are routed to safe mode up front and pass through unchanged at any
 size; they are never cached. On the shell hook a per-command formatter may still summarize
